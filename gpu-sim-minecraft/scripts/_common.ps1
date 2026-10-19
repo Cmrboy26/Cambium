@@ -29,7 +29,8 @@ function Get-WorkflowPython {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     }
     foreach ($name in @('python', 'python3')) {
-        $found = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue
+        $found = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
         if ($found) { return $found.Source }
     }
     return 'python'
@@ -38,7 +39,7 @@ function Get-WorkflowPython {
 function Get-WorkflowTool {
     param([string] $Name)
 
-    $found = Get-Command $Name -ErrorAction SilentlyContinue
+    $found = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($found) { return $found.Source }
     if ($Name -in @('cmake', 'ctest') -and $env:ProgramFiles) {
         $installed = Join-Path $env:ProgramFiles "CMake/bin/$Name.exe"
