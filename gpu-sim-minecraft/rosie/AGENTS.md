@@ -80,11 +80,14 @@ scaling up.
 
 ## Dashboard And SSH Tunnel
 
-With a `cambium-sim` training job running, start `bash ./rosie/dashboard.sh`
+With a `cambium-sim` training job running, start
+`bash ./rosie/dashboard-connect.sh`
 from PowerShell in the local `gpu-sim-minecraft` directory (Git Bash must be
-installed and available as `bash`), or `bash rosie/dashboard.sh` from Git Bash.
+installed and available as `bash`), or `bash rosie/dashboard-connect.sh` from
+Git Bash.
 Connect to GlobalVPN first. The script finds the unique running training job,
-or accepts its ID as an argument when several are active.
+or selects one automatically when several share a working directory; pass the
+job ID when they use different working directories.
 It starts the read-only Python dashboard with `srun --jobid ... --overlap` on
 the allocated compute node, so it does not submit another job or request
 another node. Both the remote and local loopback ports are selected
@@ -92,11 +95,16 @@ automatically; the script prints and opens the local URL. Ctrl+C stops the
 dashboard step and tunnel, not the training job.
 
 The dashboard binds only to loopback and is reached through SSH `ProxyJump` via
-`dh-mgmt3.hpc.msoe.edu`; do not expose its port to the network. The local
-computer needs Git Bash, SSH and Python 3 (`python3` or `python`). Set
+the assigned `dh-mgmt1` through `dh-mgmt4` host; do not expose its port to the
+network. If `ROSIE_SSH_JUMP` is unset, the script derives the host when run on
+a Rosie management node; from a local computer it prompts for the node number
+(`1`-`4`) or full hostname (for example, `dh-mgmt1.hpc.msoe.edu`). The variable
+accepts either form. The local computer needs Git Bash, SSH and Python 3
+(`python3` or `python`). Set
 `ROSIE_SSH_USER` to specify/override the Rosie account, `ROSIE_SSH_JUMP` to
-override the jump target, or `ROSIE_JOB_ID` to select a training job without a
-positional argument. If SSH policy blocks direct
+avoid the host prompt, or `ROSIE_JOB_ID` to select a training job without a
+positional argument. The default SSH account appends `@ad.msoe.edu` to the local
+username. If SSH policy blocks direct
 compute-node access through `ProxyJump`, use the site's approved tunneling
 method.
 
