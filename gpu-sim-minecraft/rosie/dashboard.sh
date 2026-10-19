@@ -11,14 +11,24 @@ if [[ "$#" -gt 1 ]]; then
     exit 2
 fi
 
-for tool in ssh python3; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        printf 'ERROR: %s is required on this computer.\n' "$tool" >&2
-        exit 1
-    fi
-done
+if ! command -v ssh >/dev/null 2>&1; then
+    printf 'ERROR: ssh is required on this computer.\n' >&2
+    exit 1
+fi
+if command -v python3 >/dev/null 2>&1; then
+    LOCAL_PYTHON="python3"
+elif command -v python >/dev/null 2>&1; then
+    LOCAL_PYTHON="python"
+else
+    printf 'ERROR: Python 3 is required on this computer.\n' >&2
+    exit 1
+fi
 
-SSH_USER="${ROSIE_SSH_USER:-${USER:?USER is not set}}"
+SSH_USER="${ROSIE_SSH_USER:-${USER:-${USERNAME:-}}}"
+if [[ -z "$SSH_USER" ]]; then
+    printf 'ERROR: Set ROSIE_SSH_USER to your Rosie SSH account.\n' >&2
+    exit 1
+fi
 SSH_JUMP="${ROSIE_SSH_JUMP:-${SSH_USER}@dh-mgmt3.hpc.msoe.edu}"
 JOB_ID="${1:-${ROSIE_JOB_ID:-}}"
 LOG_FILE="$(mktemp)"
@@ -78,7 +88,7 @@ REMOTE
 )"
 IFS=$'\t' read -r JOB_ID NODE WORK_DIR <<< "$REMOTE_INFO"
 
-LOCAL_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+LOCAL_PORT="$("$LOCAL_PYTHON" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 PYTHON_PATH="$WORK_DIR/.venv-rosie/bin/python"
 RUNS_DIR="$WORK_DIR/simulator/training/runs"
 printf -v REMOTE_INNER 'cd %q && module load StdEnv && exec srun --jobid=%q --overlap --nodes=1 --ntasks=1 --cpus-per-task=1 %q -B -m simulator.training.dashboard --runs-dir %q --port 0' \

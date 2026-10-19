@@ -24,12 +24,15 @@ tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 
 ## Dashboard
 
-With a training job running, run this from a local Bash terminal while connected
-to GlobalVPN:
+With a training job running and GlobalVPN connected, run this from the
+`gpu-sim-minecraft` directory. In PowerShell, Git Bash must be installed and
+available as `bash`:
 
-```sh
-bash rosie/dashboard.sh
+```powershell
+bash ./rosie/dashboard.sh
 ```
+
+In a Git Bash terminal, use `bash rosie/dashboard.sh` instead.
 
 The script finds the running `cambium-sim` job, starts the read-only dashboard
 as an overlapping step on its compute node, chooses both ports automatically,

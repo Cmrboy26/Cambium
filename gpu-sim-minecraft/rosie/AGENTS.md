@@ -80,9 +80,11 @@ scaling up.
 
 ## Dashboard And SSH Tunnel
 
-With a `cambium-sim` training job running, start `bash rosie/dashboard.sh` from
-the local checkout while connected to GlobalVPN. The script finds the unique
-running training job, or accepts its ID as an argument when several are active.
+With a `cambium-sim` training job running, start `bash ./rosie/dashboard.sh`
+from PowerShell in the local `gpu-sim-minecraft` directory (Git Bash must be
+installed and available as `bash`), or `bash rosie/dashboard.sh` from Git Bash.
+Connect to GlobalVPN first. The script finds the unique running training job,
+or accepts its ID as an argument when several are active.
 It starts the read-only Python dashboard with `srun --jobid ... --overlap` on
 the allocated compute node, so it does not submit another job or request
 another node. Both the remote and local loopback ports are selected
@@ -91,9 +93,10 @@ dashboard step and tunnel, not the training job.
 
 The dashboard binds only to loopback and is reached through SSH `ProxyJump` via
 `dh-mgmt3.hpc.msoe.edu`; do not expose its port to the network. The local
-computer needs Bash, SSH and Python 3. Set `ROSIE_SSH_USER` to override the
-account, `ROSIE_SSH_JUMP` to override the jump target, or `ROSIE_JOB_ID` to
-select a training job without a positional argument. If SSH policy blocks direct
+computer needs Git Bash, SSH and Python 3 (`python3` or `python`). Set
+`ROSIE_SSH_USER` to specify/override the Rosie account, `ROSIE_SSH_JUMP` to
+override the jump target, or `ROSIE_JOB_ID` to select a training job without a
+positional argument. If SSH policy blocks direct
 compute-node access through `ProxyJump`, use the site's approved tunneling
 method.
 
