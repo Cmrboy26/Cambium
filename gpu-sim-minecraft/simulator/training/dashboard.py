@@ -163,8 +163,8 @@ def main(argv=None):
     parser.add_argument("--run", type=Path, action="append", default=[], help="Additional run directory; repeatable")
     parser.add_argument("--port", type=int, default=8767)
     options = parser.parse_args(argv)
-    if not 1 <= options.port <= 65535:
-        parser.error("Port must be between 1 and 65535")
+    if not 0 <= options.port <= 65535:
+        parser.error("Port must be between 0 and 65535")
     for path in options.run:
         if not path.is_dir():
             parser.error(f"Run directory does not exist: {path}")

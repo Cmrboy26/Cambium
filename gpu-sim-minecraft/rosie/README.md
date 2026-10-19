@@ -24,15 +24,19 @@ tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 
 ## Dashboard
 
-Start the dashboard as a separate job:
+With a training job running, run this from a local Bash terminal while connected
+to GlobalVPN:
 
 ```sh
-sbatch rosie/dashboard.sbatch
-tail -f rosie/logs/dashboard-<JOB_ID>.out
+bash rosie/dashboard.sh
 ```
 
-Connect to GlobalVPN, run the SSH tunnel command printed in the log, and open
-`http://127.0.0.1:8768`. Stop the dashboard with `scancel <JOB_ID>`.
+The script finds the running `cambium-sim` job, starts the read-only dashboard
+as an overlapping step on its compute node, chooses both ports automatically,
+and opens the local URL. Pass a job ID when multiple training jobs are running:
+`bash rosie/dashboard.sh <JOB_ID>`. Press Ctrl+C to stop the dashboard and
+tunnel; no separate dashboard allocation is submitted.
 
 See [AGENTS.md](AGENTS.md) for GPU selection, experiment options, output paths,
-tunneling details, and local Linux checks.
+tunneling details, and local Linux checks. Set `ROSIE_SSH_USER` or
+`ROSIE_SSH_JUMP` to override the SSH account or jump host.

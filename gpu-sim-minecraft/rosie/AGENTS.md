@@ -80,23 +80,22 @@ scaling up.
 
 ## Dashboard And SSH Tunnel
 
-`dashboard.sbatch` requests one CPU, 2 GB, and eight hours by default. It reads
-`simulator/training/runs` and binds only to `127.0.0.1:8767`. The job log prints
-an SSH `ProxyJump` command using `dh-mgmt3.hpc.msoe.edu` and the allocated compute
-node. On the local machine, connect to GlobalVPN, run the printed command, and
-open `http://127.0.0.1:8768`; local 8768 forwards to remote 8767. It is not
-necessary to expose an unauthenticated dashboard port to the network.
+With a `cambium-sim` training job running, start `bash rosie/dashboard.sh` from
+the local checkout while connected to GlobalVPN. The script finds the unique
+running training job, or accepts its ID as an argument when several are active.
+It starts the read-only Python dashboard with `srun --jobid ... --overlap` on
+the allocated compute node, so it does not submit another job or request
+another node. Both the remote and local loopback ports are selected
+automatically; the script prints and opens the local URL. Ctrl+C stops the
+dashboard step and tunnel, not the training job.
 
-- `LOCAL_DASHBOARD_PORT`: local tunnel port printed in the command; default 8768.
-- `DASHBOARD_PORT`: dashboard's remote loopback port; default 8767.
-- `SIM_RUNS_DIR`: runs directory to display; default `simulator/training/runs`.
-- `ROSIE_SSH_JUMP`: override the default management-host jump target if needed.
-- `ROSIE_SSH_USER`: override the SSH account prefix printed by the job.
-
-Logs use `rosie/logs/dashboard-<JOB_ID>.out` and `.err`. Ctrl+C while tailing a
-log only stops `tail`; stop the service with `scancel <JOB_ID>`. If SSH policy
-blocks direct compute-node access through `ProxyJump`, use the site's approved
-tunneling method.
+The dashboard binds only to loopback and is reached through SSH `ProxyJump` via
+`dh-mgmt3.hpc.msoe.edu`; do not expose its port to the network. The local
+computer needs Bash, SSH and Python 3. Set `ROSIE_SSH_USER` to override the
+account, `ROSIE_SSH_JUMP` to override the jump target, or `ROSIE_JOB_ID` to
+select a training job without a positional argument. If SSH policy blocks direct
+compute-node access through `ProxyJump`, use the site's approved tunneling
+method.
 
 ## Local Linux Checks
 
