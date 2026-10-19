@@ -162,6 +162,7 @@ requirements. [Authentication, caching and protocol](../rosie/AGENTS.md#local-ar
 | Parameter | Purpose / default |
 | --- | --- |
 | `-Setup` | Save game configuration; prompt for missing host/account |
+| `-Connect` | Authenticate in the local terminal; keep one SSH connection open for Minecraft; incompatible with `-Setup`/`-Offline` |
 | `-Action` | `runs` (default), `replays`, `replay`, `sync`, `duel` |
 | `-Run` | Run basename or `latest` (newest saved, not best) |
 | `-Replay` | Replay basename or `latest` |
@@ -174,6 +175,9 @@ requirements. [Authentication, caching and protocol](../rosie/AGENTS.md#local-ar
 | `-DryRun` | Preview only; no config, transfer or process; setup needs a host |
 
 Terminal `replay` prints the downloaded path; it does not issue Minecraft commands.
+Password users first run `-Connect`, enter SSH credentials only in that terminal,
+and leave it open. Minecraft and other launcher terminals reuse its tunnel;
+Ctrl+C disconnects. Existing key/agent users can omit this step.
 Terminal `duel` stays running and prints its automatically selected port; use
 `/simduel arena <port>`, then `/simduel join`. Ctrl+C stops inference. In-game
 commands perform these handoffs automatically. `sync` downloads every replay

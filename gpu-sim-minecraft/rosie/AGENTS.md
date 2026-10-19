@@ -115,30 +115,50 @@ it does not start a Rosie job or modify the remote installation. The account,
 management host/SSH alias, remote runs directory, local repository and selected
 Python executable are saved in game `config/cambium-rosie.json`. Use the local
 checkout and a Python environment with training requirements for duels. Re-run
-setup after moving the checkout or changing interpreters. No credentials are
-stored; use the local SSH agent or a configured key. Keep the config trusted:
+setup after moving the checkout or changing interpreters. No SSH passwords are
+stored. Keep the config trusted:
 the mod executes its Python interpreter from its repository directory.
 
-Connect GlobalVPN and verify normal `ssh -l <account> <management-host>` access
-first, including host-key verification. In-game requests use `BatchMode=yes`,
-a ten-second connect timeout and SSH keepalives. Interactive passwords, MFA
-prompts and passphrase entry are not supported in Minecraft; handle these through
-your site's approved key/agent/connection-reuse configuration in a terminal.
-Do not disable host-key checking. The selected `ssh` command/agent must be
-available to Minecraft's process, not only a separate terminal environment.
+Connect GlobalVPN. For password authentication, run
+`scripts/rosie-play.ps1 -Connect -MinecraftDirectory <game>` in a **local terminal**
+and leave it open. Python starts interactive native SSH (`BatchMode=no`) with
+terminal stderr; SSH handles passwords, MFA, key passphrases and host-key prompts
+directly through the terminal. Never enter credentials in Minecraft or store them
+in the config. Ctrl+C or SSH disconnection ends this session.
+
+One SSH connection forwards a local loopback port to a temporary, loopback-only
+Python artifact reader on the management node. An ephemeral bearer token protects
+the reader; it is bootstrapped over encrypted SSH stdin, never command arguments.
+The local port/token/connection fingerprint are atomically saved in game
+`config/cambium-rosie-session.json` (owner-only temp-file permissions on POSIX),
+not the SSH password. The descriptor is removed on normal shutdown. Other local
+helpers automatically use it and stream the original length/SHA-256 transfer
+protocol over the tunnel. The reader shuts down on SSH stdin EOF and only accepts
+the three read-only artifact operations under the configured run root. Do not
+share the session descriptor; it grants temporary artifact access.
+
+Stale connections fail with `-Connect` instructions rather than silently trying
+password-less SSH again. Close the old connection before changing setup settings.
+With no descriptor, existing key/agent use still opens noninteractive SSH
+(`BatchMode=yes`) per request, with a ten-second connect timeout and keepalives.
+The SSH command/agent must then be available to Minecraft's process. Offline
+mode ignores the descriptor. Do not disable host-key checking.
 
 The default remote root is
 `~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs`; override with
 `-RemoteRunsDirectory` at setup. SSH runs a bundled, standard-library Python 3
 artifact reader on the management host. Only saved files are read, not training
-or inference. No public port, file server or active SLURM allocation is needed.
-This assumes that the run root is visible on that management host. Custom
+or inference. No public port or active SLURM allocation is needed. The password-
+session reader runs only while `-Connect` is open; key-based requests run the
+reader separately per operation. This assumes that the run root is visible on
+that management host. Custom
 `SIM_REPLAY_DIR` locations must be collected into the run's `replays` directory
 before using this launcher.
 
 The helper is `python -B -m simulator.training.rosie <action>
---minecraft-directory <game>`; actions are `setup`, `runs`, `replays`, `replay`,
-`sync`, `duel`. `--run` and `--replay` default to `latest`; `--offline` uses only
+--minecraft-directory <game>`; actions are `setup`, `connect`, `runs`, `replays`,
+`replay`, `sync`, `duel`. `connect` requires a terminal, not `--json`/`--offline`.
+`--run` and `--replay` default to `latest`; `--offline` uses only
 cached artifacts. `--json` emits newline-separated events for the mod. Run/replay
 basenames are limited to 120 ASCII letters, digits, dots, underscores or hyphens,
 starting with a letter/digit. Paths and remote arguments are encoded, not shell

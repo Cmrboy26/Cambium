@@ -7,10 +7,13 @@ Configure the in-game Rosie launcher, or sync artifacts and serve a local policy
 .\scripts\rosie-play.ps1 -Action replay -Run rosie-123
 .EXAMPLE
 .\scripts\rosie-play.ps1 -Action duel -Run rosie-123 -Offline
+.EXAMPLE
+.\scripts\rosie-play.ps1 -Connect
 #>
 [CmdletBinding()]
 param(
     [switch] $Setup,
+    [switch] $Connect,
     [ValidateSet('runs', 'replays', 'replay', 'sync', 'duel')][string] $Action = 'runs',
     [string] $Run = 'latest',
     [string] $Replay = 'latest',
@@ -25,6 +28,8 @@ param(
 
 . (Join-Path $PSScriptRoot '_common.ps1')
 
+if ($Setup -and $Connect) { throw 'Choose -Setup or -Connect, not both.' }
+if ($Connect -and $Offline) { throw '-Connect requires an online SSH connection.' }
 $game = Get-MinecraftGameDirectory $MinecraftDirectory
 $selectedPython = Get-WorkflowPython $Python
 $command = @('-u', '-B', '-m', 'simulator.training.rosie')
@@ -46,6 +51,8 @@ if ($Setup) {
     if ($SshUser -notmatch '@') { $SshUser += '@ad.msoe.edu' }
     $command += @('setup', '--minecraft-directory', $game, '--host', $SshHost,
         '--user', $SshUser, '--runs-directory', $RemoteRunsDirectory)
+} elseif ($Connect) {
+    $command += @('connect', '--minecraft-directory', $game)
 } else {
     $command += @($Action, '--minecraft-directory', $game, '--run', $Run, '--replay', $Replay)
     if ($Offline) { $command += '--offline' }
@@ -53,7 +60,8 @@ if ($Setup) {
 
 Invoke-WorkflowCommand $selectedPython $command -DryRun:$DryRun
 if ($Setup -and -not $DryRun) {
-    Write-Host "Verify VPN and SSH key/agent login locally: ssh -l `"$SshUser`" $SshHost"
+    Write-Host 'Password login: run .\scripts\rosie-play.ps1 -Connect in this terminal and leave it open.'
+    Write-Host "Optional key/agent login check: ssh -l `"$SshUser`" $SshHost"
     Write-Host 'In Minecraft: /simrosie runs, /simrosie replay <run>, /simrosie duel <run>'
-    Write-Host 'The mod uses noninteractive SSH; passwords and host-key prompts must be handled in your terminal first.'
+    Write-Host 'Enter SSH passwords and host-key confirmations only in the terminal, never Minecraft chat.'
 }

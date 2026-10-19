@@ -7,13 +7,17 @@ import json
 import os
 from pathlib import Path
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from simulator.training.rosie import REMOTE_SCRIPT, Rosie, configure, main, valid_name
+from simulator.training.rosie import (
+    REMOTE_SCRIPT, SESSION_SCRIPT, Rosie, configure, connect_terminal, connection_id,
+    main, session_path, session_response, valid_name,
+)
 
 
 class RosieTests(unittest.TestCase):
@@ -112,6 +116,96 @@ class RosieTests(unittest.TestCase):
         self.assertEqual(command[-2], "rosie-test")
         self.assertNotIn(str(self.remote), command[-1])
         self.assertIn("student@ad.msoe.edu", command)
+
+    def test_terminal_session_reuses_reader_and_requires_token(self):
+        configuration = {"runs_directory": str(self.remote), "token": "test-session-token", "port": 0,
+                         "reader": base64.b64encode(REMOTE_SCRIPT.encode()).decode()}
+        encoded = base64.b64encode(json.dumps(configuration).encode()).decode()
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen([sys.executable, "-u", "-c", SESSION_SCRIPT],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+            try:
+                process.stdin.write(encoded.encode() + b"\n")
+                process.stdin.flush()
+                ready = json.loads(process.stdout.readline())
+                session = {"port": ready["port"], "token": configuration["token"]}
+                with session_response(session, {"action": "runs"}) as response:
+                    self.assertEqual(json.load(response)[0]["name"], "rosie-123")
+                with session_response(session, {"action": "manifest", "run": "rosie-123"}) as response:
+                    self.assertIn("latest.pt", json.load(response)["files"])
+                with session_response(session, {"action": "fetch", "run": "rosie-123", "file": "latest.pt"}) as response:
+                    header = json.loads(response.readline())
+                    content = response.read()
+                    self.assertEqual(header["size"], len(content))
+                    self.assertEqual(content, (self.run / "latest.pt").read_bytes())
+                with self.assertRaisesRegex(RuntimeError, "Unauthorized"):
+                    with session_response({**session, "token": "incorrect"}):
+                        self.fail("Unauthenticated request succeeded")
+                with self.assertRaisesRegex(RuntimeError, "Unsupported"):
+                    with session_response(session, {"action": "shell"}):
+                        self.fail("Unexpected operation succeeded")
+                with session_response(session, {"action": "runs", "runs_directory": "/wrong-root"}) as response:
+                    self.assertEqual(json.load(response)[0]["name"], "rosie-123")
+                session["connection_id"] = connection_id(self.rosie.configuration)
+                session_path(self.game).write_text(json.dumps(session), encoding="utf-8")
+                connected = Rosie(self.game)
+                with patch.object(connected, "ssh_command", side_effect=AssertionError("new SSH connection")):
+                    self.assertEqual(connected.select("latest"), "rosie-123")
+                    manifest = connected.manifest("rosie-123")
+                    checkpoint = connected.checkpoint("rosie-123", manifest)
+                    self.assertEqual(checkpoint.read_bytes(), (self.run / "latest.pt").read_bytes())
+                    self.assertEqual(connected.replay("rosie-123", manifest).read_bytes(), b'{"frame":0}\n')
+                self.assertIsNone(Rosie(self.game, offline=True).session)
+            finally:
+                process.stdin.close()
+                try:
+                    process.wait(timeout=5)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    process.stdout.close()
+            self.assertEqual(process.returncode, 0)
+
+    def test_closed_terminal_connection_does_not_silently_fall_back_to_ssh(self):
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            descriptor = {"port": reserved.getsockname()[1], "token": "expired",
+                          "connection_id": connection_id(self.rosie.configuration)}
+            session_path(self.game).write_text(json.dumps(descriptor), encoding="utf-8")
+            connected = Rosie(self.game)
+            with patch.object(connected, "ssh_command", side_effect=AssertionError("password fallback")):
+                with self.assertRaisesRegex(RuntimeError, "-Connect"):
+                    connected.runs()
+
+    def test_terminal_connect_uses_interactive_ssh_and_cleans_descriptor(self):
+        observed = []
+        def wait(timeout=None):
+            observed.append(json.loads(session_path(self.game).read_text(encoding="utf-8")))
+            return 0
+
+        with patch("sys.stdin.isatty", return_value=True), patch("simulator.training.rosie.secrets.randbelow", return_value=10000), \
+                patch("simulator.training.rosie.session_response", return_value=contextlib.nullcontext()), \
+                patch("simulator.training.rosie.subprocess.Popen") as spawn, contextlib.redirect_stdout(io.StringIO()):
+            spawn.return_value.stdout.readline.return_value = b'{"ready":true,"port":30000}\n'
+            spawn.return_value.wait.side_effect = wait
+            connect_terminal(self.game)
+        command = spawn.call_args.args[0]
+        self.assertIn("BatchMode=no", command)
+        self.assertIn("ExitOnForwardFailure=yes", command)
+        self.assertIn("-L", command)
+        self.assertNotIn("stderr", spawn.call_args.kwargs)
+        self.assertTrue(observed)
+        self.assertEqual(set(observed[0]), {"port", "token", "connection_id"})
+        self.assertNotIn(observed[0]["token"], " ".join(command))
+        payload = spawn.return_value.stdin.write.call_args.args[0]
+        self.assertEqual(json.loads(base64.b64decode(payload))["token"], observed[0]["token"])
+        self.assertFalse(session_path(self.game).exists())
+
+    def test_terminal_connect_rejects_nonterminal_invocation(self):
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaisesRegex(ValueError, "not in Minecraft"):
+                connect_terminal(self.game)
 
     def test_setup_keeps_virtual_environment_interpreter_path(self):
         interpreter = self.root / "venv" / "bin" / "python"

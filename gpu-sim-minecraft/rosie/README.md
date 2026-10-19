@@ -30,11 +30,13 @@ With GlobalVPN connected, configure your Minecraft game folder once:
 
 ```powershell
 .\scripts\rosie-play.ps1 -Setup -MinecraftDirectory 'C:\path\to\game' -SshHost 2 -SshUser reissmannc
-ssh -l 'reissmannc@ad.msoe.edu' dh-mgmt2.hpc.msoe.edu
+.\scripts\rosie-play.ps1 -Connect -MinecraftDirectory 'C:\path\to\game'
 ```
 
-Use your assigned management node. Verify its host key and set up SSH key/agent
-login in the terminal first; the in-game helper cannot answer password prompts.
+Use your assigned management node. Enter the SSH password and any host-key
+confirmation **in the local terminal**, then leave that terminal open. Minecraft
+reuses this connection; the password is not stored or entered in chat. Ctrl+C
+disconnects. With working key/agent authentication, `-Connect` is optional.
 In a private, disposable singleplayer world:
 
 ```text

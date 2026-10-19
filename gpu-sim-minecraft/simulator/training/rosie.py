@@ -2,15 +2,20 @@
 
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
+from http.client import HTTPConnection, HTTPException
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
+from textwrap import dedent
 
 
 CONFIG_NAME = "cambium-rosie.json"
@@ -98,6 +103,104 @@ else:
         raise ValueError("Unknown artifact operation")
 '''
 
+SESSION_SCRIPT = dedent(r'''
+    import base64, hmac, json, subprocess, sys, tempfile, threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    configuration = json.loads(base64.b64decode(sys.stdin.buffer.readline(65536)))
+    reader = base64.b64decode(configuration["reader"]).decode()
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *arguments):
+            pass
+        def reply(self, status, value):
+            body = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def authorized(self):
+            return hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + configuration["token"])
+        def do_GET(self):
+            if not self.authorized():
+                self.reply(401, {"error": "Unauthorized"})
+            elif self.path == "/health":
+                self.reply(200, {"connected": True})
+            else:
+                self.reply(404, {"error": "Not found"})
+        def do_POST(self):
+            if not self.authorized():
+                self.reply(401, {"error": "Unauthorized"})
+                return
+            if self.path != "/artifact":
+                self.reply(404, {"error": "Not found"})
+                return
+            process = None
+            started = False
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 1 <= length <= 8192:
+                    raise ValueError("Invalid request length")
+                request = json.loads(self.rfile.read(length))
+                if request.get("action") not in ("runs", "manifest", "fetch"):
+                    raise ValueError("Unsupported artifact request")
+                request["runs_directory"] = configuration["runs_directory"]
+                encoded = base64.b64encode(json.dumps(request).encode()).decode()
+                with tempfile.TemporaryFile() as errors:
+                    process = subprocess.Popen([sys.executable, "-c", reader, encoded],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors)
+                    try:
+                        if request["action"] != "fetch":
+                            output, _ = process.communicate(timeout=90)
+                            if process.returncode:
+                                errors.seek(0)
+                                raise ValueError(errors.read(8192).decode(errors="replace"))
+                            self.reply(200, json.loads(output))
+                            return
+                        header = process.stdout.readline(8192)
+                        if not header:
+                            process.wait(timeout=10)
+                            errors.seek(0)
+                            raise ValueError(errors.read(8192).decode(errors="replace"))
+                        size = json.loads(header)["size"]
+                        if type(size) is not int or not 0 <= size <= 512 * 1024 * 1024:
+                            raise ValueError("Invalid transfer size")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("Content-Length", str(len(header) + size))
+                        self.end_headers()
+                        started = True
+                        self.wfile.write(header)
+                        remaining = size
+                        while remaining:
+                            chunk = process.stdout.read(min(remaining, 1024 * 1024))
+                            if not chunk:
+                                raise ValueError("Incomplete artifact transfer")
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                        if process.wait(timeout=30):
+                            raise ValueError("Artifact reader failed")
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+                        process.stdout.close()
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                if started:
+                    self.close_connection = True
+                else:
+                    self.reply(502, {"error": str(error)})
+    server = ThreadingHTTPServer(("127.0.0.1", configuration["port"]), Handler)
+    def watch_connection():
+        sys.stdin.buffer.read(1)
+        server.shutdown()
+    threading.Thread(target=watch_connection, daemon=True).start()
+    print(json.dumps({"ready": True, "port": server.server_port}), flush=True)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+    ''')
+
 
 def valid_name(value):
     if not isinstance(value, str) or not NAME.fullmatch(value):
@@ -107,6 +210,117 @@ def valid_name(value):
 
 def config_path(game):
     return Path(game).resolve() / "config" / CONFIG_NAME
+
+
+def session_path(game):
+    return config_path(game).with_name("cambium-rosie-session.json")
+
+
+def connection_id(configuration):
+    identity = {key: configuration[key] for key in ("ssh_host", "ssh_user", "runs_directory")}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def ssh_options(configuration, interactive=False):
+    return ["ssh", "-T", "-o", "BatchMode=no" if interactive else "BatchMode=yes",
+            "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2"]
+
+
+@contextmanager
+def session_response(session, request=None):
+    port = session["port"]
+    if type(port) is not int or not 1 <= port <= 65535 or not isinstance(session["token"], str):
+        raise ValueError("Invalid terminal connection descriptor; run scripts/rosie-play.ps1 -Connect again")
+    connection = HTTPConnection("127.0.0.1", port, timeout=90)
+    response = None
+    try:
+        headers = {"Authorization": "Bearer " + session["token"], "Content-Type": "application/json"}
+        connection.request("GET" if request is None else "POST", "/health" if request is None else "/artifact",
+                           None if request is None else json.dumps(request).encode(), headers)
+        response = connection.getresponse()
+        if response.status != 200:
+            raise RuntimeError("Rosie terminal connection failed: " + response.read(8192).decode(errors="replace"))
+        yield response
+    except (OSError, HTTPException) as error:
+        raise RuntimeError("Rosie terminal connection is unavailable. Run scripts/rosie-play.ps1 -Connect "
+                           "in a local terminal and leave it open. " + str(error)) from error
+    finally:
+        if response is not None:
+            response.close()
+        connection.close()
+
+
+def connect_terminal(game):
+    if not sys.stdin.isatty():
+        raise ValueError("Run scripts/rosie-play.ps1 -Connect in a local terminal; enter the SSH password there, not in Minecraft")
+    configuration = json.loads(config_path(game).read_text(encoding="utf-8-sig"))
+    descriptor = session_path(game)
+    if descriptor.is_file():
+        previous = json.loads(descriptor.read_text(encoding="utf-8"))
+        try:
+            with session_response(previous):
+                raise ValueError("A Rosie connection is already open for this game folder. Close it with Ctrl+C before reconnecting.")
+        except RuntimeError:
+            pass
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        local_port = listener.getsockname()[1]
+    remote_port = 20000 + secrets.randbelow(40000)
+    token = secrets.token_urlsafe(32)
+    request = {"runs_directory": configuration["runs_directory"], "token": token, "port": remote_port,
+               "reader": base64.b64encode(REMOTE_SCRIPT.encode()).decode()}
+    code = base64.b64encode(SESSION_SCRIPT.encode()).decode()
+    remote = "python3 -u -c " + shlex.quote("import base64;exec(base64.b64decode('" + code + "'))")
+    command = ssh_options(configuration, interactive=True) + ["-o", "ExitOnForwardFailure=yes", "-L",
+        f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}", "-l", configuration["ssh_user"],
+        "--", configuration["ssh_host"], remote]
+    print("Connecting to Rosie. Enter any SSH password, MFA or host-key confirmation in this terminal only.", flush=True)
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    input_stream = process.stdin
+    output_stream = process.stdout
+    if input_stream is None or output_stream is None:
+        process.kill()
+        process.wait()
+        raise RuntimeError("Could not open SSH connection pipes")
+    try:
+        input_stream.write(base64.b64encode(json.dumps(request).encode()) + b"\n")
+        input_stream.flush()
+        line = output_stream.readline(8192)
+        if not line:
+            raise RuntimeError("SSH connection failed; see the terminal's SSH error above. Verify VPN and your configured host/account.")
+        ready = json.loads(line)
+        if ready != {"ready": True, "port": remote_port}:
+            raise ValueError("Unexpected Rosie connection response")
+        session = {"port": local_port, "token": token, "connection_id": connection_id(configuration)}
+        with session_response(session):
+            pass
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=descriptor.parent, delete=False) as target:
+            temporary = Path(target.name)
+            try:
+                json.dump(session, target)
+                target.close()
+                temporary.replace(descriptor)
+            finally:
+                temporary.unlink(missing_ok=True)
+        print("Rosie connected. Minecraft can now use /simrosie runs, replay and duel.", flush=True)
+        print("Leave this terminal open. Ctrl+C disconnects; your password is not stored.", flush=True)
+        if process.wait():
+            raise RuntimeError("Rosie SSH connection closed; run -Connect again to reconnect")
+    finally:
+        try:
+            input_stream.close()
+        except BrokenPipeError:
+            pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        output_stream.close()
+        if descriptor.is_file():
+            saved = json.loads(descriptor.read_text(encoding="utf-8"))
+            if saved.get("token") == token:
+                descriptor.unlink()
 
 
 def configure(game, host, user, runs_directory):
@@ -129,6 +343,12 @@ class Rosie:
         self.configuration = json.loads(config_path(game).read_text(encoding="utf-8-sig"))
         self.cache = self.game / "sim-rosie-cache"
         self.offline = offline
+        self.session = None
+        descriptor = session_path(game)
+        if not offline and descriptor.is_file():
+            self.session = json.loads(descriptor.read_text(encoding="utf-8"))
+            if self.session.get("connection_id") != connection_id(self.configuration):
+                raise ValueError("Rosie connection settings changed. Close the old terminal connection and run scripts/rosie-play.ps1 -Connect again.")
 
     def ssh_command(self, action, **values):
         request = {"action": action, "runs_directory": self.configuration["runs_directory"], **values}
@@ -136,16 +356,45 @@ class Rosie:
         code = base64.b64encode(REMOTE_SCRIPT.encode()).decode()
         remote = "python3 -c " + shlex.quote("import base64;exec(base64.b64decode('" + code + "'))")
         remote += " " + shlex.quote(encoded)
-        return ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
-                "-l", self.configuration["ssh_user"], "--", self.configuration["ssh_host"], remote]
+        return ssh_options(self.configuration) + ["-l", self.configuration["ssh_user"],
+                                                  "--", self.configuration["ssh_host"], remote]
 
     def request(self, action, **values):
+        if self.session is not None:
+            with session_response(self.session, {"action": action, **values}) as response:
+                return json.load(response)
         result = subprocess.run(self.ssh_command(action, **values), capture_output=True, timeout=90)
         if result.returncode:
-            raise RuntimeError("Rosie SSH failed. Connect VPN and verify SSH key/agent login first. "
+            raise RuntimeError("Rosie SSH failed. For password login, run scripts/rosie-play.ps1 -Connect "
+                               "in a local terminal, enter the password there, and leave it open. "
                                + result.stderr.decode("utf-8", errors="replace").strip())
         return json.loads(result.stdout)
+
+    @contextmanager
+    def artifact_source(self, run, filename):
+        if self.session is not None:
+            with session_response(self.session, {"action": "fetch", "run": run, "file": filename}) as response:
+                yield response
+            return
+        with tempfile.TemporaryFile() as errors, subprocess.Popen(self.ssh_command("fetch", run=run, file=filename),
+                stdout=subprocess.PIPE, stderr=errors) as process:
+            output_stream = process.stdout
+            if output_stream is None:
+                process.kill()
+                raise RuntimeError("Could not open artifact download pipe")
+            try:
+                yield output_stream
+                if process.wait(timeout=30):
+                    raise ValueError("Artifact transfer failed")
+            except BaseException as error:
+                process.kill()
+                process.wait()
+                errors.seek(0)
+                detail = errors.read().decode("utf-8", errors="replace").strip()
+                if detail:
+                    raise RuntimeError("Rosie transfer failed. For password login, run scripts/rosie-play.ps1 -Connect "
+                                       "in a local terminal and leave it open. " + detail) from error
+                raise
 
     def runs(self):
         if self.offline:
@@ -188,35 +437,25 @@ class Rosie:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
         try:
-            with tempfile.TemporaryFile() as errors, tempfile.NamedTemporaryFile(
+            with tempfile.NamedTemporaryFile(
                     dir=destination.parent, prefix=".rosie-", suffix=".part", delete=False) as target:
                 temporary = Path(target.name)
-                with subprocess.Popen(self.ssh_command("fetch", run=run, file=filename),
-                                      stdout=subprocess.PIPE, stderr=errors) as process:
-                    try:
-                        header = json.loads(process.stdout.readline(8192))
-                        size = header["size"]
-                        if type(size) is not int or not 0 <= size <= MAX_FILE:
-                            raise ValueError("Invalid artifact size")
-                        digest = hashlib.sha256()
-                        remaining = size
-                        while remaining:
-                            chunk = process.stdout.read(min(remaining, 1024 * 1024))
-                            if not chunk:
-                                raise ValueError("Incomplete artifact transfer; retry sync")
-                            target.write(chunk)
-                            digest.update(chunk)
-                            remaining -= len(chunk)
-                        if process.stdout.read(1) or process.wait(timeout=30) or digest.hexdigest() != header["sha256"]:
-                            raise ValueError("Artifact transfer failed integrity check; retry sync")
-                    except BaseException as error:
-                        process.kill()
-                        process.wait()
-                        errors.seek(0)
-                        detail = errors.read().decode("utf-8", errors="replace").strip()
-                        if detail:
-                            raise RuntimeError("Rosie transfer failed: " + detail) from error
-                        raise
+                with self.artifact_source(run, filename) as source:
+                    header = json.loads(source.readline(8192))
+                    size = header["size"]
+                    if type(size) is not int or not 0 <= size <= MAX_FILE:
+                        raise ValueError("Invalid artifact size")
+                    digest = hashlib.sha256()
+                    remaining = size
+                    while remaining:
+                        chunk = source.read(min(remaining, 1024 * 1024))
+                        if not chunk:
+                            raise ValueError("Incomplete artifact transfer; retry sync")
+                        target.write(chunk)
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if source.read(1) or digest.hexdigest() != header["sha256"]:
+                        raise ValueError("Artifact transfer failed integrity check; retry sync")
             os.utime(temporary, ns=(header["mtime_ns"], header["mtime_ns"]))
             temporary.replace(destination)
             return destination
@@ -246,7 +485,7 @@ class Rosie:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "runs", "replays", "replay", "sync", "duel"))
+    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel"))
     parser.add_argument("--minecraft-directory", required=True)
     parser.add_argument("--run", default="latest")
     parser.add_argument("--replay", default="latest")
@@ -273,6 +512,11 @@ def main(argv=None):
                 raise ValueError("Setup requires --host and --user; use your assigned Rosie management host")
             path = configure(args.minecraft_directory, args.host, args.user, args.runs_directory)
             emit("configured", path=str(path))
+            return 0
+        if args.action == "connect":
+            if args.json or args.offline:
+                raise ValueError("Password login requires connect in a local terminal, without --json or --offline")
+            connect_terminal(args.minecraft_directory)
             return 0
         rosie = Rosie(args.minecraft_directory, args.offline)
         if args.action == "runs":
