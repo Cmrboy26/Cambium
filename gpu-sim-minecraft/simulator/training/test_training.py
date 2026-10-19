@@ -18,7 +18,7 @@ import torch
 
 from backend.fast_rl_model import ActorCritic
 from simulator.training.environment import (
-    DEFAULT_REWARD_WEIGHTS, Environment, REWARD_SEMANTICS, ROOT, SCHEMA, SCHEMA_V2, SHAPING_REWARD_NAMES,
+    DEFAULT_REWARD_WEIGHTS, Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, SCHEMA, SCHEMA_V2, SHAPING_REWARD_NAMES,
 )
 from simulator.training.contract import FEATURES, from_legacy, validate_contract, resolve_scenario
 from simulator.training.serve import Policy, make_server
@@ -759,6 +759,35 @@ class TrainingChecks(unittest.TestCase):
         advantages, returns = compute_gae(rewards, values, next_values, terminated, truncated, 1, 1)
         torch.testing.assert_close(advantages, torch.tensor([[3.5], [1.3]]))
         torch.testing.assert_close(returns, torch.tensor([[4.0], [2.0]]))
+
+    def test_step_reward_totals_masks_and_resets(self):
+        with Environment(2, max_ticks=1) as environment:
+            self.assertEqual(set(environment.step_reward_totals()), set(REWARD_NAMES))
+            self.assertEqual(sum(environment.step_reward_totals().values()), 0)
+            _, rewards, _, _ = environment.step(neutral(2))
+            snapshot = environment.reward_totals()
+            np.testing.assert_allclose(sum(environment.step_reward_totals().values()), rewards.sum(dtype=np.float64),
+                                       rtol=1e-6, atol=2e-5)
+            for world in range(2):
+                for player in range(2):
+                    selected = np.zeros((2, 2), dtype=bool)
+                    selected[world, player] = True
+                    np.testing.assert_allclose(sum(environment.step_reward_totals(selected).values()),
+                                               rewards[world, player], rtol=1e-6, atol=2e-5)
+            environment.reset(np.array([True, False]))
+            self.assertEqual(environment.reward_totals(), snapshot)
+            np.testing.assert_allclose(sum(environment.step_reward_totals().values()),
+                                       rewards[1].sum(dtype=np.float64), rtol=1e-6, atol=2e-5)
+            environment.reset()
+            self.assertEqual(sum(environment.step_reward_totals().values()), 0)
+            _, rewards, _, _ = environment.step(neutral(2))
+            np.testing.assert_allclose(sum(environment.step_reward_totals().values()), rewards.sum(dtype=np.float64),
+                                       rtol=1e-6, atol=2e-5)
+            for invalid in (np.zeros(2), np.full((2, 2), 0.5), np.full((2, 2), 2)):
+                with self.assertRaisesRegex(ValueError, "reward mask"):
+                    environment.step_reward_totals(invalid)
+            with mock.patch.object(environment.native, "mcsim_step_reward_totals", None):
+                self.assertIsNone(environment.step_reward_totals())
 
     def test_reward_totals_and_rollout_boundaries(self):
         with Environment(2, max_ticks=1) as environment:

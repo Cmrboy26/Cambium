@@ -188,6 +188,49 @@ void checkRewardWeights(int cuda) {
     std::cout << "PASS: finite curriculum reward replacement and legacy v1/v2 dimensions\n";
 }
 
+void checkStepRewardTotals(int cuda) {
+    const std::array<float, 6> weights{0, 0, 0, 0, -3, -7};
+    Handle handle(mcsim_create_schema(2, cuda, nullptr, 1, 1, weights.data(), 1), mcsim_destroy);
+    require(handle != nullptr, "create selected-player reward batch");
+    std::array<double, 12> totals{};
+    require(mcsim_step_reward_totals(handle.get(), nullptr, totals.data()) == 0,
+        "query initial step reward contributions");
+    for (double amount : totals) require(amount == 0, "initial reward contributions are zero");
+    std::array<int32_t, 24> actions{};
+    for (int player = 0; player < 4; ++player) {
+        actions[player * 6 + 4] = 4;
+        actions[player * 6 + 5] = 2;
+    }
+    std::array<float, 88> observations{};
+    std::array<float, 4> rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(),
+        terminated.data(), truncated.data()) == 0, "step selected-player reward batch");
+    const std::array<uint8_t, 4> selected{1, 0, 0, 1};
+    require(mcsim_step_reward_totals(handle.get(), selected.data(), totals.data()) == 0
+        && totals[4] == -6 && totals[5] == -14,
+        "reward mask selects one learner on either side of each world");
+    require(mcsim_step_reward_totals(handle.get(), nullptr, totals.data()) == 0
+        && totals[4] == -12 && totals[5] == -28, "null reward mask includes both players");
+    const std::array<uint8_t, 4> empty{};
+    require(mcsim_step_reward_totals(handle.get(), empty.data(), totals.data()) == 0,
+        "empty reward mask is valid");
+    for (double amount : totals) require(amount == 0, "empty reward selection has no contributions");
+    auto invalid = selected;
+    invalid[3] = 2;
+    totals.fill(42);
+    require(mcsim_step_reward_totals(handle.get(), invalid.data(), totals.data()) == -1,
+        "nonboolean reward mask rejected");
+    for (double amount : totals) require(amount == 42, "invalid reward mask leaves output untouched");
+    require(mcsim_step_reward_totals(nullptr, nullptr, totals.data()) == -1
+        && mcsim_step_reward_totals(handle.get(), nullptr, nullptr) == -1, "null reward arguments rejected");
+    const std::array<uint8_t, 2> reset{1, 0};
+    require(mcsim_reset(handle.get(), reset.data(), observations.data()) == 0
+        && mcsim_step_reward_totals(handle.get(), nullptr, totals.data()) == 0
+        && totals[4] == -6 && totals[5] == -14, "selective reset clears only selected worlds' last reward");
+    std::cout << "PASS: masked per-step reward breakdown with explicit reset and input validation\n";
+}
+
 void checkMaxTicks(int cuda) {
     const std::array<float, 6> weights{};
     Handle handle(mcsim_create_schema(1, cuda, nullptr, 1, 1, weights.data(), 1), mcsim_destroy);
@@ -293,6 +336,7 @@ int main(int argc, char** argv) {
         checkResetPlayers(argv[1], cuda);
         checkEmptySlots(argv[1], cuda);
         checkRewardWeights(cuda);
+        checkStepRewardTotals(cuda);
         checkMaxTicks(cuda);
         return 0;
     } catch (const std::exception& error) {

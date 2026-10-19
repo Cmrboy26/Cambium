@@ -3,8 +3,8 @@
   "version": 2,
   "name": "gear-curriculum",
   "seed": 42,
-  "policy": "../../policies/equipment-combat.json",
-  "environment": "../../tasks/gear-duel.json",
+  "policy": "../policies/equipment-combat.json",
+  "environment": "../environments/gear-duel.json",
   "learner": {"hidden_dim": 256, "lr": 0.0003, "epochs": 4, "minibatch_size": 1024},
   "opponents": {
     "stationary": {"type": "scripted", "controller": "stationary_target"},
@@ -17,7 +17,7 @@
   },
   "evaluations": {
     "held_out_combat": {
-      "environment": "../../tasks/gear-duel.json",
+      "environment": "../environments/gear-duel.json",
       "every_updates": 50, "episodes": 64, "seed": 1729,
       "opponents": "held_out"
     }

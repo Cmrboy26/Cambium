@@ -45,6 +45,7 @@ struct TrainingBatch {
     std::vector<std::uint8_t> dealt_damage;
     std::vector<std::uint64_t> episodes;
     std::vector<int> observed_opponent_disable;
+    std::vector<std::array<double, 12>> step_reward_totals;
     std::array<float, 6> weights;
     float block_weight = 0.0F;
     std::array<double, 7> reward_totals{};
@@ -74,6 +75,7 @@ struct TrainingBatch {
           players(std::size_t(count) * 2),
           queued(players.size()), held(players.size()), selected_slots(players.size()), worlds(count), blocks(count, terrain.blocks),
           finished(count), dealt_damage(players.size()), episodes(count), observed_opponent_disable(players.size()),
+          step_reward_totals(players.size()),
           seed(initial_seed), max_ticks(limit), schema_version(version), features(version == 2 ? 31 : 22),
           heads(version == 2 ? 8 : 6) {
         if (schema_version == 2) {
@@ -132,6 +134,7 @@ struct TrainingBatch {
                 selected_slots[index] = episode_players[environment].resolved[player]["loadout"]["selected"].get<int>();
                 dealt_damage[index] = 0;
                 observed_opponent_disable[index] = 0;
+                step_reward_totals[index].fill(0.0);
                 initial.push_back(players[index]);
             }
         }
@@ -238,6 +241,15 @@ struct TrainingBatch {
         }
     }
 
+    void recordReward(std::size_t index, std::size_t term, double amount) {
+        step_reward_totals[index][term] += amount;
+        if (term < reward_totals.size()) {
+            reward_totals[term] += amount;
+        } else {
+            shaping_totals[term - reward_totals.size()] += amount;
+        }
+    }
+
     void addShapingReward(std::size_t index, float* rewards) {
         const auto& source = players[index];
         const auto& target = players[index ^ 1];
@@ -262,7 +274,7 @@ struct TrainingBatch {
         for (std::size_t term = 0; term < amounts.size(); ++term) {
             const float amount = static_cast<float>(amounts[term] * shaping_weights[term]);
             rewards[index] += amount;
-            shaping_totals[term] += amount;
+            recordReward(index, reward_totals.size() + term, amount);
         }
     }
 
@@ -328,6 +340,7 @@ struct TrainingBatch {
             }
         }
         std::fill_n(rewards, players.size(), 0.0F);
+        for (auto& totals : step_reward_totals) totals.fill(0.0);
         for (std::size_t environment = 0; environment < worlds.size(); ++environment) {
             const auto offset = environment * 2;
             bool lost[2]{};
@@ -342,14 +355,14 @@ struct TrainingBatch {
                     const float health_fraction = state.last_attack.health_lost / 20.0F;
                     rewards[index] += weights[0] * health_fraction;
                     rewards[offset + (1 - player)] += weights[1] * health_fraction;
-                    reward_totals[0] += weights[0] * health_fraction;
-                    reward_totals[1] += weights[1] * health_fraction;
+                    recordReward(index, 0, weights[0] * health_fraction);
+                    recordReward(offset + (1 - player), 1, weights[1] * health_fraction);
                     dealt_damage[index] = 1;
                 }
                 if (state.last_attack.blocked_damage > 0.0F
                     && weaponAttributes(state.weapon).disable_shield_seconds == 0.0F) {
                     rewards[offset + (1 - player)] += block_weight;
-                    reward_totals[6] += block_weight;
+                    recordReward(offset + (1 - player), 6, block_weight);
                 }
                 lost[player] = !state.alive() || outside(state);
             }
@@ -361,11 +374,11 @@ struct TrainingBatch {
                 if (!terminated[environment]) addShapingReward(index, rewards);
                 if (terminated[environment]) {
                     rewards[index] += lost[player] ? weights[3] : weights[2];
-                    reward_totals[lost[player] ? 3 : 2] += lost[player] ? weights[3] : weights[2];
+                    recordReward(index, lost[player] ? 3 : 2, lost[player] ? weights[3] : weights[2]);
                 } else if (truncated[environment]) {
                     rewards[index] += weights[4] + (dealt_damage[index] ? 0.0F : weights[5]);
-                    reward_totals[4] += weights[4];
-                    if (!dealt_damage[index]) reward_totals[5] += weights[5];
+                    recordReward(index, 4, weights[4]);
+                    if (!dealt_damage[index]) recordReward(index, 5, weights[5]);
                 }
             }
         }
@@ -536,6 +549,23 @@ MCSIM_EXPORT int mcsim_reward_totals(void* handle, double* totals) {
         if (!handle || !totals) throw std::invalid_argument("Null reward totals argument");
         const auto& batch = *static_cast<TrainingBatch*>(handle);
         std::copy(batch.reward_totals.begin(), batch.reward_totals.end(), totals);
+    });
+}
+MCSIM_EXPORT int mcsim_step_reward_totals(void* handle, const std::uint8_t* mask, double* totals) {
+    return protect([&] {
+        if (!handle || !totals) throw std::invalid_argument("Null step reward totals argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (mask && std::any_of(mask, mask + batch.players.size(), [](auto value) { return value > 1; })) {
+            throw std::invalid_argument("Step reward mask must contain one boolean per player");
+        }
+        std::array<double, 12> selected{};
+        for (std::size_t index = 0; index < batch.players.size(); ++index) {
+            if (mask && !mask[index]) continue;
+            for (std::size_t term = 0; term < selected.size(); ++term) {
+                selected[term] += batch.step_reward_totals[index][term];
+            }
+        }
+        std::copy(selected.begin(), selected.end(), totals);
     });
 }
 MCSIM_EXPORT int mcsim_shaping_reward_totals(void* handle, double* totals) {

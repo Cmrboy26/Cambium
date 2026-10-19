@@ -45,7 +45,7 @@ if [[ -n "${SIM_ENVIRONMENT:-}" || -n "${SIM_SCHEMA:-}" || -n "${SIM_SEED:-}" ]]
     exit 1
 fi
 if [[ -z "$SIM_PLAN" && -z "$SIM_RESUME" ]]; then
-    SIM_PLAN="simulator/training/presets/shield-axe-curriculum.json"
+    SIM_PLAN="simulator/setups/curricula/shield-axe-curriculum.json"
 fi
 if [[ -z "$SIM_RESUME" ]]; then
     SIM_ENVS="${SIM_ENVS:-256}"

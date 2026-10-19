@@ -25,6 +25,12 @@ int mcsim_step(void* handle, const int32_t* actions, float* observations, float*
 /* Additive ABI 2 calls. Return 0 on success, -1 on error; obtain the
    thread-local error with mcsim_last_error(). The caller owns all buffers. */
 int mcsim_set_reward_weights(void* handle, const float* weights);
+/* Last successful tick's reward contributions for selected players.
+   mask has worlds*2 boolean entries in world/player order; null selects all.
+   totals has 12 doubles: the seven base types followed by five shaping types
+   in the build-info reward_totals order. Reset clears selected worlds' last
+   step contributions, without changing the cumulative batch reward totals. */
+int mcsim_step_reward_totals(void* handle, const uint8_t* mask, double* totals);
 /* Replace the episode timeout in 1..1000000 without rebuilding terrain.
    Call at a stage reset boundary; this does not reset worlds or counters. */
 int mcsim_set_max_ticks(void* handle, int max_ticks);

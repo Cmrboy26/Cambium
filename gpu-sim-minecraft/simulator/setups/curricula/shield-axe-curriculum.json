@@ -3,8 +3,8 @@
   "version": 2,
   "name": "shield-axe-curriculum",
   "seed": 42,
-  "policy": "../../policies/equipment-combat.json",
-  "environment": "../../tasks/shield-axe-duel.json",
+  "policy": "../policies/equipment-combat.json",
+  "environment": "../environments/shield-axe-duel.json",
   "learner": {"hidden_dim": 512, "lr": 0.0003, "epochs": 2, "minibatch_size": 16384},
   "opponents": {
     "stationary": {"type": "scripted", "controller": "stationary_target"},
@@ -28,7 +28,7 @@
   },
   "evaluations": {
     "shield_axe_combat": {
-      "environment": "../../tasks/shield-axe-duel.json",
+      "environment": "../environments/shield-axe-duel.json",
       "every_updates": 50, "episodes": 64, "seed": 1729,
       "opponents": "shield_axe"
     }

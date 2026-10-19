@@ -1,0 +1,38 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "axe-shield-fighting",
+  "seed": 42,
+  "policy": "../policies/equipment-combat.json",
+  "environment": "../environments/axe-shield-fighting.json",
+  "learner": {"hidden_dim": 512, "lr": 0.0003, "epochs": 2, "minibatch_size": 16384},
+  "opponents": {
+    "shield_fighter": {"type": "scripted", "controller": "basic_melee",
+                        "options": {"strafe": true, "sprint": true, "shield": true}},
+    "axe_fighter": {"type": "scripted", "controller": "basic_melee",
+                     "options": {"strafe": true, "sprint": true, "axe_slot": 1, "sword_slot": 0}},
+    "shield_axe_fighter": {"type": "scripted", "controller": "basic_melee",
+                            "options": {"strafe": true, "sprint": true, "shield": true,
+                                        "axe_slot": 1, "sword_slot": 0}}
+  },
+  "mixtures": {
+    "fighters": [{"id": "shield_fighter", "weight": 1},
+                 {"id": "axe_fighter", "weight": 1},
+                 {"id": "shield_axe_fighter", "weight": 2}]
+  },
+  "evaluations": {
+    "axe_shield_combat": {
+      "environment": "../environments/axe-shield-fighting.json",
+      "every_updates": 50, "episodes": 64, "seed": 1729,
+      "opponents": "fighters"
+    }
+  },
+  "stages": [
+    {
+      "name": "combat",
+      "opponents": "fighters",
+      "controls": {"fixed": {}},
+      "advance": {"updates": 1500}
+    }
+  ]
+}

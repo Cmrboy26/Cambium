@@ -32,7 +32,7 @@ references or execute curriculum schedules. Replays additionally carry semantic
 controls and resulting state, so playback needs neither weights nor source files.
 See the [training-plan reference](../simulator/training/AGENTS.md#research-training-plans).
 
-In the [shield/axe environment](../simulator/tasks/shield-axe-duel.json),
+In the [shield/axe environment](../simulator/setups/environments/shield-axe-duel.json),
 `players.shared` holds constant initialization and `players.overrides` contains
 only each actor's spawn differences. `equipment` describes sampled fields:
 
@@ -85,9 +85,10 @@ proof of game parity. See the [extension recipes](../simulator/training/AGENTS.m
 
 ## Quick Start
 
-Start with [shield-axe-curriculum.json](../simulator/training/presets/shield-axe-curriculum.json).
-It references reusable [arenas](../simulator/arenas/),
-[environments](../simulator/tasks/) and [policies](../simulator/policies/).
+All authoring files live centrally in [simulator/setups](../simulator/setups/).
+Start with [shield-axe-curriculum.json](../simulator/setups/curricula/shield-axe-curriculum.json).
+It references reusable [arenas](../simulator/setups/arenas/),
+[environments](../simulator/setups/environments/) and [policies](../simulator/setups/policies/).
 Edit the environment to change item presence; edit the plan to change training,
 not arena geometry or policy dimensions.
 
@@ -98,7 +99,7 @@ standard launcher detection. No fixed launcher instance name is required.
 After building the native library, start training:
 
 ```powershell
-.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json `
+.\scripts\train.ps1 -Plan simulator/setups/curricula/shield-axe-curriculum.json `
   -Updates 1500 -ReplayEvery 100 -ReplayToMinecraft
 ```
 

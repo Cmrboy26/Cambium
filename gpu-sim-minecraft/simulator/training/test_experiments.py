@@ -17,22 +17,22 @@ class ExperimentChecks(unittest.TestCase):
         self.directory = ROOT / "simulator/training/runs" / f"test-experiments-{uuid4().hex}"
         self.directory.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, self.directory)
-        for name in ("arenas", "tasks", "policies", "plans"):
+        for name in ("arenas", "environments", "policies", "curricula"):
             (self.directory / name).mkdir()
         self.arena_path = self.directory / "arenas/flat.json"
-        self.environment_path = self.directory / "tasks/duel.json"
+        self.environment_path = self.directory / "environments/duel.json"
         self.policy_path = self.directory / "policies/combat.json"
-        self.plan_path = self.directory / "plans/train.json"
-        self.arena = json.loads((ROOT / "simulator/arenas/flat-duel.json").read_text())
-        self.environment = json.loads((ROOT / "simulator/tasks/gear-duel.json").read_text())
-        self.policy = json.loads((ROOT / "simulator/policies/equipment-combat.json").read_text())
-        self.raw = json.loads((ROOT / "simulator/training/presets/gear-curriculum.json").read_text())
+        self.plan_path = self.directory / "curricula/train.json"
+        self.arena = json.loads((ROOT / "simulator/setups/arenas/flat-duel.json").read_text())
+        self.environment = json.loads((ROOT / "simulator/setups/environments/gear-duel.json").read_text())
+        self.policy = json.loads((ROOT / "simulator/setups/policies/equipment-combat.json").read_text())
+        self.raw = json.loads((ROOT / "simulator/setups/curricula/gear-curriculum.json").read_text())
         self.environment["arena"] = "../arenas/flat.json"
-        self.raw["environment"] = "../tasks/duel.json"
+        self.raw["environment"] = "../environments/duel.json"
         self.raw["policy"] = "../policies/combat.json"
         self.raw.pop("learner")
         for suite in self.raw["evaluations"].values():
-            suite["environment"] = "../tasks/duel.json"
+            suite["environment"] = "../environments/duel.json"
         self.write()
 
     def write(self):

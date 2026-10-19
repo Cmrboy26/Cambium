@@ -23,7 +23,7 @@ rates as full PPO rates. Collection time includes enabled replay sampling.
 
 ## Research Training Plans
 
-Pass `--plan simulator/training/presets/shield-axe-curriculum.json` (PowerShell
+Pass `--plan simulator/setups/curricula/shield-axe-curriculum.json` (PowerShell
 `-Plan`), also the default for new runs. Plans are
 `minecraft_sim_training_plan`, version 2; unknown fields, capabilities, controls,
 rewards and items fail rather than silently defaulting. Version-1 authoring plans
@@ -36,10 +36,11 @@ training flags have no implicit migration aliases.
 
 ### Plan And Episode Contracts
 
-- Authoring separates [arenas](../arenas/) (bounds/blocks/rules),
-  [environments](../tasks/) (initialization/distributions/task),
-  [policies](../policies/) (observation/action descriptors) and
-  [plans](presets/) (learner/controllers/mixtures/stages/evaluation).
+- Authoring lives centrally in [setups](../setups/), separating
+  [arenas](../setups/arenas/) (bounds/blocks/rules),
+  [environments](../setups/environments/) (initialization/distributions/task),
+  [policies](../setups/policies/) (observation/action descriptors) and
+  [curricula](../setups/curricula/) (learner/controllers/mixtures/stages/evaluation).
   The compiler produces one `minecraft_sim_experiment`, version 1, with no
   unresolved authoring references. Config uses `experiment`, not an authored plan
   copied alongside repeated environment defaults.
@@ -180,7 +181,7 @@ branches.
 
 ## Shield/Axe Curriculum Preset
 
-[shield-axe-curriculum.json](presets/shield-axe-curriculum.json) is a 1,500-update
+[shield-axe-curriculum.json](../setups/curricula/shield-axe-curriculum.json) is a 1,500-update
 experiment: aiming 150, attack timing 250, pursuit 350, equipment combat 750.
 Budgets are fixed updates, not evaluation thresholds. The run needs an invocation
 cap of at least 1,500 updates to finish in one invocation.
@@ -435,6 +436,12 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
 - Counters exclude replay evaluation and include per-update contributions from
   episodes crossing update boundaries. Training rewards are not a win rate;
   separately logged held-out suites report episode returns and wins/episodes.
+- Opponent-pool `reward_types` contains only learner contributions, selected
+  before episode resets/side changes through `mcsim_step_reward_totals`. Their
+  sum matches learner `reward_total` within floating-point rounding. Older
+  libraries emit an explicit rebuild notice rather than fabricated breakdowns.
+  Rebuild native code and restart/resume the trainer to enable this logging;
+  historical rows without per-type data cannot be reconstructed from totals.
 - Tests: `python -B -m unittest simulator.training.test_dashboard -v`, also in
   `scripts/check.ps1`. Chart math, run ordering and timing checks use Node.js
   when installed; HTTP/store checks need only Python's standard library.
@@ -448,7 +455,7 @@ experience, preserving training RNG. No export before N completions; multiple
 crossings in one batch step each export.
 
 ```powershell
-.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json `
+.\scripts\train.ps1 -Plan simulator/setups/curricula/shield-axe-curriculum.json `
   -ReplayEvery 100 -ReplayToMinecraft
 ```
 

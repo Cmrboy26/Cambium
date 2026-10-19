@@ -230,6 +230,23 @@ class Environment:
         result.update(zip(SHAPING_REWARD_NAMES, shaping_totals.tolist()))
         return result
 
+    def step_reward_totals(self, mask=None):
+        self._require_open()
+        selected = None
+        if mask is not None:
+            raw = np.asarray(mask)
+            if raw.shape != (self.count, 2) or raw.dtype.kind not in "bui" or not np.isin(raw, [0, 1]).all():
+                raise ValueError("Step reward mask must contain one boolean per player")
+            selected = np.ascontiguousarray(raw, dtype=np.uint8)
+        function = getattr(self.native, "mcsim_step_reward_totals", None)
+        if function is None:
+            return None
+        function.argtypes = [ctypes.c_void_p] * 3
+        function.restype = ctypes.c_int
+        totals = np.empty(len(REWARD_NAMES), dtype=np.float64)
+        self._check(function(self._handle, None if selected is None else selected.ctypes.data, totals.ctypes.data))
+        return dict(zip(REWARD_NAMES, totals.tolist()))
+
     def replay_frame(self, environment=0):
         self._require_open()
         if not isinstance(environment, int) or not 0 <= environment < self.count:

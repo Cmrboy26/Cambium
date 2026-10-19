@@ -111,8 +111,9 @@ class TrainingJobTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "project with spaces"
         self.tools = self.root / "tools"
         self.tools.mkdir(parents=True)
-        (self.root / "simulator/training/presets").mkdir(parents=True)
-        (self.root / "simulator/training/presets/shield-axe-curriculum.json").write_text("{}")
+        (self.root / "simulator/training").mkdir(parents=True)
+        (self.root / "simulator/setups/curricula").mkdir(parents=True)
+        (self.root / "simulator/setups/curricula/shield-axe-curriculum.json").write_text("{}")
         (self.root / "simulator/build-rosie-cuda-75").mkdir()
         (self.root / "simulator/build-rosie-cuda-75/minecraft_sim_training.so").touch()
         (self.root / ".venv-rosie/bin").mkdir(parents=True)
@@ -142,6 +143,8 @@ class TrainingJobTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = self.log.read_text().splitlines()
         self.assertIn("--plan", arguments)
+        self.assertEqual(arguments[arguments.index("--plan") + 1],
+                         "simulator/setups/curricula/shield-axe-curriculum.json")
         self.assertEqual(arguments[arguments.index("--envs") + 1], "256")
         for removed in ("--schema", "--environment", "--seed", "--epochs", "--hidden-dim", "--minibatch-size"):
             self.assertNotIn(removed, arguments)

@@ -21,19 +21,22 @@ CUDA needs a CUDA-built simulator and CUDA-enabled PyTorch; see
 ```powershell
 .\scripts\train.ps1
 .\scripts\train.ps1 -Device cuda -Environments 8192
-.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json -Updates 1500
+.\scripts\train.ps1 -Plan simulator/setups/curricula/shield-axe-curriculum.json -Updates 1500
 ```
 
 Default training uses CPU, 16 worlds and a 100-update invocation cap.
-Configuration separates reusable [arenas](../arenas/), [environments](../tasks/),
-[policies](../policies/) and [training plans](presets/); the trainer compiles them
-into one resolved experiment. See the [experiment contract](../../docs/simulation_contract.md)
-and the
+Configuration lives in [setups](../setups/): reusable [arenas](../setups/arenas/),
+[environments](../setups/environments/), [policies](../setups/policies/) and
+[curricula](../setups/curricula/); the trainer compiles them
+into one resolved experiment. See the [experiment contract](../../docs/simulation_contract.md) and the
 [training-plan reference](AGENTS.md#research-training-plans) for custom bots,
 checkpoint pools, sampling frequencies and advancement rules.
-The [shield/axe curriculum](presets/shield-axe-curriculum.json) trains aiming,
+The [shield/axe curriculum](../setups/curricula/shield-axe-curriculum.json) trains aiming,
 attack timing, pursuit and equipment combat for 150/250/350/750 updates.
 Set `-Updates 1500` to allow the entire four-stage schedule to run.
+
+For direct combat with guaranteed sword/axe/shield, use
+[axe-shield-fighting.json](../setups/curricula/axe-shield-fighting.json) (`-Updates 1500`).
 
 ## Checkpoints
 

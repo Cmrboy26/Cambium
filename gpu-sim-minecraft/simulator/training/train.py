@@ -50,7 +50,7 @@ def arguments(argv=None):
     if options.replay_every < 0 or options.replay_dir and not options.replay_every:
         parser.error("replay-every must be nonnegative; replay-dir requires replay-every")
     if not options.plan and not options.resume:
-        options.plan = str(ROOT / "simulator/training/presets/shield-axe-curriculum.json")
+        options.plan = str(ROOT / "simulator/setups/curricula/shield-axe-curriculum.json")
     if options.plan:
         options.plan = str(Path(options.plan).resolve())
     return options

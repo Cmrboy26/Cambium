@@ -9,8 +9,22 @@ Follow the repository [development guide](../AGENTS.md). Training has additional
 C++20/CUDA-compatible functions target supplied Minecraft Java 26.3 behavior.
 CPU/GPU call the same ordered tick code. Synthetic scenarios need no Minecraft
 runtime/assets. `include/` owns shared physics/views, `src/` backend/support,
-`apps/` executables/C ABI entry points, `environments/` JSON arenas, `tests/`
-native checks, and `tools/` recording conversion.
+`apps/` executables/C ABI entry points, `setups/` authored experiment definitions,
+`environments/` legacy concrete scenario fixtures, `tests/` native checks, and
+`tools/` recording conversion.
+
+## Experiment Setups
+
+Keep reusable authoring JSON together under [setups/](setups/):
+
+- [arenas/](setups/arenas/): geometry and physical rules.
+- [environments/](setups/environments/): players, gear/spawn sampling and task settings.
+- [policies/](setups/policies/): observation and action layouts.
+- [curricula/](setups/curricula/): training plans, opponents, stages and evaluation.
+
+References resolve relative to their containing JSON file. Legacy concrete
+[environments/](environments/) are separate native/regression fixtures, not the
+new authoring environment definitions.
 
 Recorded status from 2026-10-18: CPU/source-derived checks pass locally; a prior
 ordinary client capture has zero numeric/ground error across 250 movement steps.
@@ -68,6 +82,13 @@ The additive ABI 2 `mcsim_set_max_ticks(handle, limit)` returns 0 on success,
 boundary; it changes the existing batch's timeout without resetting players,
 counters or immutable terrain. Python reapplies timeout-normalized shaping
 weights. The setter does not rewrite the original scenario metadata.
+
+The additive `mcsim_step_reward_totals(handle, player_mask, totals)` returns the
+last successful tick's 12 reward contributions for selected actors. The mask
+has `worlds*2` boolean entries; null selects both players. Resets clear selected
+worlds' last-step contributions, not cumulative batch totals. Opponent-pool
+training selects its learner actor before episode reset or side reassignment.
+Existing reward calculations and ABI 2 buffer layouts are unchanged.
 
 The default remains an unarmored diamond sword without shield; v1 policies stay
 sword-only. [V2](training/AGENTS.md#swordaxeshield-v2) adds weapon/shield controls.

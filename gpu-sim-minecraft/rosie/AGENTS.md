@@ -59,7 +59,7 @@ Supported training environment variables:
   overrides of the plan's learner settings; unset by default.
 - `SIM_THREADS`: CPU threads; default 4. The plan owns the seed.
 - `SIM_PLAN`: version-2 training plan path relative to `gpu-sim-minecraft` or
-  absolute; defaults to `simulator/training/presets/shield-axe-curriculum.json`
+  absolute; defaults to `simulator/setups/curricula/shield-axe-curriculum.json`
   for new runs. References inside authoring files resolve relative to their
   containing file, not the submission directory.
   `SIM_UPDATES` caps this invocation; a completed curriculum stops early.
@@ -75,7 +75,7 @@ For the four-stage shield/axe curriculum, submit from `gpu-sim-minecraft`:
 
 ```sh
 sbatch --partition=dgxh100 --gres=gpu:h100:1 --time=1-00:00:00 \
-  --export=ALL,MCSIM_CUDA_ARCHITECTURES=90,SIM_PLAN=simulator/training/presets/shield-axe-curriculum.json,SIM_ENVIRONMENT=,SIM_SCHEMA=,SIM_SEED=,SIM_ENVS=8192,SIM_UPDATES=1500,SIM_ROLLOUT_STEPS=128,SIM_REPLAY_EVERY=50000 \
+  --export=ALL,MCSIM_CUDA_ARCHITECTURES=90,SIM_PLAN=simulator/setups/curricula/shield-axe-curriculum.json,SIM_ENVIRONMENT=,SIM_SCHEMA=,SIM_SEED=,SIM_ENVS=8192,SIM_UPDATES=1500,SIM_ROLLOUT_STEPS=128,SIM_REPLAY_EVERY=50000 \
   rosie/train.sbatch
 ```
 

@@ -15,7 +15,7 @@ import torch
 from backend.fast_rl_model import ActorCritic, FastRLAgent
 from simulator.training.contract import fingerprint
 from simulator.training.controllers import create_controller
-from simulator.training.environment import Environment, REWARD_SEMANTICS, ROOT
+from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.ppo import compute_gae, metadata, optimize
@@ -104,6 +104,18 @@ class SampledWorlds:
             observations[ids], rewards[ids], terminated[ids], truncated[ids] = obs, rew, term, trunc
         return observations, rewards, terminated, truncated
 
+    def step_reward_totals(self, learner_slots):
+        totals = dict.fromkeys(REWARD_NAMES, 0.0)
+        for ids, environment in self.groups:
+            selected = np.zeros((len(ids), 2), dtype=bool)
+            selected[np.arange(len(ids)), learner_slots[ids]] = True
+            contributions = environment.step_reward_totals(selected)
+            if contributions is None:
+                return None
+            for name, amount in contributions.items():
+                totals[name] += amount
+        return totals
+
     def episode(self, world):
         for ids, environment in self.groups:
             found = np.flatnonzero(ids == world)
@@ -185,6 +197,9 @@ def collect(model, worlds, pool, observations, steps, device, fixed):
     rollout["observations"] = torch.empty((*shape, worlds.observation_dim), device=device)
     rollout["actions"] = torch.empty((*shape, worlds.action_count), dtype=torch.long, device=device)
     rollout["fixed_actions"] = fixed.copy()
+    reward_types = worlds.step_reward_totals(pool.learner_slots)
+    if reward_types is not None:
+        reward_types = dict.fromkeys(reward_types, 0.0)
     endings = timeouts = 0
     ids = np.arange(worlds.count)
     for step in range(steps):
@@ -192,6 +207,12 @@ def collect(model, worlds, pool, observations, steps, device, fixed):
         current = torch.as_tensor(observations[ids, slots], device=device)
         actions, log_probs, values, _ = policy_actions(model, current, worlds.action_names, fixed)
         final, rewards, terminated, truncated = worlds.step(pool.act(observations, actions.cpu().numpy()))
+        if reward_types is not None:
+            contributions = worlds.step_reward_totals(slots)
+            if contributions is None:
+                raise RuntimeError("Native reward breakdown support changed during rollout")
+            for name, amount in contributions.items():
+                reward_types[name] += amount
         _, next_values = model(torch.as_tensor(final[ids, slots], device=device))
         rollout["observations"][step] = current
         rollout["actions"][step] = actions
@@ -209,6 +230,8 @@ def collect(model, worlds, pool, observations, steps, device, fixed):
     rollout["advantages"], rollout["returns"] = compute_gae(
         rollout["rewards"], rollout["values"], rollout["next_values"], rollout["terminated"],
         rollout["truncated"], FastRLAgent.GAMMA, FastRLAgent.GAE_LAMBDA)
+    if reward_types is not None:
+        rollout["reward_types"] = reward_types
     return rollout, observations, endings, timeouts
 
 
@@ -402,6 +425,9 @@ def run(options, checkpoint=None):
         worlds.configure(stage)
         observations = worlds.observe()
         pool.reset(np.ones(options.envs, dtype=bool))
+        if worlds.step_reward_totals(pool.learner_slots) is None:
+            print("Reward breakdown unavailable: rebuild minecraft_sim_training and restart/resume training "
+                  "to record learner-only per-type rewards. Total rewards are still recorded.")
         output.mkdir(parents=True, exist_ok=True)
         base_update = 0 if checkpoint is None else checkpoint["update"]
         samples = 0 if checkpoint is None else checkpoint["samples"]
@@ -424,6 +450,8 @@ def run(options, checkpoint=None):
                 model, worlds, pool, observations, options.rollout_steps, device, fixed)
             collection_seconds = time.perf_counter() - start
             statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs, options.minibatch_size))
+            if "reward_types" in rollout:
+                statistics["reward_types"] = rollout["reward_types"]
             transitions = options.envs * options.rollout_steps
             samples += transitions
             previous_rounds = rounds

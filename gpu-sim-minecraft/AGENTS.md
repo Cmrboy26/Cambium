@@ -41,6 +41,9 @@ instance names, usernames and checkout locations are not.
 - `simulator/`: C++20 physics shared by CPU and CUDA, native tools, environments
 	and regression checks. Movement, collisions, targeting, damage and equipment
 	mechanics belong here, not in the policy encoder.
+- `simulator/setups/`: central authoring definitions in `arenas/`,
+	`environments/`, `policies/` and `curricula/`. Legacy concrete scenario
+	fixtures remain separate in `simulator/environments/`.
 - `simulator/training/`: Python adapter over a small native C ABI, shared
 	two-player PPO policy, checkpoints, dashboard and inference service. Policy
 	schemas define observations and action heads separately from physics.

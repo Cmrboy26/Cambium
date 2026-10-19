@@ -6,7 +6,7 @@ Run from any directory; relative paths are resolved from this repository.
 ReplayEvery counts completed duels, not optimizer updates. Without a Minecraft
 destination, samples stay in the run's replays folder. Use DryRun to preview.
 .EXAMPLE
-.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json -ReplayEvery 100
+.\scripts\train.ps1 -Plan simulator/setups/curricula/shield-axe-curriculum.json -ReplayEvery 100
 .EXAMPLE
 .\scripts\train.ps1 -ReplayEvery 100 -ReplayToMinecraft -MinecraftDirectory 'D:\Games\MyInstance\minecraft'
 .EXAMPLE

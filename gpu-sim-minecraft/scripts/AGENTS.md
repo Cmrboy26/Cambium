@@ -39,7 +39,7 @@ toolchain separately and use `run-gpu.ps1` for device validation.
 A first training check:
 
 ```powershell
-.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json `
+.\scripts\train.ps1 -Plan simulator/setups/curricula/shield-axe-curriculum.json `
   -Updates 1 -Environments 2 -RolloutSteps 16
 ```
 
@@ -112,8 +112,8 @@ not PPO updates. Each export is a separate complete evaluation duel, not the
 current rollout or an optimizer update.
 
 ```powershell
-.\scripts\train.ps1 -Plan simulator/training/presets/gear-curriculum.json
-.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json -ReplayEvery 100 -ReplayToMinecraft
+.\scripts\train.ps1 -Plan simulator/setups/curricula/gear-curriculum.json
+.\scripts\train.ps1 -Plan simulator/setups/curricula/shield-axe-curriculum.json -ReplayEvery 100 -ReplayToMinecraft
 .\scripts\train.ps1 -Resume latest -Updates 100
 .\scripts\train.ps1 -Updates 1 -Environments 2 -RolloutSteps 16 `
   -ExtraArguments @('--epochs', '1', '--minibatch-size', '64')
