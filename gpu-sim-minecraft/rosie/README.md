@@ -29,17 +29,26 @@ With a training job running and GlobalVPN connected, run this from the
 available as `bash`:
 
 ```powershell
-bash ./rosie/dashboard.sh
+bash ./rosie/dashboard-connect.sh
 ```
 
-In a Git Bash terminal, use `bash rosie/dashboard.sh` instead.
+In a Git Bash terminal, use `bash rosie/dashboard-connect.sh` instead.
 
-The script finds the running `cambium-sim` job, starts the read-only dashboard
-as an overlapping step on its compute node, chooses both ports automatically,
-and opens the local URL. Pass a job ID when multiple training jobs are running:
-`bash rosie/dashboard.sh <JOB_ID>`. Press Ctrl+C to stop the dashboard and
-tunnel; no separate dashboard allocation is submitted.
+The dashboard lists every run under `simulator/training/runs` and refreshes
+every three seconds, including new or changing runs. The script starts it as an
+overlapping step on a running job's compute node, chooses both ports
+automatically, and opens the local URL. If multiple jobs share a working
+directory, it uses one to host the dashboard; pass a job ID only when jobs use
+different working directories: `bash rosie/dashboard-connect.sh <JOB_ID>`. The
+dashboard server runs on Rosie, not on the local computer. Press Ctrl+C to stop
+the remote dashboard step and local tunnel; no separate dashboard allocation
+is submitted.
 
 See [AGENTS.md](AGENTS.md) for GPU selection, experiment options, output paths,
-tunneling details, and local Linux checks. Set `ROSIE_SSH_USER` or
-`ROSIE_SSH_JUMP` to override the SSH account or jump host.
+tunneling details, and local Linux checks. If `ROSIE_SSH_JUMP` is unset, the
+script derives the management host when run on Rosie. When run locally, it
+prompts for your assigned node number (`1`-`4`) or full hostname, such as
+`dh-mgmt1.hpc.msoe.edu`. Set `ROSIE_SSH_JUMP` to skip the prompt; it accepts the
+same number or hostname. Set
+`ROSIE_SSH_USER` to override the account; by default, the local username is
+suffixed with `@ad.msoe.edu`.
