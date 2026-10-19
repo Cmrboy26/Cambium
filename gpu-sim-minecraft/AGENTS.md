@@ -29,6 +29,7 @@ throughout the repository; component guides add local implementation references.
 | Environment adapter, PPO, checkpoints, dashboard, inference | [simulator/training/AGENTS.md](simulator/training/AGENTS.md) |
 | Fabric recording, replay, live duels | [cambiummod/AGENTS.md](cambiummod/AGENTS.md) |
 | PowerShell launchers and option reference | [scripts/AGENTS.md](scripts/AGENTS.md) |
+| Rosie training, SSH dashboards and local artifact sync | [rosie/AGENTS.md](rosie/AGENTS.md) |
 | Shared policy network and reward configuration | [backend/AGENTS.md](backend/AGENTS.md) |
 
 ## Architecture And Ownership

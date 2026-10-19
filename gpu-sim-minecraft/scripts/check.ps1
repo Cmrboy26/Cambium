@@ -50,6 +50,7 @@ if ($runPython) {
     $testArguments = @('-B', '-m', 'unittest')
     if ($Scope -ne 'Dashboard') { $testArguments += 'simulator.training.test_training' }
     if ($Scope -in @('All', 'Dashboard')) { $testArguments += 'simulator.training.test_dashboard' }
+    if ($Scope -in @('All', 'Training')) { $testArguments += 'simulator.training.test_rosie' }
     if ($Scope -eq 'Policy') { $testArguments += @('-k', 'contract', '-k', 'configured', '-k', 'policy') }
     if ($Scope -eq 'Rewards') { $testArguments += @('-k', 'reward', '-k', 'absorption') }
     Invoke-WorkflowCommand (Get-WorkflowPython $Python) ($testArguments + '-v') -DryRun:$DryRun

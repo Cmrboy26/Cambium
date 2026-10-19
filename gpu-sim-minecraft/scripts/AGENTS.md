@@ -151,6 +151,34 @@ terrain. Match nondefault ports with `/simduel arena 8768` or `world 8768`.
 Pause/resume/reset/status/stop and participation details are in the
 [mod guide](../cambiummod/AGENTS.md#live-policy-duels).
 
+## Rosie Sync And Play
+
+`rosie-play.ps1` configures the in-game `/simrosie` helper or runs the same
+artifact workflow from a terminal. It uses existing game-folder/Python selection
+rules and repository-relative invocation. No Git Bash, native simulator or local
+CUDA is needed; SSH must be on PATH and local duels need the training Python
+requirements. [Authentication, caching and protocol](../rosie/AGENTS.md#local-artifact-launcher).
+
+| Parameter | Purpose / default |
+| --- | --- |
+| `-Setup` | Save game configuration; prompt for missing host/account |
+| `-Action` | `runs` (default), `replays`, `replay`, `sync`, `duel` |
+| `-Run` | Run basename or `latest` (newest saved, not best) |
+| `-Replay` | Replay basename or `latest` |
+| `-MinecraftDirectory` | Instance game folder; normal selection rules |
+| `-SshHost` | Setup only; management host, SSH alias or 1..4; `ROSIE_SSH_JUMP` |
+| `-SshUser` | Setup only; Rosie account, `ROSIE_SSH_USER` or prompted local username |
+| `-RemoteRunsDirectory` | Setup only; default `~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs` |
+| `-Python` | Local interpreter; setup records it for Minecraft |
+| `-Offline` | Use cache without SSH |
+| `-DryRun` | Preview only; no config, transfer or process; setup needs a host |
+
+Terminal `replay` prints the downloaded path; it does not issue Minecraft commands.
+Terminal `duel` stays running and prints its automatically selected port; use
+`/simduel arena <port>`, then `/simduel join`. Ctrl+C stops inference. In-game
+commands perform these handoffs automatically. `sync` downloads every replay
+in the selected run, so use `replay` for on-demand viewing of just one sample.
+
 ## Serve Dashboard
 
 | Parameter | Accepted value / purpose | Default |

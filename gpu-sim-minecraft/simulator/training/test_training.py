@@ -3,7 +3,9 @@ import io
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -114,6 +116,40 @@ class InferenceChecks(unittest.TestCase):
             finally:
                 server.shutdown()
                 worker.join(timeout=3)
+
+    def test_rosie_cached_policy_launcher(self):
+        from simulator.training.rosie import Rosie, configure
+
+        game = Path(self.directory.name) / "Minecraft with spaces"
+        configure(game, "offline-host", "student", "/unreachable/remote/runs")
+        folder = Rosie(game).cache / "cached-run"
+        folder.mkdir(parents=True)
+        torch.save(self.saved, folder / "latest.pt")
+        (folder / "manifest.json").write_text(json.dumps({"files": {"latest.pt": {}}, "replays": []}), encoding="utf-8")
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen([sys.executable, "-u", "-B", "-m", "simulator.training.rosie",
+                "duel", "--minecraft-directory", str(game), "--offline", "--json"],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=errors)
+            try:
+                events = queue.Queue()
+                reader = threading.Thread(target=lambda: events.put(process.stdout.readline()), daemon=True)
+                reader.start()
+                event = json.loads(events.get(timeout=30))
+                self.assertEqual(event["event"], "policy", event)
+                self.assertEqual(event["run"], "cached-run")
+                base = f"http://127.0.0.1:{event['port']}"
+                with urlopen(base + "/info", timeout=3) as response:
+                    info = json.load(response)
+                self.assertEqual(info["device"], "cpu")
+                self.assertEqual(Path(info["checkpoint"]), folder / "latest.pt")
+                body = {"protocol": 1, "session": "rosie-launcher", "tick": 0, "observations": np.zeros((2, 22)).tolist()}
+                with urlopen(Request(base + "/act", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual(np.asarray(json.load(response)["actions"]).shape, (2, 6))
+            finally:
+                process.terminate()
+                process.wait(timeout=10)
+                process.stdout.close()
+                reader.join(timeout=3)
 
     @unittest.skipUnless(os.environ.get("MCSIM_LIVE_JAVA_CHECK") == "1", "Explicit Java/Python integration check")
     def test_java_bridge(self):

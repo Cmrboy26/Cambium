@@ -22,6 +22,35 @@ squeue -u "$USER"
 tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 ```
 
+## Local Replays And Duels
+
+On your local computer, install the updated mod and use a Python environment
+with the training requirements (CPU inference needs no native simulator build).
+With GlobalVPN connected, configure your Minecraft game folder once:
+
+```powershell
+.\scripts\rosie-play.ps1 -Setup -MinecraftDirectory 'C:\path\to\game' -SshHost 2 -SshUser reissmannc
+ssh -l 'reissmannc@ad.msoe.edu' dh-mgmt2.hpc.msoe.edu
+```
+
+Use your assigned management node. Verify its host key and set up SSH key/agent
+login in the terminal first; the in-game helper cannot answer password prompts.
+In a private, disposable singleplayer world:
+
+```text
+/simrosie runs
+/simrosie replay rosie-123
+/simrosie duel rosie-123
+/simduel join
+/simrosie stop
+```
+
+Replay downloads start playback; duels download weights and run inference locally.
+Stop an active Rosie operation before starting another. Omit the run to select
+the newest saved run, not the best policy. `/simrosie replays <run>` lists samples.
+Training must enable `SIM_REPLAY_EVERY`; no running allocation is needed to fetch
+saved outputs. [Offline use and configuration](AGENTS.md#local-artifact-launcher).
+
 ## Dashboard
 
 With a training job running and GlobalVPN connected, run this from the

@@ -119,6 +119,37 @@ An in-memory snapshot cannot survive a crash; this is not a complete backup.
   both join slots, weapon/shield, loss/reset, pause/resume, leave/stop, disconnect
   restoration and observer punches during bot-versus-bot.
 
+## Rosie Artifact Commands
+
+Configure locally using `scripts/rosie-play.ps1 -Setup` and install the updated
+mod once. See [setup/authentication](../rosie/README.md#local-replays-and-duels).
+`RosieLauncher` reads only local game `config/cambium-rosie.json` and invokes
+the configured Python module using literal `ProcessBuilder` arguments, never
+a shell. Configuration is trusted executable configuration, not server input.
+All commands are restricted to private singleplayer. Network/process work runs
+on a virtual thread; JSON result handoffs return to the client/server controllers
+and are guarded against superseded operations and changed worlds/owners.
+
+| Command | Behavior |
+| --- | --- |
+| `/simrosie runs` | List saved remote runs, newest first; click a row to suggest replay command. |
+| `/simrosie replays [run]` | List that run's samples; click to select one. |
+| `/simrosie replay [run] [file]` | Download/cache one replay, load and start absolute playback. |
+| `/simrosie duel [run]` | Download/cache weights, start local CPU policy on a free loopback port, start arena. |
+| `/simrosie sync [run]` | Cache checkpoint plus all samples without changing the world. |
+| `/simrosie status` | Current helper operation. |
+| `/simrosie stop` | Cancel helper; stop its live duel and restore participant state; retain cache. |
+
+Omitted run/file means `latest` by modification time, never best. Only one helper
+operation runs at a time; stop it before switching. `/simduel join` remains the
+participation command. `/simduel stop` alone stops actors, not the helper-owned
+policy process; use `/simrosie stop` for both. Disconnect, client shutdown, world/
+dimension change or opening to LAN cancels the owned helper and SSH descendants.
+Python stderr goes to game `logs/rosie-launcher.log`; readable errors appear in
+chat. Terminal-launched inference processes are not owned or terminated by the mod.
+Headless fixtures check process arguments, not real SSH or Minecraft lifecycle;
+manually test playback, join/stop restoration, cancellation and disconnect cleanup.
+
 ## Simulation Playback
 
 Export with `./scripts/export-replay.ps1 -Ticks 80 -ToMinecraft`; this is scripted,

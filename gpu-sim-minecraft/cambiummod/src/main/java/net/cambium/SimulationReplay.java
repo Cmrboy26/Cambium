@@ -105,6 +105,10 @@ final class SimulationReplay {
 	}
 
 	private static int load(Minecraft client, String filename) {
+		return load(client, filename, false);
+	}
+
+	static int load(Minecraft client, String filename, boolean play) {
 		var server = client.getSingleplayerServer();
 		if (server == null || client.player == null || server.isPublished()) {
 			return message(client, "Replay is restricted to a private singleplayer world.");
@@ -138,8 +142,9 @@ final class SimulationReplay {
 				active = new Session(server, viewer.level(), owner, trace, origin, folder.resolve("analysis"));
 				try {
 					active.reset();
+					active.paused = !play;
 					active.tell("Loaded " + trace.path.getFileName() + " (" + trace.backend
-							+ ", absolute), arena rebuilt; paused at tick 0, speed 1x.");
+							+ ", absolute), arena rebuilt; " + (play ? "playing" : "paused at tick 0") + ", speed 1x.");
 				} catch (RuntimeException error) {
 					active.tell("Could not spawn replay: " + error.getMessage());
 					active.close();

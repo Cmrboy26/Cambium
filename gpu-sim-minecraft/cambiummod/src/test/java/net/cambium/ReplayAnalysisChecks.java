@@ -33,6 +33,7 @@ public final class ReplayAnalysisChecks {
 		}
 		checkSprintInput();
 		checkMinorCollision();
+		checkRosieLauncher();
 		var replayFood = new ReplayPlayer.ReplayFoodData();
 		replayFood.setFoodLevel(12);
 		replayFood.setSaturation(2.0F);
@@ -90,6 +91,19 @@ public final class ReplayAnalysisChecks {
 				for (Path path : files.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
 			}
 		}
+	}
+
+	private static void checkRosieLauncher() {
+		Path root = Path.of(System.getProperty("java.io.tmpdir")).resolve("Minecraft with spaces").toAbsolutePath();
+		JsonObject config = new JsonObject();
+		config.addProperty("python", root.resolve("venv with spaces/python.exe").toString());
+		config.addProperty("repository", root.resolve("checkout with spaces").toString());
+		ProcessBuilder builder = RosieLauncher.helper(config, root, "replay", "run;not-a-shell", "sample.jsonl");
+		require(builder.command().getFirst().equals(config.get("python").getAsString()), "Python executable must remain one argument");
+		require(builder.command().contains(root.toString()) && builder.command().contains("run;not-a-shell"), "Helper arguments must be literal, including spaces and shell metacharacters");
+		require(builder.command().contains("--json") && !builder.redirectErrorStream(), "Helper stdout must remain a separate JSON event stream");
+		require(builder.directory().toPath().equals(root.resolve("checkout with spaces")), "Module must start from configured repository");
+		System.out.println("PASS: Rosie helper uses literal arguments, configured repository and separate JSON output");
 	}
 
 	private static void checkReplay(Path path) throws Exception {

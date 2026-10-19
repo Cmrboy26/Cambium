@@ -108,6 +108,65 @@ username. If SSH policy blocks direct
 compute-node access through `ProxyJump`, use the site's approved tunneling
 method.
 
+## Local Artifact Launcher
+
+`scripts/rosie-play.ps1 -Setup` configures the **local** Minecraft instance;
+it does not start a Rosie job or modify the remote installation. The account,
+management host/SSH alias, remote runs directory, local repository and selected
+Python executable are saved in game `config/cambium-rosie.json`. Use the local
+checkout and a Python environment with training requirements for duels. Re-run
+setup after moving the checkout or changing interpreters. No credentials are
+stored; use the local SSH agent or a configured key. Keep the config trusted:
+the mod executes its Python interpreter from its repository directory.
+
+Connect GlobalVPN and verify normal `ssh -l <account> <management-host>` access
+first, including host-key verification. In-game requests use `BatchMode=yes`,
+a ten-second connect timeout and SSH keepalives. Interactive passwords, MFA
+prompts and passphrase entry are not supported in Minecraft; handle these through
+your site's approved key/agent/connection-reuse configuration in a terminal.
+Do not disable host-key checking. The selected `ssh` command/agent must be
+available to Minecraft's process, not only a separate terminal environment.
+
+The default remote root is
+`~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs`; override with
+`-RemoteRunsDirectory` at setup. SSH runs a bundled, standard-library Python 3
+artifact reader on the management host. Only saved files are read, not training
+or inference. No public port, file server or active SLURM allocation is needed.
+This assumes that the run root is visible on that management host. Custom
+`SIM_REPLAY_DIR` locations must be collected into the run's `replays` directory
+before using this launcher.
+
+The helper is `python -B -m simulator.training.rosie <action>
+--minecraft-directory <game>`; actions are `setup`, `runs`, `replays`, `replay`,
+`sync`, `duel`. `--run` and `--replay` default to `latest`; `--offline` uses only
+cached artifacts. `--json` emits newline-separated events for the mod. Run/replay
+basenames are limited to 120 ASCII letters, digits, dots, underscores or hyphens,
+starting with a letter/digit. Paths and remote arguments are encoded, not shell
+interpolated; resolved remote files must remain inside the configured run root.
+
+`replay` downloads only the selected sample to game `sim-replays`, prefixing its
+filename with the run ID. `duel` caches `latest.pt` and available config/metrics
+in game `sim-rosie-cache/<run>`, then serves CPU inference on an automatically
+allocated loopback port. `sync` caches the checkpoint and **all** replay files
+for that run; consider disk usage before syncing large runs. Transfers reuse
+matching size/mtime files, stream to unique `.part` files, verify length/SHA-256,
+then atomically replace destinations. A failed transfer does not replace an
+existing artifact. Remote reads pin a file descriptor across atomic trainer
+checkpoint replacements. Replay limit is 64 MiB, other artifact limit 512 MiB.
+
+For offline duels: `scripts/rosie-play.ps1 -Action duel -Run <run> -Offline`;
+use `/simduel arena <printed-port>`. Ctrl+C stops the terminal-owned service.
+Cached replays can be loaded normally with `/simreplay load latest`. The cache
+is not a historical model archive: syncing newer weights replaces cached
+`latest.pt`, and neither local nor remote `latest` means best-performing.
+
+Tests: `python -B -m unittest simulator.training.test_rosie -v` is stdlib-only
+and uses local subprocesses to exercise the actual remote reader. The existing
+`test_training.InferenceChecks` also launches a real offline policy process.
+Neither proves local Windows SSH authentication or in-game behavior. See
+[in-game commands and lifecycle](../cambiummod/AGENTS.md#rosie-artifact-commands)
+and [launcher parameters](../scripts/AGENTS.md#rosie-sync-and-play).
+
 ## Local Linux Checks
 
 The PowerShell scripts under `scripts/` target Windows. To build and run a small

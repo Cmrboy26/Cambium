@@ -30,6 +30,7 @@ CUDA-enabled PyTorch. See the [GPU setup](AGENTS.md#run-gpu).
 | Resume newest checkpoint | `.\scripts\train.ps1 -Resume latest` |
 | Open training charts | `.\scripts\serve-dashboard.ps1` |
 | Choose and serve a saved policy | `.\scripts\serve-policy.ps1` |
+| Configure in-game Rosie replay/duel downloads | `.\scripts\rosie-play.ps1 -Setup` |
 | Build/check native and Python code | `.\scripts\check.ps1 -Build` |
 | Also check the mod | `.\scripts\check.ps1 -Build -Mod` |
 | Check policy/contract changes | `.\scripts\check.ps1 -Scope Policy -Build -Mod` |

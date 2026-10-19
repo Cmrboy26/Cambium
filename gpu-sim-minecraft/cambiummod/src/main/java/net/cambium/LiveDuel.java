@@ -156,7 +156,11 @@ final class LiveDuel implements AutoCloseable {
 		});
 	}
 
-	private static int connect(Minecraft client, boolean arena, int port) {
+	static int stop(Minecraft client) {
+		return dispatch(client, (server, viewer) -> control(viewer, "stop"));
+	}
+
+	static int connect(Minecraft client, boolean arena, int port) {
 		return dispatch(client, (server, viewer) -> {
 			Placement[] chosen = placements.clone();
 			if (!arena) {

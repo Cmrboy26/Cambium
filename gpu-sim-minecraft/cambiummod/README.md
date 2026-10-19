@@ -39,6 +39,13 @@ to match nondefault inference ports, e.g. `/simduel arena 8768`.
 Default inference is CPU at **127.0.0.1:8766**, including GPU-trained checkpoints.
 Restart the service to load newer weights. [Full commands and limits](AGENTS.md#live-policy-duels).
 
+## Rosie Outputs
+
+After [one-time local setup](../rosie/README.md#local-replays-and-duels), use
+`/simrosie runs`, `/simrosie replay <run>` or `/simrosie duel <run>` to fetch
+artifacts over SSH and play locally. `/simduel join` lets you fight the model;
+`/simrosie stop` stops its helper and duel. No remote inference server is needed.
+
 ## Simulation Playback
 
 ```powershell
