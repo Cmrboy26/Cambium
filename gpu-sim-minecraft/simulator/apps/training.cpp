@@ -34,6 +34,7 @@ struct TrainingBatch {
     std::string definition = terrain.definition.dump();
     std::string scenario;
     std::unique_ptr<app::PolicyLayout> layout;
+    std::vector<app::Scene::PlayerDefinitions> episode_players;
     std::vector<PlayerState> players;
     std::vector<Controls> queued;
     std::vector<Controls> held;
@@ -67,7 +68,9 @@ struct TrainingBatch {
 
     TrainingBatch(int count, bool use_cuda, const char* path, int limit,
                   std::uint64_t initial_seed, const float* reward_weights, int version = 1, const char* contract = nullptr)
-        : terrain(loadTerrain(path, version)), players(std::size_t(count) * 2),
+        : terrain(loadTerrain(path, version)),
+          episode_players(count, terrain.parsePlayers(terrain.definition.at("players"))),
+          players(std::size_t(count) * 2),
           queued(players.size()), held(players.size()), worlds(count), blocks(count, terrain.blocks),
           finished(count), dealt_damage(players.size()), episodes(count), observed_opponent_disable(players.size()),
           seed(initial_seed), max_ticks(limit), schema_version(version), features(version == 2 ? 31 : 22),
@@ -121,7 +124,7 @@ struct TrainingBatch {
             const auto episode = episodes[environment]++;
             for (int player = 0; player < 2; ++player) {
                 const auto index = std::size_t(environment) * 2 + player;
-                players[index] = terrain.initial_players[player];
+                players[index] = episode_players[environment].players[player];
                 players[index].random.setSeed(seed + index * 1000003ULL + episode * 1000033ULL);
                 queued[index] = {};
                 held[index] = {};
@@ -135,6 +138,50 @@ struct TrainingBatch {
             gpu->resetEnvironments(ids.data(), ids.size(), initial.data());
         }
 #endif
+    }
+
+    void resetPlayers(const std::uint8_t* mask, const nlohmann::json& definitions) {
+        if (!definitions.is_array() || definitions.size() != worlds.size()) {
+            throw std::invalid_argument("Reset players must be an array with one entry per world");
+        }
+        std::vector<std::pair<std::size_t, app::Scene::PlayerDefinitions>> pending;
+        for (std::size_t environment = 0; environment < worlds.size(); ++environment) {
+            const bool selected = !mask || mask[environment] != 0;
+            if (!selected) {
+                if (!definitions[environment].is_null()) {
+                    throw std::invalid_argument("Unselected reset worlds must have null player definitions");
+                }
+                continue;
+            }
+            auto parsed = terrain.parsePlayers(definitions[environment], true);
+            for (const auto& slots : parsed.weapon_slots) {
+                if (schema_version == 2 && slots.size() != 2) {
+                    throw std::invalid_argument("Equipment preset requires two weapon slots");
+                }
+                if (layout) {
+                    for (const auto& head : layout->actions) {
+                        if (head.kind != 6) continue;
+                        for (float value : head.values) {
+                            if (static_cast<std::size_t>(value) >= slots.size()) {
+                                throw std::invalid_argument("Weapon action outside reset player's loadout");
+                            }
+                        }
+                    }
+                }
+            }
+            pending.emplace_back(environment, std::move(parsed));
+        }
+        for (auto& [environment, parsed] : pending) episode_players[environment] = std::move(parsed);
+        reset(mask);
+    }
+
+    std::string scenarioFor(int environment) const {
+        if (environment < 0 || environment >= static_cast<int>(worlds.size())) {
+            throw std::invalid_argument("Scenario environment index outside batch");
+        }
+        auto resolved = nlohmann::json::parse(scenario);
+        resolved["players"] = episode_players[environment].resolved;
+        return resolved.dump();
     }
 
     bool outside(const PlayerState& player) const {
@@ -178,10 +225,12 @@ struct TrainingBatch {
                 }
                 if (layout) {
                     for (int actor = 0; actor < 2; ++actor) {
-                        const auto& slots = terrain.weapon_slots[actor == 0 ? player : 1 - player];
+                        const auto& slots = episode_players[environment].weapon_slots[actor == 0 ? player : 1 - player];
                         const auto weapon = actor == 0 ? source.weapon : target.weapon;
                         catalogue[31 + actor] = static_cast<float>(std::distance(slots.begin(), std::find(slots.begin(), slots.end(), weapon)));
                     }
+                    app::equipmentObservation(catalogue, source, target,
+                        episode_players[environment].weapon_slots[player]);
                     for (int feature = 0; feature < features; ++feature) {
                         output[index * features + feature] = catalogue[layout->observations[feature]] * layout->scales[feature];
                     }
@@ -236,7 +285,7 @@ struct TrainingBatch {
         for (std::size_t index = 0; index < players.size(); ++index) {
             const auto* action = actions + index * heads;
             if (layout) {
-                queued[index] = layout->decode(action, terrain.weapon_slots[index % 2]);
+                queued[index] = layout->decode(action, episode_players[index / 2].weapon_slots[index % 2]);
                 continue;
             }
             Controls controls;
@@ -251,7 +300,7 @@ struct TrainingBatch {
             controls.pitch_delta = pitch_bins[action[5]];
             if (schema_version == 2) {
                 controls.select_weapon = true;
-                const auto& slots = terrain.weapon_slots[index % 2];
+                const auto& slots = episode_players[index / 2].weapon_slots[index % 2];
                 if (action[6] >= static_cast<int>(slots.size())) throw std::invalid_argument("Weapon action outside loadout");
                 controls.weapon = slots[action[6]];
                 controls.use_item = action[7] != 0;
@@ -374,6 +423,14 @@ MCSIM_EXPORT const char* mcsim_environment(void* handle) {
 MCSIM_EXPORT const char* mcsim_scenario(void* handle) {
     return handle ? static_cast<TrainingBatch*>(handle)->scenario.c_str() : nullptr;
 }
+MCSIM_EXPORT const char* mcsim_scenario_for(void* handle, int environment) {
+    thread_local std::string scenario;
+    const int result = protect([&] {
+        if (!handle) throw std::invalid_argument("Null scenario handle");
+        scenario = static_cast<TrainingBatch*>(handle)->scenarioFor(environment);
+    });
+    return result == 0 ? scenario.c_str() : nullptr;
+}
 MCSIM_EXPORT int mcsim_cuda_available() {
 #if defined(MCSIM_HAS_CUDA)
     return minecraft_sim::CudaBatch::available() ? 1 : 0;
@@ -415,6 +472,16 @@ MCSIM_EXPORT void* mcsim_create_schema(int environments, int use_cuda, const cha
     return result;
 }
 MCSIM_EXPORT void mcsim_destroy(void* handle) { delete static_cast<TrainingBatch*>(handle); }
+MCSIM_EXPORT int mcsim_set_reward_weights(void* handle, const float* weights) {
+    return protect([&] {
+        if (!handle || !weights) throw std::invalid_argument("Null base reward argument");
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        for (std::size_t index = 0; index < batch.weights.size(); ++index) {
+            if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
+        }
+        std::copy_n(weights, batch.weights.size(), batch.weights.begin());
+    });
+}
 MCSIM_EXPORT int mcsim_set_block_reward(void* handle, float weight) {
     return protect([&] {
         if (!handle) throw std::invalid_argument("Null block reward argument");
@@ -483,6 +550,15 @@ MCSIM_EXPORT int mcsim_reset(void* handle, const std::uint8_t* mask, float* obse
         if (!handle || !observations) { throw std::invalid_argument("Null reset argument"); }
         static_cast<TrainingBatch*>(handle)->reset(mask);
         static_cast<TrainingBatch*>(handle)->observe(observations);
+    });
+}
+MCSIM_EXPORT int mcsim_reset_players(void* handle, const std::uint8_t* mask,
+                                   const char* json_utf8, float* observations) {
+    return protect([&] {
+        if (!handle || !json_utf8 || !observations) throw std::invalid_argument("Null player reset argument");
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.resetPlayers(mask, nlohmann::json::parse(json_utf8));
+        batch.observe(observations);
     });
 }
 MCSIM_EXPORT int mcsim_step(void* handle, const std::int32_t* actions, float* observations, float* rewards,

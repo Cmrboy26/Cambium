@@ -5,6 +5,32 @@
 
 namespace minecraft_sim::app {
 
+inline float equipmentFraction(double value, double maximum) {
+    return static_cast<float>(std::clamp(value / maximum, 0.0, 1.0));
+}
+
+inline void equipmentObservation(float* catalogue, const PlayerState& source, const PlayerState& target,
+                                 const std::vector<WeaponItem>& own_slots) {
+    for (int actor = 0; actor < 2; ++actor) {
+        const auto& state = actor == 0 ? source : target;
+        catalogue[33 + actor] = state.shield_equipped ? 1.0F : 0.0F;
+        catalogue[35 + actor] = equipmentFraction(state.attack_damage, 10.0);
+        catalogue[37 + actor] = equipmentFraction(state.attack_speed, 4.0);
+        catalogue[39 + actor] = equipmentFraction(state.armor, 20.0);
+        catalogue[41 + actor] = equipmentFraction(state.armor_toughness, 12.0);
+    }
+    for (int slot = 0; slot < 9; ++slot) {
+        float* values = catalogue + 43 + slot * 4;
+        std::fill_n(values, 4, 0.0F);
+        if (slot >= static_cast<int>(own_slots.size()) || own_slots[slot] == WeaponItem::unarmed) continue;
+        const auto attributes = weaponAttributes(own_slots[slot]);
+        values[0] = 1.0F;
+        values[1] = attributes.disable_shield_seconds > 0.0F ? 1.0F : 0.0F;
+        values[2] = equipmentFraction(attributes.damage, 10.0);
+        values[3] = equipmentFraction(attributes.speed, 4.0);
+    }
+}
+
 inline std::array<float, 22> baseObservation(const PlayerState& source, const PlayerState& target,
                                            const std::array<float, 8>& rays) {
     constexpr double radians = 0.017453292519943295;

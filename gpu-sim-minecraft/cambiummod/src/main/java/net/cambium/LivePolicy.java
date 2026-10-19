@@ -14,6 +14,12 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.item.component.ItemAttributeModifiers;
+import net.cambium.ObservationEncoder.Equipment;
+import net.cambium.ObservationEncoder.Weapon;
 
 final class LivePolicy implements AutoCloseable {
 
@@ -114,7 +120,30 @@ final class LivePolicy implements AutoCloseable {
 		catalogue[30] = source.isUsingItem() ? Math.min(source.getTicksUsingItem() / 5.0F, 1) : 0;
 		catalogue[31] = weaponSlot(source, sourceIndex);
 		catalogue[32] = weaponSlot(target, 1 - sourceIndex);
+		ObservationEncoder.equipment(catalogue, equipment(source), equipment(target), weaponSlots(source));
 		return contract.project(catalogue);
+	}
+
+	private static Weapon[] weaponSlots(ServerPlayer player) {
+		Weapon[] slots = new Weapon[9];
+		for (int slot = 0; slot < slots.length; slot++) slots[slot] = weapon(player.getInventory().getItem(slot));
+		return slots;
+	}
+
+	private static Equipment equipment(ServerPlayer player) {
+		return new Equipment(player.getOffhandItem().is(Items.SHIELD), player.getAttributeValue(Attributes.ATTACK_DAMAGE),
+				player.getAttributeValue(Attributes.ATTACK_SPEED), player.getAttributeValue(Attributes.ARMOR),
+				player.getAttributeValue(Attributes.ARMOR_TOUGHNESS));
+	}
+
+	static Weapon weapon(ItemStack stack) {
+		String name = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+		boolean axe = name.endsWith("_axe");
+		boolean present = !stack.isEmpty() && (axe || name.endsWith("_sword"));
+		if (!present) return new Weapon(false, false, 0, 0);
+		var modifiers = stack.getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS, ItemAttributeModifiers.EMPTY);
+		return new Weapon(true, axe, modifiers.compute(Attributes.ATTACK_DAMAGE, 1.0, EquipmentSlot.MAINHAND),
+				modifiers.compute(Attributes.ATTACK_SPEED, 4.0, EquipmentSlot.MAINHAND));
 	}
 
 	private static boolean weaponIsAxe(ServerPlayer player) {

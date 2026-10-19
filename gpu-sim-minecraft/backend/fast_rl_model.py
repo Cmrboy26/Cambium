@@ -117,7 +117,8 @@ class ActorCritic(nn.Module):
             sizes.update(weapon=2, shield=2)
         if action_sizes is not None:
             sizes = dict(action_sizes)
-        allowed = {"movement", "jump", "sprint", "attack", "yaw", "pitch", "weapon", "shield", "sneak"}
+        from simulator.training.contract import HEADS
+        allowed = set(HEADS)
         if not sizes or any(name not in allowed or type(size) is not int or not 1 <= size <= 64 for name, size in sizes.items()):
             raise ValueError("Invalid categorical policy heads")
         self.action_names = tuple(sizes)

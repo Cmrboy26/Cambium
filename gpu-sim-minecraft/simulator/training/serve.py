@@ -12,6 +12,7 @@ import torch
 from backend.fast_rl_model import ActorCritic
 from simulator.training.environment import SCHEMA, SCHEMAS
 from simulator.training.contract import CATALOGUE_HASH, fingerprint, from_legacy, resolve_scenario, validate_contract
+from simulator.training.policies import fixed_indices
 
 
 class Policy:
@@ -30,7 +31,7 @@ class Policy:
                 raise ValueError("Checkpoint is not a compatible standalone two-player PPO policy") from error
         if (saved.get("format") != "minecraft_sim_ppo" or saved.get("version") != 1
             or schema is None or manifest.get("players_per_environment") != 2
-                or manifest.get("learner") != "both_shared_policy"):
+                or manifest.get("learner") not in ("both_shared_policy", "opponent_pool")):
             raise ValueError("Checkpoint is not a compatible standalone two-player PPO policy")
         self.schema = schema
         self.contract = from_legacy(schema) if schema.get("format") != "minecraft_sim_policy" else validate_contract(schema)
@@ -54,13 +55,15 @@ class Policy:
             raise ValueError("Checkpoint contains non-finite parameters")
         self.model.eval()
         self.deterministic = deterministic
+        self.fixed = fixed_indices(self.contract, manifest.get("controls", {"fixed": {}}))
         self.lock = threading.Lock()
         self.info = {"protocol": 1, "schema": self.schema, "environment": definition,
                      "contract": self.contract, "contract_hash": fingerprint(self.contract),
                      "catalogue_hash": CATALOGUE_HASH, "training_build": manifest.get("native_build"),
                      "minecraft_bridge_supported": True,
                      "checkpoint": str(self.path), "update": saved.get("update", 0),
-                     "max_ticks": limit, "device": str(self.device), "deterministic": deterministic}
+                     "max_ticks": limit, "device": str(self.device), "deterministic": deterministic,
+                     "controls": manifest.get("controls", {"fixed": {}})}
 
     @torch.inference_mode()
     def act(self, request):
@@ -78,7 +81,9 @@ class Policy:
         with self.lock:
             logits, _ = self.model(torch.as_tensor(observations, device=self.device))
             actions = torch.stack([
-                logits[name].argmax(-1) if self.deterministic else torch.distributions.Categorical(logits=logits[name]).sample()
+                torch.full((2,), self.fixed[name], dtype=torch.long, device=self.device) if name in self.fixed
+                else logits[name].argmax(-1) if self.deterministic
+                else torch.distributions.Categorical(logits=logits[name]).sample()
                 for name in self.schema["action_names"]], dim=-1).cpu().tolist()
         return {"protocol": 1, "session": request["session"], "tick": request["tick"],
             "contract_hash": self.info["contract_hash"], "actions": actions}

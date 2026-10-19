@@ -84,6 +84,8 @@ select any destination without detecting Minecraft.
 | `-ReplayEvery` | Nonnegative integer; completed duels between samples | `0`: disabled |
 | `-SaveEvery` | Positive integer; updates between checkpoint saves | `10` |
 | `-Environment` | Arena/experiment JSON path | Default duel; checkpoint definition on resume |
+| `-Plan` | Research training-plan JSON; exclusive with `-Environment` | Unset: shared self-play |
+| `-Initialize` | Compatible learner weights for a new `-Plan`; exclusive with `-Resume` | Unset |
 | `-Library` | Native training DLL/SO | Discover from native builds |
 | `-Output` | Run directory | Timestamped run; checkpoint folder on resume |
 | `-Resume` | `latest` or checkpoint path | Unset: new run |
@@ -113,11 +115,19 @@ current rollout or an optimizer update.
 
 ```powershell
 .\scripts\train.ps1 -Schema v2
+.\scripts\train.ps1 -Plan simulator/training/presets/gear-curriculum.json
 .\scripts\train.ps1 -Environment simulator/environments/research-duel.json -ReplayEvery 100 -ReplayToMinecraft
 .\scripts\train.ps1 -Resume latest -Updates 100
 .\scripts\train.ps1 -Updates 1 -Environments 2 -RolloutSteps 16 `
   -ExtraArguments @('--epochs', '1', '--minibatch-size', '64')
 ```
+
+Research plans add scripted/checkpoint opponent mixtures, fixed controls,
+reset-time sampling and curriculum stages. See the
+[plan reference](../simulator/training/AGENTS.md#research-training-plans).
+Research resume restores the embedded plan without the original source files;
+the wrapper recovers world count/rollout length unless explicitly supplied.
+Completed curricula stop before the invocation's update cap when appropriate.
 
 ## Serve Policy
 

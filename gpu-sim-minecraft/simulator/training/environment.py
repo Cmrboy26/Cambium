@@ -8,12 +8,11 @@ import sys
 
 import numpy as np
 from simulator.training.contract import CATALOGUE_HASH, from_legacy, validate_contract
+from simulator.training.legacy import ACTION_NAMES, ACTION_SIZES, SCHEMA, SCHEMA_V2, SCHEMAS
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MAX_TICKS = 300
 MAX_MAX_TICKS = 1_000_000
-ACTION_NAMES = ("movement", "jump", "sprint", "attack", "yaw", "pitch")
-ACTION_SIZES = (9, 2, 2, 2, 9, 5)
 BASE_REWARD_NAMES = ("doing_damage", "taking_damage", "won_duel", "death",
                      "episode_timeout", "no_damage_penalty")
 SHAPING_REWARD_NAMES = ("good_aim", "proximity", "pitch_control", "aim_hold", "extreme_pitch_penalty")
@@ -21,42 +20,6 @@ REWARD_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield", *SHAPING_REWARD_NAMES
 REWARD_TYPE_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield")
 DEFAULT_REWARD_WEIGHTS = json.loads(Path(__file__).with_name("reward_weights.json").read_text(encoding="utf-8"))
 REWARD_SEMANTICS = "health_fraction_damage_episode_shaping_budgets_v2"
-SCHEMA = {
-    "id": "minecraft_sim_duel_22_v1",
-    "minecraft": "26.3",
-    "observation_dim": 22,
-    "observations": ["health/20", "yaw_wrapped/180", "pitch/90", "opponent_alive",
-                     "opponent_health/20", "relative_x/10", "relative_y/10", "relative_z/10",
-                     "opponent_yaw_wrapped/180", "opponent_pitch/90",
-                     *[f"eye_wall_ray_world_yaw_{angle}/50" for angle in range(0, 360, 45)],
-                     "min(distance/10,1)", "feet_relative_aim_dot", "yaw_error/180", "pitch_error/90"],
-    "action_names": list(ACTION_NAMES),
-    "action_sizes": list(ACTION_SIZES),
-    "movement": ["neutral", "forward", "forward_right", "right", "backward_right",
-                 "backward", "backward_left", "left", "forward_left"],
-    "yaw_bins": [-20, -10, -5, -2, 0, 2, 5, 10, 20],
-    "pitch_bins": [-5, -2, 0, 2, 5],
-    "ticks_per_action": 1,
-    "reward_profile": "accepted_hits_win_loss_timeout_v1",
-    "termination": "death_or_exit_xz_bounds_or_y_below_min_minus_4",
-    "timeout": "truncated_bootstrap_final_observation",
-}
-SCHEMA_V2 = {
-    **SCHEMA,
-    "id": "minecraft_sim_duel_31_v2",
-    "observation_dim": 31,
-    "observations": [*SCHEMA["observations"], "weapon_is_axe", "opponent_weapon_is_axe",
-                     "using_shield", "opponent_using_shield", "shield_disabled",
-                     "opponent_shield_disabled_observed", "min(shield_cooldown/100,1)",
-                     "attack_charge", "using_shield*min(shield_use_ticks/5,1)"],
-    "action_names": [*ACTION_NAMES, "weapon", "shield"],
-    "action_sizes": [*ACTION_SIZES, 2, 2],
-    "weapon": ["diamond_sword", "diamond_axe"],
-    "shield": ["release", "hold_use"],
-    "loadout": "unarmored_sword_axe_shield",
-    "opponent_disabled": "own_observed_axe_disable_event_then_100_tick_countdown",
-}
-SCHEMAS = {"v1": SCHEMA, "v2": SCHEMA_V2}
 
 
 def resolve_max_ticks(environment=None, override=None):
@@ -289,6 +252,56 @@ class Environment:
         selected = np.ascontiguousarray(raw, dtype=np.uint8)
         self._check(self.native.mcsim_reset(self._handle, selected.ctypes.data, self._observations.ctypes.data))
         return self._observations.copy()
+
+    def reset_players(self, players, mask):
+        """Reset selected episodes without rebuilding their immutable terrain."""
+        self._require_open()
+        raw = np.asarray(mask)
+        if raw.shape != (self.count,) or raw.dtype.kind not in "bui" or not np.isin(raw, [0, 1]).all():
+            raise ValueError("Reset mask must contain one boolean per environment")
+        selected = np.ascontiguousarray(raw, dtype=np.uint8)
+        if not isinstance(players, list) or len(players) != self.count:
+            raise ValueError("Player definitions must contain one entry per environment")
+        function = getattr(self.native, "mcsim_reset_players", None)
+        if function is None:
+            raise RuntimeError("Rebuild minecraft_sim_training for sampled episode resets")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        self._check(function(self._handle, selected.ctypes.data,
+            json.dumps(players, allow_nan=False).encode("utf-8"), self._observations.ctypes.data))
+        return self._observations.copy()
+
+    def episode_scenario(self, environment=0):
+        self._require_open()
+        if type(environment) is not int or not 0 <= environment < self.count:
+            raise ValueError("Scenario environment index outside batch")
+        function = getattr(self.native, "mcsim_scenario_for", None)
+        if function is None:
+            raise RuntimeError("Rebuild minecraft_sim_training for sampled episode scenarios")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        function.restype = ctypes.c_char_p
+        result = function(self._handle, environment)
+        if result is None:
+            raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
+        return {**json.loads(result), "reward_weights": self.weights.copy()}
+
+    def set_rewards(self, weights):
+        resolved = resolve_reward_weights({}, weights)
+        if not all(np.isfinite(value) for value in resolved.values()):
+            raise ValueError("Reward weights must be finite")
+        effective = {name: value / self.max_ticks if name in SHAPING_REWARD_NAMES else value
+                     for name, value in resolved.items()}
+        base = getattr(self.native, "mcsim_set_reward_weights", None)
+        if base is None:
+            raise RuntimeError("Rebuild minecraft_sim_training for curriculum rewards")
+        values = np.array([effective[name] for name in BASE_REWARD_NAMES], dtype=np.float32)
+        base.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        base.restype = ctypes.c_int
+        self._check(base(self._handle, values.ctypes.data))
+        self._check(self.native.mcsim_set_block_reward(self._handle, resolved["blocked_with_shield"]))
+        shaping = np.array([effective[name] for name in SHAPING_REWARD_NAMES], dtype=np.float32)
+        self._check(self.native.mcsim_set_shaping_rewards(self._handle, shaping.ctypes.data))
+        self.weights, self.effective_weights = resolved, effective
 
     def step(self, actions):
         self._require_open()

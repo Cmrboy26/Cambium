@@ -10,13 +10,160 @@ Minecraft, RCON or legacy timers. Two players/world share one policy; worlds are
 independent. Both decisions use the same pre-tick observation before ordered
 physics updates. Hold weights fixed through a rollout, then synchronously update
 PPO minibatches. No opponent pool/frozen-opponent schedule or distributed/multi-GPU
-optimization is implemented.
+optimization is implemented in the legacy path. Research plans use a separate
+orchestrator over the same physics/model/PPO helpers; see below.
 
 The native library exposes a small C ABI through `ctypes`, without pybind11 or
 Python development headers. CPU worlds use OpenMP when available, sequential
 execution otherwise. CUDA training still stages controls/state through host
 memory; observations/rays/rewards run on CPU. Do not present physics benchmark
 rates as full PPO rates. Collection time includes enabled replay sampling.
+
+## Research Training Plans
+
+Pass `--plan simulator/training/presets/gear-curriculum.json` (PowerShell
+`-Plan`) to opt into the research orchestrator. No plan preserves legacy shared
+self-play. Plans are `minecraft_sim_training_plan`, version 1; unknown fields,
+capabilities, controls, rewards and items fail rather than silently defaulting.
+Paths inside plans are relative to the project root, not the plan's directory.
+`--updates` is the maximum additional updates for this invocation; stage
+budgets may complete the curriculum sooner. The plan's seed owns sampling and
+learner initialization; the legacy `--seed` does not override it.
+
+### Plan And Episode Contracts
+
+- `policy`: either a complete semantic descriptor, `{"preset":"v1"}`,
+  `{"preset":"v2"}`, or `{"preset":"equipment_v3"}`. V1/v2 constants live in
+  [legacy.py](legacy.py) and are re-exported by the environment for compatibility.
+  All stages share one immutable layout. V3 fixes 78 named catalogue
+  features and eight heads with a stable weapon-slot count across all stages
+  and evaluation scenes; later catalogue additions do not change it. Explicit
+  descriptors permit smaller research layouts. V3 includes own slot contents,
+  but only visible selected-weapon/shield/armor information for the opponent,
+  not hidden inventory or the legacy opponent slot index.
+- `scenario.base`: existing environment JSON. Alternatively `scenario.arenas`
+  is a weighted list of `{"base":"...", "weight":1}`. Environments are embedded
+  into the resolved plan/checkpoint; edited/deleted source files do not alter
+  implicit resumes. Arena assignment is sampled once per world. Worlds sharing
+  a scene use one native batch and immutable terrain. Changing only player
+  state/loadouts never rebuilds or uploads terrain.
+- `scenario.spawns`: `sample: world|episode`, optional `region` with `min/max`
+  XYZ, `minimum_separation` (at least 0.6), `yaw` and `pitch`. Sampling uses
+  bounded rejection for collision-free positions in the supported air/stone
+  scene; exhaustion is an explicit error. Without a region, preserve positions.
+- `scenario.equipment`: `sample: world|episode`, `players: independent`, and
+  `loadout`. Specified loadout fields replace the base field; unspecified ones
+  inherit it. Weapon slots never shift. Air means an empty hand/absent shield
+  or armor. Each slot can be literal or a weighted choice. Possible duplicate
+  weapon IDs across slots are rejected under the existing scene contract.
+  Armor can vary independently by slot using the same choice syntax.
+- Weighted choices use `{"choices":[{"value":"minecraft:shield","weight":1},
+  {"value":"minecraft:air","weight":1}]}`. Look values also accept
+  `{"uniform":[-180,180]}`. Literal values do not draw RNG. Separate persistent
+  streams own arena selection, spawns, equipment, opponent selection and player
+  side selection. World samples cache across resets; changing a component's
+  stage configuration invalidates only that component's cache.
+
+An episode resolves concrete players/loadouts before native reset. ABI2 additive
+`mcsim_reset_players` validates the entire selected batch before mutation,
+retains per-world slots, and reuses terrain. `mcsim_scenario_for` returns the
+actual initial scenario, not a sampling distribution. Ordinary native reset
+restores the world's most recently assigned players. Initial scene templates
+and live world state have distinct ownership: future block edits must be
+per-world, restore on reset, and distinguish initial/protected blocks from
+placed blocks. Placement/breaking are not implemented; do not accept settings
+that pretend to enable them or allocate mutable terrain for unchanged worlds.
+
+### Controllers And Constraints
+
+`opponents` maps IDs to either:
+
+```json
+{
+  "target": {"type":"scripted","controller":"stationary_target"},
+  "fighter": {"type":"scripted","controller":"basic_melee","options":{"strafe":true}},
+  "frozen": {"type":"checkpoint","path":"simulator/training/runs/baseline/latest.pt"}
+}
+```
+
+Checkpoint files are trusted input, loaded with `weights_only=True`; matching
+semantic contracts and finite parameters are required. Their SHA256 identities
+are embedded in the plan; changed opponents reject resume. Different legacy or
+custom layouts require explicit adapters and are not implicitly remapped.
+Checkpoints do not import their optimizer or curriculum into the opponent.
+
+Use [controllers.py](controllers.py)'s `register_controller`, or an explicit
+trusted `package.module:factory` controller name. Factories receive `contract`,
+`count`, `seed`, `options`; see existing builtins for their exact signature.
+Implement `act(observations, indices=None)`, `reset(mask)`, `state_dict`,
+`load_state_dict`, and `describe`/`provenance` properties. Inputs are `[N,F]`,
+actions `[N,H]`; indices address persistent slots within the full world count.
+Reset masks always span the full count. State must be `weights_only`-safe.
+Controllers use contract feature scales and semantic choices, not preset indices.
+Module factories execute local Python: only configure trusted code.
+
+Each world's opponent and learner side are sampled per episode and held fixed
+until it ends. Only learner transitions reach PPO. Frozen controllers use local
+sampling generators rather than consuming the learner's RNG. The built-in
+fighter requires target distance/yaw/pitch-error features; shielding and explicit
+axe/sword switching are opt-in options with validated prerequisites.
+
+Stage `controls.fixed` maps head names to semantic values, e.g.
+`{"attack":false,"movement":"neutral","weapon":0}`. Omitted heads remain learned.
+Fixed heads bypass sampling and contribute neither log probability nor entropy;
+optimization evaluates the same constrained distribution. Constraints are saved
+with the rollout, checkpoint and replay; HTTP and checkpoint inference honor
+them. Do not overwrite unconstrained samples after sampling.
+
+### Stages, Evaluation And Checkpoints
+
+Stages have unique `name`, a weighted `opponents` mixture of `{"id":..., "weight":...}`,
+optional `controls`, `rewards`, `scenario` overrides, and `advance`. Stage
+configuration resolves independently from plan defaults, not the previous stage.
+Reward modes: `environment` preserves scene/default weights, `override` changes
+named weights, `replace` starts all weights at zero. Replace is useful for aiming
+without accidental no-damage/timeout penalties. Supported reward mechanics/units
+remain those documented above/below; adding weights does not implement mechanics.
+
+Advancement supports `{"updates":300}`, `{"episodes":1000}`,
+`{"transitions":100000}`, or
+`{"evaluation":{"suite":"held","metric":"win_rate","at_least":0.75}}`.
+Compose with explicit `any`/`all` lists. Updates count completed PPO updates
+within the stage; transitions count learner decisions, not opponent decisions.
+Budgets are checked after a complete rollout/update, so episode/transition
+budgets can overshoot by one rollout. Transitions reset active episodes without
+combat losses and record `curriculum_boundary` in metrics. Completed plans stop;
+extending them is a new experiment, not an incompatible resume.
+
+Named `evaluations` define `every_updates`, `episodes`, `seed`, an opponent
+mixture, optional scenario, and optional controls (default unrestricted).
+Intervals use global completed updates. Suites run separate seeded worlds,
+model eval mode and isolated RNG, never contribute training transitions, and
+report exact episode count, mean episode return and wins/episodes. Wins require
+opponent death/exit with the learner still alive/in bounds; timeouts count as
+non-wins. Up to 16 evaluation worlds provide stable scene/gear combinations.
+Metrics retain stage, budget progress and suite results in JSONL.
+
+Research replay cadence counts completed training episodes, like legacy replay.
+Samples are separate complete duels using a concrete sampled scene, real pool
+opponent, learner side and stage constraints, with semantic replay controls.
+Evaluation/replay must leave learner RNG and subsequent training unchanged.
+
+Research checkpoints retain the PPO envelope and embed plan, stage/budget
+progress, sampler caches/streams, pool/controller state, and opponent identities.
+Resume without `--plan` restores the embedded plan. World count, rollout length,
+episode-limit override and architecture must match. Resume starts fresh episodes,
+not exact mid-episode trajectories: native world state is not serialized.
+`--initialize CHECKPOINT --plan NEW_PLAN` transfers compatible learner weights
+only, starting new optimizer/schedule/sampling state. Research checkpoints serve
+through the same descriptor-based HTTP/mod bridge as existing policies.
+
+Run `python -B -m unittest simulator.training.test_controllers
+simulator.training.test_research -v` after building the native library; Training
+and All launcher/CI scopes include these checks. CUDA and JDK25/live gates remain
+separate. For new primitives, follow the extension recipes below, including
+independent native/live encoders and fixtures; do not add preset-specific PPO
+branches.
 
 ## Setup
 

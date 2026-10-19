@@ -27,6 +27,7 @@ SIM_THREADS="${SIM_THREADS:-4}"
 SIM_SEED="${SIM_SEED:-1}"
 SIM_SCHEMA="${SIM_SCHEMA:-v1}"
 SIM_ENVIRONMENT="${SIM_ENVIRONMENT:-}"
+SIM_PLAN="${SIM_PLAN:-}"
 SIM_REPLAY_EVERY="${SIM_REPLAY_EVERY:-0}"
 SIM_REPLAY_DIR="${SIM_REPLAY_DIR:-}"
 SIM_OUTPUT="${SIM_OUTPUT:-$SIM_ROOT/simulator/training/runs/rosie-${SLURM_JOB_ID}}"
@@ -41,6 +42,14 @@ fi
 
 if [[ -n "$SIM_ENVIRONMENT" && ! -f "$SIM_ENVIRONMENT" ]]; then
     echo "ERROR: Environment file not found from $SIM_ROOT: $SIM_ENVIRONMENT"
+    exit 1
+fi
+if [[ -n "$SIM_PLAN" && ! -f "$SIM_PLAN" ]]; then
+    echo "ERROR: Training plan not found from $SIM_ROOT: $SIM_PLAN"
+    exit 1
+fi
+if [[ -n "$SIM_PLAN" && -n "$SIM_ENVIRONMENT" ]]; then
+    echo "ERROR: Choose SIM_PLAN or SIM_ENVIRONMENT, not both."
     exit 1
 fi
 if [[ "$SIM_REPLAY_EVERY" -lt 0 ]]; then
@@ -115,6 +124,9 @@ TRAIN_ARGS=(
 )
 if [[ -n "$SIM_ENVIRONMENT" ]]; then
     TRAIN_ARGS+=(--environment "$SIM_ENVIRONMENT")
+fi
+if [[ -n "$SIM_PLAN" ]]; then
+    TRAIN_ARGS+=(--plan "$SIM_PLAN")
 fi
 if [[ "$SIM_REPLAY_EVERY" -gt 0 ]]; then
     TRAIN_ARGS+=(--replay-every "$SIM_REPLAY_EVERY")

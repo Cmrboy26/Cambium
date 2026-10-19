@@ -12,7 +12,21 @@
     "target.distance_fraction", "target.aim_dot", "target.yaw_error", "target.pitch_error",
     "self.weapon_is_axe", "opponent.weapon_is_axe", "self.shield_using", "opponent.shield_using",
     "self.shield_disabled", "opponent.shield_disabled_observed", "self.shield_cooldown_fraction",
-    "self.attack_charge", "self.shield_raise_fraction", "self.weapon_slot", "opponent.weapon_slot"
+    "self.attack_charge", "self.shield_raise_fraction", "self.weapon_slot", "opponent.weapon_slot",
+    "self.has_shield", "opponent.has_shield",
+    "self.weapon_damage_fraction", "opponent.weapon_damage_fraction",
+    "self.weapon_speed_fraction", "opponent.weapon_speed_fraction",
+    "self.armor_defense_fraction", "opponent.armor_defense_fraction",
+    "self.armor_toughness_fraction", "opponent.armor_toughness_fraction",
+    "self.weapon_slot_0.present", "self.weapon_slot_0.is_axe", "self.weapon_slot_0.damage_fraction", "self.weapon_slot_0.speed_fraction",
+    "self.weapon_slot_1.present", "self.weapon_slot_1.is_axe", "self.weapon_slot_1.damage_fraction", "self.weapon_slot_1.speed_fraction",
+    "self.weapon_slot_2.present", "self.weapon_slot_2.is_axe", "self.weapon_slot_2.damage_fraction", "self.weapon_slot_2.speed_fraction",
+    "self.weapon_slot_3.present", "self.weapon_slot_3.is_axe", "self.weapon_slot_3.damage_fraction", "self.weapon_slot_3.speed_fraction",
+    "self.weapon_slot_4.present", "self.weapon_slot_4.is_axe", "self.weapon_slot_4.damage_fraction", "self.weapon_slot_4.speed_fraction",
+    "self.weapon_slot_5.present", "self.weapon_slot_5.is_axe", "self.weapon_slot_5.damage_fraction", "self.weapon_slot_5.speed_fraction",
+    "self.weapon_slot_6.present", "self.weapon_slot_6.is_axe", "self.weapon_slot_6.damage_fraction", "self.weapon_slot_6.speed_fraction",
+    "self.weapon_slot_7.present", "self.weapon_slot_7.is_axe", "self.weapon_slot_7.damage_fraction", "self.weapon_slot_7.speed_fraction",
+    "self.weapon_slot_8.present", "self.weapon_slot_8.is_axe", "self.weapon_slot_8.damage_fraction", "self.weapon_slot_8.speed_fraction"
   ],
   "actions": [
     {"name": "movement", "kind": "movement"},

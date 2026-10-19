@@ -15,6 +15,7 @@ import torch
 
 from backend.fast_rl_model import ActorCritic, FastRLAgent
 from simulator.training.environment import ACTION_NAMES, Environment, REWARD_SEMANTICS, ROOT, SCHEMA, SCHEMAS, resolve_max_ticks
+from simulator.training.policies import policy_actions
 
 
 def sample_actions(model, observations, action_names=ACTION_NAMES):
@@ -175,7 +176,11 @@ def optimize(model, optimizer, rollout, epochs, minibatch_size):
         permutation = torch.randperm(observations.shape[0], device=observations.device)
         for start in range(0, observations.shape[0], minibatch_size):
             indices = permutation[start:start + minibatch_size]
-            log_probs, values, entropy = model.evaluate_policy_actions(observations[indices], actions[indices])
+            if "fixed_actions" in rollout:
+                _, log_probs, values, entropy = policy_actions(model, observations[indices],
+                    model.action_names, rollout["fixed_actions"], actions[indices])
+            else:
+                log_probs, values, entropy = model.evaluate_policy_actions(observations[indices], actions[indices])
             log_ratio = log_probs - old_log_probs[indices]
             ratio = log_ratio.exp()
             policy_loss = -torch.minimum(ratio * advantages[indices],
@@ -243,6 +248,8 @@ def arguments(argv=None):
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--lr", type=float, default=FastRLAgent.LR)
     parser.add_argument("--environment", help="Environment JSON; default environments/duel.json")
+    parser.add_argument("--plan", help="Research training plan JSON (controllers, sampling and curriculum)")
+    parser.add_argument("--initialize", help="Initialize learner weights without restoring optimizer or task")
     parser.add_argument("--library", help="Explicit native training DLL/SO path")
     parser.add_argument("--output", help="Run directory; default timestamp under simulator/training/runs")
     parser.add_argument("--resume", help="Resume a compatible simulator training checkpoint")
@@ -262,11 +269,20 @@ def arguments(argv=None):
         parser.error("replay-every must be nonnegative; enabled replays require max-ticks <= 100000")
     if options.replay_dir and not options.replay_every:
         parser.error("replay-dir requires --replay-every N")
+    if options.initialize and options.resume:
+        parser.error("Choose --initialize or --resume, not both")
+    if options.plan and options.environment:
+        parser.error("A training plan selects its own environments")
+    if options.initialize and not options.plan:
+        parser.error("--initialize requires --plan")
     return options
 
 
 def main(argv=None):
     options = arguments(argv)
+    if options.plan:
+        from simulator.training.research import run
+        return run(options)
     if options.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA mode needs a CUDA-enabled PyTorch install and an available GPU")
     os.environ["OMP_NUM_THREADS"] = str(options.threads)
@@ -280,6 +296,9 @@ def main(argv=None):
         raise ValueError("Output directory is not empty; choose another output or use --resume")
     with ExitStack() as resources:
         checkpoint = torch.load(options.resume, map_location=device, weights_only=True) if options.resume else None
+        if checkpoint is not None and "research" in checkpoint:
+            from simulator.training.research import run
+            return run(options, checkpoint=checkpoint)
         if checkpoint is not None and checkpoint.get("metadata", {}).get("reward_semantics") != REWARD_SEMANTICS:
             raise ValueError("Checkpoint reward semantics do not match health-normalized rewards; start a new run")
         saved_schema = checkpoint.get("metadata", {}).get("schema") if checkpoint is not None else None

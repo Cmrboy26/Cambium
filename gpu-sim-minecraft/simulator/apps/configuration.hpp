@@ -56,6 +56,9 @@ inline std::vector<WeaponItem> applyLoadout(PlayerState& state, const nlohmann::
     if (loadout.contains("selected") && !loadout.at("selected").is_number_integer()) {
         throw std::invalid_argument("Selected weapon must be an integer slot");
     }
+    if (loadout.contains("selected") && (loadout.at("selected") < 0 || loadout.at("selected") >= slots.size())) {
+        throw std::invalid_argument("Selected weapon outside loadout");
+    }
     const auto selected = loadout.value("selected", 0);
     if (selected < 0 || selected >= static_cast<int>(slots.size())) throw std::invalid_argument("Selected weapon outside loadout");
     const auto offhand = loadout.value("offhand", std::string("minecraft:air"));

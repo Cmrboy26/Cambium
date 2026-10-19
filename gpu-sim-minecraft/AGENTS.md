@@ -74,6 +74,12 @@ not a fully GPU-resident PPO pipeline.
 	Replay and live adapters support it.
 - V2 adds sword/axe selection and offhand shield use: 31 observations and eight
 	action heads. Training, resume, replay and live deployment share its contract.
+- Opt-in research plans add scripted/frozen checkpoint opponent pools, constrained
+	curricula and reset-time scenario sampling. `equipment_v3` uses a fixed set of
+	78 named features, including shield presence, own slot metadata and visible
+	opponent equipment (not hidden opponent inventory).
+	Legacy presets remain isolated and unchanged; descriptors remain the common
+	execution path.
 - Custom experiments select/reorder observations and action choices, weapon
 	slots and per-player armor/shields in JSON without a new preset ID.
 - Supported layouts/loadouts are data-driven across training, replay and live

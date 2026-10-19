@@ -1,0 +1,25 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 1,
+  "minecraft": "26.3",
+  "profile": "configured",
+  "bounds": {"min": [-3, 0, -3], "size": [7, 4, 7]},
+  "blocks": [{"from": [-3, 0, -3], "to": [3, 0, 3], "block": "minecraft:stone"}],
+  "policy": {
+    "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+    "observations": [{"feature": "self.health_fraction"}],
+    "actions": [{"name": "weapon", "values": [0, 1, 2]}]
+  },
+  "players": [
+    {
+      "position": [0.5, 1, -1.5], "velocity": [0, 0, 0], "yaw": 0, "pitch": 0, "on_ground": true,
+      "health": 20, "absorption": 0, "attack_strength_ticks": 20,
+      "loadout": {"weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"]}
+    },
+    {
+      "position": [0.5, 1, 1.5], "velocity": [0, 0, 0], "yaw": 180, "pitch": 0, "on_ground": true,
+      "health": 20, "absorption": 0, "attack_strength_ticks": 20,
+      "loadout": {"weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"]}
+    }
+  ]
+}

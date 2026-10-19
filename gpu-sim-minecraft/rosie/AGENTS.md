@@ -52,6 +52,10 @@ Supported training environment variables:
 - `SIM_HIDDEN_DIM`: width of the policy's hidden layers; default 256. Try 512 as a moderate increase; larger networks cost more optimizer time and are not guaranteed to train better.
 - `SIM_THREADS`, `SIM_SEED`, `SIM_SCHEMA`: CPU threads, random seed, and `v1`/`v2` schema.
 - `SIM_ENVIRONMENT`: JSON scenario path relative to `gpu-sim-minecraft` or an absolute path.
+- `SIM_PLAN`: research plan path, exclusive with `SIM_ENVIRONMENT`, e.g.
+  `simulator/training/presets/gear-curriculum.json`. The plan's seed/layout own
+  research initialization; `SIM_SCHEMA`/`SIM_SEED` remain legacy options.
+  `SIM_UPDATES` caps this invocation; a completed curriculum stops early.
 - `SIM_OUTPUT`: run directory; default `simulator/training/runs/rosie-<JOB_ID>`.
 - `SIM_REPLAY_EVERY`: replay interval in completed duels; default 0 (disabled).
 - `SIM_REPLAY_DIR`: optional replay destination; default `<run>/replays` when replay is enabled.

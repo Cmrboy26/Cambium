@@ -46,7 +46,7 @@ jobs:
       - name: Native Regression And Contract Fixtures
         run: ctest --test-dir simulator/build --output-on-failure --no-tests=error
       - name: Training And Dashboard Regressions
-        run: python -B -m unittest simulator.training.test_training simulator.training.test_dashboard simulator.training.test_rosie -v
+        run: python -B -m unittest simulator.training.test_training simulator.training.test_controllers simulator.training.test_research simulator.training.test_dashboard simulator.training.test_rosie -v
       - name: Mod Checks And Shared Contract Fixtures
         run: |
           chmod +x cambiummod/gradlew

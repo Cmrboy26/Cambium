@@ -82,6 +82,56 @@ void checkPolicyFixtures() {
     }
 }
 
+void checkEquipmentObservation() {
+    using namespace minecraft_sim;
+    PlayerState source, target;
+    const std::vector<WeaponItem> own{WeaponItem::wooden_sword, WeaponItem::netherite_axe, WeaponItem::unarmed};
+    app::applyLoadout(source, {{"weapons", {"minecraft:wooden_sword", "minecraft:netherite_axe", "minecraft:air"}},
+        {"selected", 1}, {"offhand", "minecraft:shield"}, {"armor", {
+            {"boots", "minecraft:netherite_boots"}, {"leggings", "minecraft:netherite_leggings"},
+            {"chestplate", "minecraft:netherite_chestplate"}, {"helmet", "minecraft:netherite_helmet"}}}});
+    app::applyLoadout(target, {{"weapons", {"minecraft:iron_axe", "minecraft:diamond_sword"}},
+        {"selected", 1}, {"armor", {{"chestplate", "minecraft:diamond_chestplate"}}}});
+    std::array<float, app::feature_names.size()> catalogue;
+    catalogue.fill(-1.0F);
+    app::equipmentObservation(catalogue.data(), source, target, own);
+    const auto feature = [&](const char* name) { return catalogue[app::nameIndex(app::feature_names, name)]; };
+    near(feature("self.has_shield"), 1, 0, "shield ownership is independent of using/blocking");
+    near(feature("opponent.has_shield"), 0, 0, "opponent without shield");
+    near(feature("self.weapon_damage_fraction"), 1, 0, "netherite axe damage normalized by ten");
+    near(feature("self.weapon_speed_fraction"), 0.25, 0, "netherite axe speed normalized by four");
+    near(feature("opponent.weapon_damage_fraction"), 0.7, 1e-6, "selected diamond sword damage");
+    near(feature("opponent.weapon_speed_fraction"), 0.4, 1e-6, "selected sword speed preserves widened float modifier");
+    near(feature("self.armor_defense_fraction"), 1, 0, "netherite full defense normalized by twenty");
+    near(feature("self.armor_toughness_fraction"), 1, 0, "netherite toughness normalized by twelve");
+    near(feature("opponent.armor_defense_fraction"), 0.4, 1e-6, "single chestplate defense");
+    near(feature("opponent.armor_toughness_fraction"), 1.0 / 6.0, 1e-6, "single diamond chestplate toughness");
+    near(feature("self.weapon_slot_0.present"), 1, 0, "unselected wooden sword remains visible");
+    near(feature("self.weapon_slot_0.is_axe"), 0, 0, "slot sword kind");
+    near(feature("self.weapon_slot_0.damage_fraction"), 0.4, 1e-6, "slot sword damage");
+    for (int slot = 2; slot < 9; ++slot) {
+        for (int field = 0; field < 4; ++field) near(catalogue[43 + slot * 4 + field], 0, 0, "air/missing slots are all zero");
+    }
+    std::vector<WeaponItem> nine(9, WeaponItem::unarmed);
+    nine[8] = WeaponItem::netherite_sword;
+    app::equipmentObservation(catalogue.data(), target, source, nine);
+    near(feature("self.weapon_slot_8.damage_fraction"), 0.8, 1e-6, "ninth own slot is encoded");
+    source.attack_damage = 100; source.attack_speed = 100; source.armor = 100; source.armor_toughness = 100;
+    target.attack_damage = -1; target.attack_speed = -1; target.armor = -1; target.armor_toughness = -1;
+    app::equipmentObservation(catalogue.data(), source, target, {});
+    for (int offset : {35, 37, 39, 41}) {
+        near(catalogue[offset], 1, 0, "equipment upper bound");
+        near(catalogue[offset + 1], 0, 0, "equipment lower bound");
+    }
+    PlayerState unarmed;
+    app::applyLoadout(unarmed, {{"weapons", {"minecraft:air"}}});
+    app::equipmentObservation(catalogue.data(), unarmed, unarmed, {WeaponItem::unarmed});
+    near(feature("self.weapon_damage_fraction"), 0.1, 1e-6, "selected unarmed base attack damage");
+    near(feature("self.weapon_speed_fraction"), 1, 0, "selected unarmed base attack speed");
+    for (int index = 0; index < 33; ++index) near(catalogue[index], -1, 0, "legacy equipment observations remain untouched");
+    std::cout << "PASS: descriptor equipment fractions, own hotbar, empty slots and legacy isolation\n";
+}
+
 void checkComparisonStatistics() {
     minecraft_sim::ErrorStatistics statistics;
     const auto first = statistics.observe(12.0, 10.0, 10, 0.1, 1.0E-9);
@@ -1480,6 +1530,7 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("Unsupported check mode");
         }
         checkPolicyFixtures();
+        checkEquipmentObservation();
         checkComparisonStatistics();
         checkMeleeTargeting();
         checkMeleeDamage();

@@ -5,6 +5,7 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -13,6 +14,12 @@
 namespace minecraft_sim::app {
 
 struct Scene {
+    struct PlayerDefinitions {
+        std::array<PlayerState, 2> players{};
+        std::array<std::vector<WeaponItem>, 2> weapon_slots;
+        nlohmann::json resolved;
+    };
+
     nlohmann::json definition;
     std::array<PlayerState, 2> initial_players{};
     std::array<std::vector<WeaponItem>, 2> weapon_slots;
@@ -113,13 +120,22 @@ struct Scene {
                 }
             }
         }
-        const auto& spawns = definition.at("players");
+        const auto parsed = parsePlayers(definition.at("players"));
+        initial_players = parsed.players;
+        weapon_slots = parsed.weapon_slots;
+        players[0] = initial_players[0];
+    }
+
+    PlayerDefinitions parsePlayers(const nlohmann::json& spawns, bool concrete = false) const {
         if (!spawns.is_array() || spawns.size() != 2) {
             throw std::invalid_argument("Environment needs two initial players");
         }
         const auto vector = [](const nlohmann::json& value, double limit) {
             if (!value.is_array() || value.size() != 3) {
                 throw std::invalid_argument("Environment state vectors need three numbers");
+            }
+            for (const auto& number : value) {
+                if (!number.is_number()) throw std::invalid_argument("Environment state vectors must be numeric");
             }
             Vec3 result{value[0].get<double>(), value[1].get<double>(), value[2].get<double>()};
             for (int axis = 0; axis < 3; ++axis) {
@@ -129,11 +145,35 @@ struct Scene {
             }
             return result;
         };
+        PlayerDefinitions parsed;
+        parsed.resolved = nlohmann::json::array();
         for (int index = 0; index < 2; ++index) {
-            auto& state = initial_players[index];
+            auto& state = parsed.players[index];
             const auto& spawn = spawns[index];
+            if (!spawn.is_object()) throw std::invalid_argument("Initial player must be an object");
+            if (concrete) {
+                for (const auto& field : spawn.items()) {
+                    if (field.key() != "position" && field.key() != "velocity" && field.key() != "yaw"
+                        && field.key() != "pitch" && field.key() != "on_ground" && field.key() != "health"
+                        && field.key() != "absorption" && field.key() != "attack_strength_ticks" && field.key() != "loadout") {
+                        throw std::invalid_argument("Unsupported initial player field: " + field.key());
+                    }
+                }
+                if (!spawn.contains("loadout") || !spawn.at("loadout").is_object()
+                    || !spawn.at("loadout").contains("weapons")) {
+                    throw std::invalid_argument("Concrete player requires a weapon loadout");
+                }
+            }
             state.position = vector(spawn.at("position"), 8192);
             state.velocity = vector(spawn.at("velocity"), 1000);
+            if (!spawn.at("yaw").is_number() || !spawn.at("pitch").is_number()
+                || (spawn.contains("health") && !spawn.at("health").is_number())
+                || (spawn.contains("absorption") && !spawn.at("absorption").is_number())
+                || (spawn.contains("attack_strength_ticks") && (!spawn.at("attack_strength_ticks").is_number_integer()
+                    || spawn.at("attack_strength_ticks") < 0
+                    || spawn.at("attack_strength_ticks") > std::numeric_limits<int>::max()))) {
+                throw std::invalid_argument("Initial player scalar fields have invalid types");
+            }
             state.yaw = spawn.at("yaw").get<float>();
             state.pitch = spawn.at("pitch").get<float>();
             state.on_ground = spawn.at("on_ground").get<bool>();
@@ -144,20 +184,35 @@ struct Scene {
             if (definition.value("profile", "configured") == "unarmored_sword_axe_shield") {
                 fallback = {{"weapons", {"minecraft:diamond_sword", "minecraft:diamond_axe"}}, {"offhand", "minecraft:shield"}};
             }
-            weapon_slots[index] = applyLoadout(state, spawn.value("loadout", fallback));
+            parsed.weapon_slots[index] = applyLoadout(state, spawn.value("loadout", fallback));
             if (!std::isfinite(state.yaw) || !std::isfinite(state.pitch) || std::abs(state.pitch) > 90
                 || !std::isfinite(state.health) || state.health <= 0 || state.health > 20
                 || !std::isfinite(state.absorption) || state.absorption < 0 || state.attack_strength_ticks < 0) {
                 throw std::invalid_argument("Invalid environment initial player state");
             }
             for (int axis = 0; axis < 3; ++axis) {
-                if (component(state.position, axis) < origin[axis]
-                    || component(state.position, axis) >= origin[axis] + size[axis]) {
+                const int origin = axis == 0 ? blocks.origin_x : axis == 1 ? blocks.origin_y : blocks.origin_z;
+                const int size = axis == 0 ? blocks.size_x : axis == 1 ? blocks.size_y : blocks.size_z;
+                if (component(state.position, axis) < origin
+                    || component(state.position, axis) >= origin + size) {
                     throw std::invalid_argument("Initial player position is outside environment bounds");
                 }
             }
+            if (concrete && !noBlockCollision(blocks, state.bounds())) {
+                throw std::invalid_argument("Initial player intersects terrain");
+            }
+            parsed.resolved.push_back({
+                {"position", {state.position.x, state.position.y, state.position.z}},
+                {"velocity", {state.velocity.x, state.velocity.y, state.velocity.z}},
+                {"yaw", state.yaw}, {"pitch", state.pitch}, {"on_ground", state.on_ground},
+                {"health", state.health}, {"absorption", state.absorption},
+                {"attack_strength_ticks", state.attack_strength_ticks},
+                {"loadout", describeLoadout(state, parsed.weapon_slots[index])}});
         }
-        players[0] = initial_players[0];
+        if (concrete && parsed.players[0].bounds().intersects(parsed.players[1].bounds())) {
+            throw std::invalid_argument("Initial players intersect each other");
+        }
+        return parsed;
     }
 
     nlohmann::json resolvedDefinition() const {
@@ -166,9 +221,7 @@ struct Scene {
         resolved.erase("policy");
         resolved["requires"] = {"movement", "melee", "equipment", "shield", "armor"};
         resolved["rules"] = {{"simulate_food", false}, {"natural_regeneration", false}};
-        for (int player = 0; player < 2; ++player) {
-            resolved["players"][player]["loadout"] = describeLoadout(initial_players[player], weapon_slots[player]);
-        }
+        resolved["players"] = parsePlayers(definition.at("players")).resolved;
         return resolved;
     }
 

@@ -45,6 +45,7 @@ public final class ReplayAnalysisChecks {
 		checkLivePolicy();
 		checkDescriptiveContract();
 		checkPolicyFixtures();
+		EquipmentObservationChecks.check();
 		require(CambiumFabric.BUILD_ID.matches(".*source=[0-9a-f]{64} built=.+"), "Mod build identity must be packaged");
 		Path folder = Files.createTempDirectory("cambium-analysis-checks-");
 		try {

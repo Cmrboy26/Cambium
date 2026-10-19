@@ -3,6 +3,33 @@ package net.cambium;
 final class ObservationEncoder {
 
 	record State(double x, double y, double z, float health, float yaw, float pitch, boolean alive) {}
+	record Weapon(boolean present, boolean axe, double damage, double speed) {}
+	record Equipment(boolean shield, double damage, double speed, double armor, double toughness) {}
+
+	static void equipment(float[] catalogue, Equipment own, Equipment opponent, Weapon[] ownSlots) {
+		for (int actor = 0; actor < 2; actor++) {
+			Equipment state = actor == 0 ? own : opponent;
+			catalogue[33 + actor] = state.shield() ? 1 : 0;
+			catalogue[35 + actor] = equipmentFraction(state.damage(), 10);
+			catalogue[37 + actor] = equipmentFraction(state.speed(), 4);
+			catalogue[39 + actor] = equipmentFraction(state.armor(), 20);
+			catalogue[41 + actor] = equipmentFraction(state.toughness(), 12);
+		}
+		for (int slot = 0; slot < 9; slot++) {
+			int start = 43 + slot * 4;
+			java.util.Arrays.fill(catalogue, start, start + 4, 0);
+			Weapon weapon = slot < ownSlots.length ? ownSlots[slot] : null;
+			if (weapon == null || !weapon.present()) continue;
+			catalogue[start] = 1;
+			catalogue[start + 1] = weapon.axe() ? 1 : 0;
+			catalogue[start + 2] = equipmentFraction(weapon.damage(), 10);
+			catalogue[start + 3] = equipmentFraction(weapon.speed(), 4);
+		}
+	}
+
+	private static float equipmentFraction(double value, double maximum) {
+		return (float) Math.clamp(value / maximum, 0.0, 1.0);
+	}
 
 	static float[] observe(State source, State target, float[] rays) {
 		if (rays.length != 8) throw new IllegalArgumentException("Expected eight wall rays");

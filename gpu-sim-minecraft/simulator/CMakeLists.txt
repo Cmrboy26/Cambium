@@ -55,7 +55,8 @@ set(simulator_targets minecraft_sim minecraft_sim_runner minecraft_sim_compare m
 add_library(minecraft_sim_training SHARED apps/training.cpp)
 target_link_libraries(minecraft_sim_training PRIVATE minecraft_sim::minecraft_sim nlohmann_json::nlohmann_json)
 file(GLOB_RECURSE native_identity_files CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu" "${CMAKE_CURRENT_SOURCE_DIR}/apps/*.hpp"
 )
 list(APPEND native_identity_files "${CMAKE_CURRENT_SOURCE_DIR}/apps/training.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
@@ -100,6 +101,14 @@ if(BUILD_TESTING)
     )
     list(APPEND simulator_targets minecraft_sim_checks)
     add_test(NAME shared_core_checks COMMAND minecraft_sim_checks)
+    add_executable(minecraft_sim_training_checks tests/training_checks.cpp)
+    target_link_libraries(minecraft_sim_training_checks PRIVATE
+        minecraft_sim_training minecraft_sim::minecraft_sim nlohmann_json::nlohmann_json
+    )
+    list(APPEND simulator_targets minecraft_sim_training_checks)
+    add_test(NAME training_api_checks COMMAND minecraft_sim_training_checks
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/reset_environment.json"
+    )
 endif()
 
 option(MCSIM_ENABLE_CUDA "Build the optional GPU execution backend" OFF)
@@ -123,6 +132,10 @@ if(MCSIM_ENABLE_CUDA)
     if(BUILD_TESTING)
         add_test(NAME shared_core_cuda_checks COMMAND minecraft_sim_checks --cuda)
         set_tests_properties(shared_core_cuda_checks PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME training_api_cuda_checks COMMAND minecraft_sim_training_checks
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/reset_environment.json" --cuda
+        )
+        set_tests_properties(training_api_cuda_checks PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 endif()
 

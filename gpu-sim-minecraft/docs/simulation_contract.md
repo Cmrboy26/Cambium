@@ -11,6 +11,11 @@ Keep three things separate:
 3. **Replay:** resolved scenario, semantic controls and resulting states.
    Playback needs neither the policy nor its head indices or original files.
 
+Research [training plans](../simulator/training/AGENTS.md#research-training-plans)
+wrap these concrete scenarios with controller mixtures, curriculum stages and
+sampling distributions. They are a separate versioned format, not extra physics
+fields in this envelope. Episode artifacts always carry resolved conditions.
+
 The native simulator, Python trainer/service and mod implement the same bounded
 primitive catalogue. Changing supported loadouts, observation order or action
 bins needs no mod code. A genuinely new mechanic still needs physics and adapter
@@ -148,6 +153,17 @@ repeats are allowed.
 | `self.attack_charge` | Charge at partial tick 0.5, capped at 1 |
 | `self.shield_raise_fraction` | Use ticks / 5 capped at 1, or 0 when not using |
 | `self.weapon_slot`, `opponent.weapon_slot` | Raw zero-based slot in that actor's loadout |
+| `self.has_shield`, `opponent.has_shield` | Equipped offhand shield, whether using it or not |
+| `self.weapon_damage_fraction`, `opponent.weapon_damage_fraction` | Selected weapon base damage / 10, clamped 0..1 |
+| `self.weapon_speed_fraction`, `opponent.weapon_speed_fraction` | Selected attack speed / 4, clamped 0..1 |
+| `self.armor_defense_fraction`, `opponent.armor_defense_fraction` | Equipment defense / 20, clamped 0..1 |
+| `self.armor_toughness_fraction`, `opponent.armor_toughness_fraction` | Equipment toughness / 12, clamped 0..1 |
+| `self.weapon_slot_N.present`, `.is_axe`, `.damage_fraction`, `.speed_fraction` | N=0..8; own slot presence/type/damage/speed; absent/air slots are all zero |
+
+The additive equipment features do not change v1/v2. Research `equipment_v3`
+selects 78 fixed named features, excluding hidden opponent inventory and the
+legacy opponent slot index. Selected empty-hand damage/speed are 0.1/1; empty
+slot metadata is zero, allowing absence to be distinguished from a weapon.
 
 Action heads are ordered objects like `{"name":"weapon","values":[2,1,0]}`.
 There are 1..9 distinct named heads with 1..64 distinct categorical choices:

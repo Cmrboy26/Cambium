@@ -1,6 +1,6 @@
 # Batched Simulator PPO
 
-Train one shared policy controlling both players in independent simulated duels.
+Train shared self-play or a learner against scripted/checkpoint opponents.
 No Minecraft, RCON or legacy backend server is needed for training.
 
 ## Setup
@@ -23,11 +23,16 @@ CUDA needs a CUDA-built simulator and CUDA-enabled PyTorch; see
 .\scripts\train.ps1 -Schema v2
 .\scripts\train.ps1 -Device cuda -Environments 8192
 .\scripts\train.ps1 -Environment simulator/environments/research-duel.json
+.\scripts\train.ps1 -Plan simulator/training/presets/gear-curriculum.json
 ```
 
 Default training uses CPU, 16 worlds and 100 updates. V1 is sword-only; V2 adds
 sword/axe selection and shields. Customize terrain, equipment, observations,
 controls and reward overrides with the [scenario contract](../../docs/simulation_contract.md).
+The [research preset](presets/gear-curriculum.json) adds aiming/combat stages,
+random spawns, optional shields/axes and held-out evaluation. See the
+[training-plan reference](AGENTS.md#research-training-plans) for custom bots,
+checkpoint pools, sampling frequencies and advancement rules.
 
 ## Checkpoints
 
@@ -38,8 +43,10 @@ Checkpoints save every ten updates and on normal completion.
 .\scripts\train.ps1 -Resume latest -Updates 100
 ```
 
-This adds 100 updates and starts fresh episodes. `latest` means newest-modified,
-not strongest. Resume must preserve the task, policy layout and reward settings.
+This adds up to 100 updates and starts fresh episodes; a completed curriculum
+stops early. Research resumes restore the embedded plan, world assignments and
+stage progress. `latest` means newest-modified, not strongest. Use `-Initialize`
+with a new `-Plan` to transfer compatible weights without resuming the old task.
 
 ## Training Dashboard
 
