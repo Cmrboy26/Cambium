@@ -32,7 +32,7 @@ limit. It builds CUDA architecture 75 by default. Override resources on the
 
 ```sh
 sbatch --partition=dgxh100 --gres=gpu:h100:1 \
-  --export=ALL,MCSIM_CUDA_ARCHITECTURES=90,SIM_ENVS=8192,SIM_UPDATES=500,SIM_ROLLOUT_STEPS=128,SIM_EPOCHS=2,SIM_MINIBATCH_SIZE=16384 \
+  --export=ALL,MCSIM_CUDA_ARCHITECTURES=90,SIM_ENVS=8192,SIM_UPDATES=500,SIM_ROLLOUT_STEPS=128,SIM_EPOCHS=2,SIM_MINIBATCH_SIZE=16384,SIM_HIDDEN_DIM=512 \
   rosie/train.sbatch
 ```
 
@@ -49,6 +49,7 @@ Supported training environment variables:
 - `SIM_UPDATES`: optimizer updates; default 1.
 - `SIM_ROLLOUT_STEPS`: steps per rollout; default 16.
 - `SIM_EPOCHS`, `SIM_MINIBATCH_SIZE`: PPO optimizer settings; defaults 4/1024.
+- `SIM_HIDDEN_DIM`: width of the policy's hidden layers; default 256. Try 512 as a moderate increase; larger networks cost more optimizer time and are not guaranteed to train better.
 - `SIM_THREADS`, `SIM_SEED`, `SIM_SCHEMA`: CPU threads, random seed, and `v1`/`v2` schema.
 - `SIM_ENVIRONMENT`: JSON scenario path relative to `gpu-sim-minecraft` or an absolute path.
 - `SIM_OUTPUT`: run directory; default `simulator/training/runs/rosie-<JOB_ID>`.
@@ -69,6 +70,8 @@ Windows DLL paths and `%APPDATA%`/`$env:APPDATA` do not exist on Rosie. With
 `simulator/training/runs/rosie-<JOB_ID>/replays` unless `SIM_REPLAY_DIR` is set.
 Replay cadence counts completed duels, not optimizer updates. CUDA training
 still stages observations and rewards through the CPU.
+The hidden size is part of checkpoint compatibility; changing it starts a new
+model rather than resuming a checkpoint with a different hidden dimension.
 
 SLURM output and error logs are `rosie/logs/gpu-sim-<JOB_ID>.out` and `.err`.
 The trainer writes metrics and checkpoints under its run directory. A one-update

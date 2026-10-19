@@ -22,6 +22,7 @@ SIM_UPDATES="${SIM_UPDATES:-1}"
 SIM_ROLLOUT_STEPS="${SIM_ROLLOUT_STEPS:-16}"
 SIM_EPOCHS="${SIM_EPOCHS:-4}"
 SIM_MINIBATCH_SIZE="${SIM_MINIBATCH_SIZE:-1024}"
+SIM_HIDDEN_DIM="${SIM_HIDDEN_DIM:-256}"
 SIM_THREADS="${SIM_THREADS:-4}"
 SIM_SEED="${SIM_SEED:-1}"
 SIM_SCHEMA="${SIM_SCHEMA:-v1}"
@@ -97,7 +98,7 @@ if [[ ! -f "$LIBRARY" ]]; then
     exit 1
 fi
 
-echo "Training on $(hostname): envs=$SIM_ENVS updates=$SIM_UPDATES rollout_steps=$SIM_ROLLOUT_STEPS epochs=$SIM_EPOCHS minibatch=$SIM_MINIBATCH_SIZE schema=$SIM_SCHEMA"
+echo "Training on $(hostname): envs=$SIM_ENVS updates=$SIM_UPDATES rollout_steps=$SIM_ROLLOUT_STEPS epochs=$SIM_EPOCHS minibatch=$SIM_MINIBATCH_SIZE hidden_dim=$SIM_HIDDEN_DIM schema=$SIM_SCHEMA"
 TRAIN_ARGS=(
     --device cuda \
     --schema "$SIM_SCHEMA" \
@@ -106,6 +107,7 @@ TRAIN_ARGS=(
     --rollout-steps "$SIM_ROLLOUT_STEPS" \
     --epochs "$SIM_EPOCHS" \
     --minibatch-size "$SIM_MINIBATCH_SIZE" \
+    --hidden-dim "$SIM_HIDDEN_DIM" \
     --threads "$SIM_THREADS" \
     --seed "$SIM_SEED" \
     --library "$LIBRARY" \

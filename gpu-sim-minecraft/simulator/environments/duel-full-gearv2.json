@@ -1,0 +1,97 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "enclosed-15x15-full-diamond-duel",
+  "profile": "configured",
+  "requires": ["movement", "melee", "equipment", "armor"],
+  "rules": { "simulate_food": false, "natural_regeneration": false },
+  "bounds": { "min": [-7, 0, -7], "size": [15, 4, 15] },
+  "blocks": [
+    { "from": [-7, 0, -7], "to": [7, 0, 7], "block": "minecraft:stone" },
+    { "from": [-7, 1, -7], "to": [-7, 3, 7], "block": "minecraft:stone" },
+    { "from": [7, 1, -7], "to": [7, 3, 7], "block": "minecraft:stone" },
+    { "from": [-6, 1, -7], "to": [6, 3, -7], "block": "minecraft:stone" },
+    { "from": [-6, 1, 7], "to": [6, 3, 7], "block": "minecraft:stone" }
+  ],
+  "players": [
+    {
+      "position": [0.5, 1.0, 4.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": 180.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20,
+      "loadout": {
+        "weapons": ["minecraft:diamond_sword"],
+        "selected": 0,
+        "offhand": "minecraft:air",
+        "armor": {
+          "boots": "minecraft:diamond_boots",
+          "leggings": "minecraft:diamond_leggings",
+          "chestplate": "minecraft:diamond_chestplate",
+          "helmet": "minecraft:diamond_helmet"
+        }
+      }
+    },
+    {
+      "position": [0.5, 1.0, -3.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20,
+      "loadout": {
+        "weapons": ["minecraft:diamond_sword"],
+        "selected": 0,
+        "offhand": "minecraft:air",
+        "armor": {
+          "boots": "minecraft:diamond_boots",
+          "leggings": "minecraft:diamond_leggings",
+          "chestplate": "minecraft:diamond_chestplate",
+          "helmet": "minecraft:diamond_helmet"
+        }
+      }
+    }
+  ],
+  "policy": {
+    "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+    "requires": ["movement", "melee", "equipment", "armor"],
+    "observations": [
+      { "feature": "self.health_fraction" },
+      { "feature": "self.yaw_fraction" },
+      { "feature": "self.pitch_fraction" },
+      { "feature": "opponent.alive" },
+      { "feature": "opponent.health_fraction" },
+      { "feature": "relative.x" },
+      { "feature": "relative.y" },
+      { "feature": "relative.z" },
+      { "feature": "opponent.yaw_fraction" },
+      { "feature": "opponent.pitch_fraction" },
+      { "feature": "arena.ray_world_0" },
+      { "feature": "arena.ray_world_45" },
+      { "feature": "arena.ray_world_90" },
+      { "feature": "arena.ray_world_135" },
+      { "feature": "arena.ray_world_180" },
+      { "feature": "arena.ray_world_225" },
+      { "feature": "arena.ray_world_270" },
+      { "feature": "arena.ray_world_315" },
+      { "feature": "target.distance_fraction" },
+      { "feature": "target.aim_dot" },
+      { "feature": "target.yaw_error" },
+      { "feature": "target.pitch_error" }
+    ],
+    "actions": [
+      { "name": "movement", "values": ["neutral", "forward", "forward_right", "right", "backward_right", "backward", "backward_left", "left", "forward_left"] },
+      { "name": "jump", "values": [false, true] },
+      { "name": "sprint", "values": [false, true] },
+      { "name": "attack", "values": [false, true] },
+      { "name": "yaw", "values": [-20, -10, -5, -2, 0, 2, 5, 10, 20] },
+      { "name": "pitch", "values": [-5, -2, 0, 2, 5] }
+    ]
+  }
+}
