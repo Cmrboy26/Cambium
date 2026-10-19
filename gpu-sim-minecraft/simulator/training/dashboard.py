@@ -14,6 +14,8 @@ ASSETS = Path(__file__).resolve().parent / "dashboard"
 METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "timeouts",
            "replays_exported", "reward_mean", "reward_total", "loss", "policy_loss", "value_loss", "entropy",
            "collection_seconds", "update_seconds", "player_transitions_per_second")
+MAX_REPLAY_BYTES = 64 * 1024 * 1024
+MAX_REPLAY_FRAMES = 100001
 
 
 class RunStore:
@@ -46,6 +48,83 @@ class RunStore:
                            for name in ("config.json", "metrics.jsonl") if self.file(path, name).is_file())
             result.append({"id": identity, "name": path.name, "path": str(path), "modified": modified})
         return sorted(result, key=lambda run: (run["modified"], run["name"]), reverse=True)
+
+    def replay_paths(self, identity):
+        run = self.paths().get(identity)
+        if run is None:
+            raise FileNotFoundError("Run not found")
+        directories = []
+        local = run / "replays"
+        if not local.is_symlink():
+            directories.append(local.resolve())
+        config = self.file(run, "config.json")
+        if config.is_file():
+            try:
+                options = json.loads(config.read_text(encoding="utf-8")).get("options", {})
+                configured = options.get("replay_dir")
+                if isinstance(configured, str) and Path(configured).is_absolute():
+                    directories.append(Path(configured).resolve())
+            except (ValueError, UnicodeError, AttributeError):
+                pass
+        found = {}
+        for directory in dict.fromkeys(directories):
+            if not directory.is_dir():
+                continue
+            for path in directory.glob("*.jsonl"):
+                if path.is_file() and not path.is_symlink() and path.resolve().parent == directory:
+                    found[sha256(str(path).encode()).hexdigest()[:16]] = path
+        return found
+
+    def list_replays(self, identity):
+        replays = []
+        for replay_id, path in self.replay_paths(identity).items():
+            size = path.stat().st_size
+            if size <= MAX_REPLAY_BYTES:
+                replays.append({"id": replay_id, "name": path.name, "size": size})
+        return sorted(replays, key=lambda replay: replay["name"], reverse=True)
+
+    def read_replay(self, identity, replay_id):
+        path = self.replay_paths(identity).get(replay_id)
+        if path is None:
+            raise FileNotFoundError("Replay not found")
+        with path.open("rb") as source:
+            content = source.read(MAX_REPLAY_BYTES + 1)
+        if len(content) > MAX_REPLAY_BYTES:
+            raise ValueError("Replay exceeds the 64 MiB limit")
+        if not content.endswith(b"\n"):
+            raise ValueError("Replay is incomplete")
+        lines = content.splitlines()
+        if not 2 <= len(lines) <= MAX_REPLAY_FRAMES + 1:
+            raise ValueError("Replay must contain 1 to 100001 frames")
+        header, *frames = [json.loads(line) for line in lines]
+        if (not isinstance(header, dict) or header.get("format") != "minecraft_sim_replay"
+                or header.get("version") not in (2, 3) or header.get("players") != 2
+                or not isinstance(header.get("environment"), dict)):
+            raise ValueError("Unsupported replay format")
+        rate = header.get("ticks_per_second", 20)
+        if type(rate) not in (int, float) or not math.isfinite(rate) or not 0 < rate <= 1000:
+            raise ValueError("Invalid replay tick rate")
+        previous_tick = -1
+        for frame in frames:
+            if (not isinstance(frame, dict) or type(frame.get("tick")) is not int
+                    or frame["tick"] <= previous_tick or not isinstance(frame.get("actors"), list)
+                    or len(frame["actors"]) != 2):
+                raise ValueError("Invalid replay frame")
+            previous_tick = frame["tick"]
+            actors = frame["actors"]
+            for actor in actors:
+                if (not isinstance(actor, dict) or type(actor.get("id")) is not int
+                        or actor["id"] not in (0, 1) or not isinstance(actor.get("position"), list)
+                        or len(actor["position"]) != 3
+                        or not all(type(value) in (int, float) and math.isfinite(value)
+                                   for value in [*actor["position"], actor.get("yaw"), actor.get("pitch"), actor.get("health")])):
+                    raise ValueError("Invalid replay actor")
+            if actors[0]["id"] == actors[1]["id"]:
+                raise ValueError("Duplicate replay actor")
+            actors.sort(key=lambda actor: actor["id"])
+        json.dumps(header, allow_nan=False)
+        json.dumps(frames, allow_nan=False)
+        return {"name": path.name, "header": header, "frames": frames}
 
     def read(self, identity):
         path = self.paths().get(identity)
@@ -116,6 +195,8 @@ def make_server(store, port=8767):
     assets = {"/": ("index.html", "text/html"), "/dashboard.css": ("dashboard.css", "text/css"),
               "/dashboard.js": ("dashboard.js", "text/javascript"),
               "/chart.umd.min.js": ("chart.umd.min.js", "text/javascript")}
+    for name in ("arena.js", "arena-data.js", "three.module.min.js", "three.core.min.js", "OrbitControls.js", "lucide.min.js"):
+        assets[f"/{name}"] = (name, "text/javascript")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -139,6 +220,11 @@ def make_server(store, port=8767):
                     self.reply(200, {"runs": store.list_runs()})
                 elif route.startswith("/api/runs/") and route.endswith("/metrics"):
                     self.reply(200, store.read(route[len("/api/runs/"):-len("/metrics")]))
+                elif route.startswith("/api/runs/") and route.endswith("/replays"):
+                    self.reply(200, {"replays": store.list_replays(route[len("/api/runs/"):-len("/replays")])})
+                elif route.startswith("/api/runs/") and "/replays/" in route:
+                    identity, replay_id = route[len("/api/runs/"):].split("/replays/", 1)
+                    self.reply(200, store.read_replay(identity, replay_id))
                 elif route in assets:
                     filename, content_type = assets[route]
                     self.reply(200, (ASSETS / filename).read_bytes(), content_type)

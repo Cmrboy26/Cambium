@@ -15,7 +15,8 @@ const definitions = [
     ["reward-chart", [["reward_mean", "Mean reward", colors.green]]],
     ["total-reward-chart", [["reward_total", "Total reward", colors.blue]]],
     ["reward-types-chart", rewardTypes.map(([name, label, color]) => [(row) => row.reward_types?.[name], label, color])],
-    ["loss-chart", [["policy_loss", "Policy", colors.red], ["value_loss", "Value", colors.amber], ["loss", "Total", colors.blue]]],
+    ["policy-loss-chart", [["policy_loss", "Policy loss", colors.red]]],
+    ["loss-chart", [["value_loss", "Value", colors.amber], ["loss", "Total", colors.blue]]],
     ["entropy-chart", [["entropy", "Entropy", colors.blue]]],
     ["throughput-chart", [["player_transitions_per_second", "Transitions / second", colors.green]]],
     ["duels-chart", [["terminated_duels", "Terminated", colors.blue], ["timeouts", "Timeouts", colors.amber]]],
@@ -29,6 +30,39 @@ let requestNumber = 0;
 let pending;
 let runSignature = "";
 let displayedRun = "";
+let configuration = null;
+
+function sortRuns(runs) {
+    return [...runs].sort((left, right) => right.name.localeCompare(left.name, undefined, { numeric: true, sensitivity: "base" }) || left.id.localeCompare(right.id));
+}
+
+function duration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "--";
+    const minutes = Math.ceil(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    return hours < 24 ? `${hours}h ${minutes % 60}m` : `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+function trainingTime(rows, config) {
+    const options = config?.options ?? {};
+    const session = config?.training;
+    const start = session?.start_update ?? (options.resume ? null : 0);
+    const target = session?.target_update ?? (start === 0 && Number.isFinite(options.updates) ? options.updates : null);
+    const latest = rows.at(-1)?.update ?? start;
+    const current = start === null ? rows : rows.filter((row) => row.update > start);
+    const durations = current.filter((row) => Number.isFinite(row.collection_seconds) && row.collection_seconds >= 0
+        && Number.isFinite(row.update_seconds) && row.update_seconds >= 0)
+        .map((row) => row.collection_seconds + row.update_seconds);
+    const recent = durations.slice(-20);
+    const average = recent.length ? recent.reduce((sum, value) => sum + value, 0) / recent.length : null;
+    const remaining = Number.isFinite(target) && Number.isFinite(latest) ? Math.max(0, target - latest) : null;
+    return {
+        target, remaining, average,
+        elapsed: start !== null && durations.length ? durations.reduce((sum, value) => sum + value, 0) : null,
+        eta: remaining === 0 ? 0 : remaining !== null && average !== null ? remaining * average : null,
+    };
+}
 
 function format(value, digits = 0) {
     return Number.isFinite(value) ? new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(value) : "--";
@@ -40,6 +74,25 @@ function initCharts() {
     Chart.defaults.color = "#65716b";
     for (const [id, series] of definitions) {
         const stacked = id === "reward-types-chart";
+        const canvas = element(id);
+        const heading = canvas.closest(".chart").querySelector("h2");
+        const controls = document.createElement("fieldset");
+        controls.className = "segments chart-mode";
+        controls.setAttribute("aria-label", `${heading.firstChild.textContent.trim()} view`);
+        for (const mode of ["value", "derivative"]) {
+            const label = document.createElement("label");
+            const input = document.createElement("input");
+            input.type = "radio";
+            input.name = `${id}-mode`;
+            input.value = mode;
+            input.checked = mode === "value";
+            input.addEventListener("change", redrawCharts);
+            const text = document.createElement("span");
+            text.textContent = mode === "value" ? "Value" : "Derivative";
+            label.append(input, text);
+            controls.append(label);
+        }
+        heading.after(controls);
         charts.set(id, new Chart(element(id), {
             type: stacked ? "bar" : "line",
             data: { datasets: series.map(([, label, color]) => ({
@@ -64,24 +117,33 @@ function initCharts() {
     }
 }
 
-function smoothSeries(key) {
+function smoothSeries(key, derivative = false) {
     const alpha = 2 / (smoothing + 1);
     let previous = null;
+    let previousPoint = null;
     return records.map((row) => {
         const value = typeof key === "function" ? key(row) : row[key];
-        if (!Number.isFinite(value)) return { x: row.update, y: null };
+        if (!Number.isFinite(value)) {
+            previous = previousPoint = null;
+            return { x: row.update, y: null };
+        }
         previous = previous === null ? value : alpha * value + (1 - alpha) * previous;
-        return { x: row.update, y: previous };
+        const point = { x: row.update, y: previous };
+        const slope = previousPoint && point.x > previousPoint.x ? (point.y - previousPoint.y) / (point.x - previousPoint.x) : null;
+        previousPoint = point;
+        return derivative ? { x: point.x, y: slope } : point;
     });
 }
 
 function redrawCharts() {
     for (const [id, series] of definitions) {
         const chart = charts.get(id);
+        const derivative = document.querySelector(`input[name="${id}-mode"]:checked`)?.value === "derivative";
         series.forEach(([key], index) => {
-            const values = smoothSeries(key);
+            const values = smoothSeries(key, derivative);
             chart.data.datasets[index].data = windowSize ? values.slice(-windowSize) : values;
         });
+        chart.options.scales.y.title = { display: derivative, text: "Change / update" };
         chart.update("none");
     }
     const shown = windowSize ? Math.min(windowSize, records.length) : records.length;
@@ -89,8 +151,20 @@ function redrawCharts() {
 }
 
 function renderConfig(config) {
+    configuration = config;
     const options = config?.options ?? {};
     const metadata = config?.metadata ?? {};
+    const environment = metadata.scenario ?? metadata.environment ?? {};
+    element("arena").scenario = environment;
+    element("arena").runId = element("run").value;
+    document.dispatchEvent(new CustomEvent("arena-config", { detail: { scenario: environment, runId: element("run").value } }));
+    element("environment-name").textContent = environment.name ?? "Environment";
+    renderFields("environment", [
+        ["Environment source", options.environment ?? "Checkpoint / default"],
+        ["Max ticks / round", metadata.max_ticks ?? options.max_ticks ?? environment.max_ticks],
+        ["Arena size", environment.bounds?.size?.join(" x ")],
+        ["Policy", metadata.schema?.id ?? options.schema],
+    ]);
     const fields = [
         ["Device", options.device], ["Worlds", options.envs], ["Seed", options.seed],
         ["Learning rate", options.lr], ["Rollout steps", options.rollout_steps],
@@ -101,6 +175,19 @@ function renderConfig(config) {
         ["Environment", options.environment ?? "Checkpoint / default"],
         ["Replay interval", options.replay_every === 0 ? "Off" : options.replay_every],
     ];
+    for (const [index, player] of (environment.players ?? []).entries()) {
+        const loadout = player.loadout ?? {};
+        fields.push([`Player ${index + 1} weapons`, loadout.weapons?.join(", ")],
+            [`Player ${index + 1} armor`, Object.entries(loadout.armor ?? {}).map(([slot, item]) => `${slot}: ${item}`).join(", ") || "None"],
+            [`Player ${index + 1} offhand`, loadout.offhand ?? "None"]);
+    }
+    for (const [name, weight] of Object.entries(metadata.reward_weights ?? environment.reward_weights ?? {})) {
+        fields.push([`Reward: ${name}`, weight]);
+    }
+    renderFields("config", fields);
+}
+
+function renderFields(id, fields) {
     const fragment = document.createDocumentFragment();
     for (const [label, value] of fields) {
         const group = document.createElement("div");
@@ -111,7 +198,7 @@ function renderConfig(config) {
         group.append(term, description);
         fragment.append(group);
     }
-    element("config").replaceChildren(fragment);
+    element(id).replaceChildren(fragment);
 }
 
 function renderRecords() {
@@ -125,6 +212,12 @@ function renderRecords() {
     element("stat-rounds").textContent = format(latest.completed_rounds);
     const timeouts = records.filter((row) => Number.isFinite(row.timeouts));
     element("stat-timeouts").textContent = timeouts.length ? format(timeouts.reduce((sum, row) => sum + row.timeouts, 0)) : "--";
+    const timing = trainingTime(records, configuration);
+    element("stat-target").textContent = timing.target === null ? "Target unavailable" : `Target: ${format(timing.target)} updates`;
+    element("stat-remaining").textContent = duration(timing.eta);
+    element("stat-remaining-detail").textContent = timing.remaining === null ? "Session target unavailable" : `${format(timing.remaining)} updates remaining`;
+    element("stat-elapsed").textContent = duration(timing.elapsed);
+    element("stat-average").textContent = timing.average === null ? "--" : `${format(timing.average, 2)}s`;
     element("row-count").textContent = `${format(records.length)} recorded`;
     const fragment = document.createDocumentFragment();
     for (const row of records.slice(-12).reverse()) {
@@ -166,7 +259,8 @@ async function refresh() {
     pending = controller;
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-        const { runs } = await getJson("/api/runs", controller.signal);
+        const dataRuns = await getJson("/api/runs", controller.signal);
+        const runs = sortRuns(dataRuns.runs);
         if (ticket !== requestNumber) return;
         const select = element("run");
         const selected = select.value;
@@ -181,8 +275,8 @@ async function refresh() {
         const identity = select.value;
         if (displayedRun !== identity) {
             records = [];
-            renderRecords();
             renderConfig(null);
+            renderRecords();
             displayedRun = identity;
         }
         if (identity) {

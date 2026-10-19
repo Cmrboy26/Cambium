@@ -7,7 +7,9 @@
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/dashboard.css">
     <script defer src="/chart.umd.min.js"></script>
+    <script defer src="/lucide.min.js"></script>
     <script defer src="/dashboard.js"></script>
+    <script type="module" src="/arena.js"></script>
 </head>
 <body>
     <header class="masthead">
@@ -17,11 +19,58 @@
     <main>
         <section class="toolbar" aria-label="Run selection">
             <div class="run-field"><label for="run">Training run</label><select id="run"><option value="">Loading runs...</option></select></div>
+            <label class="live-control"><input type="checkbox" id="show-world" aria-controls="world-view" checked> Show world view</label>
             <label class="live-control"><input type="checkbox" id="live" checked> Live updates</label>
             <button id="refresh" type="button">Refresh</button>
         </section>
         <p id="run-path" class="run-path"></p>
         <p id="notice" class="notice" role="status" hidden></p>
+        <section class="configuration" aria-labelledby="environment-name">
+            <h2 id="environment-name">Environment</h2><dl id="environment"></dl>
+            <div id="world-view" class="duel-preview" aria-label="Environment and player equipment">
+                <section class="player-equipment player-one" aria-labelledby="player-one-title">
+                    <h3 id="player-one-title"><span class="player-dot"></span>Player 1</h3>
+                    <p id="player-one-state" class="player-state">--</p><dl id="player-one-gear"></dl>
+                </section>
+                <section class="arena-scene" aria-label="Arena preview">
+                    <div class="arena-toolbar">
+                        <span id="arena-state" class="arena-state">Spawn state</span>
+                        <div class="camera-tools" role="group" aria-label="Camera controls">
+                            <button type="button" data-camera-mode="rotate" aria-label="Rotate camera" aria-pressed="true" title="Rotate camera"><i data-lucide="rotate-3d" aria-hidden="true"></i></button>
+                            <button type="button" data-camera-mode="pan" aria-label="Pan camera" aria-pressed="false" title="Pan camera"><i data-lucide="move" aria-hidden="true"></i></button>
+                            <span class="tool-divider"></span>
+                            <button type="button" id="arena-zoom-in" aria-label="Zoom in" title="Zoom in"><i data-lucide="zoom-in" aria-hidden="true"></i></button>
+                            <button type="button" id="arena-zoom-out" aria-label="Zoom out" title="Zoom out"><i data-lucide="zoom-out" aria-hidden="true"></i></button>
+                            <button type="button" id="arena-top" aria-label="Top-down view" title="Top-down view"><i data-lucide="scan" aria-hidden="true"></i></button>
+                            <button type="button" id="arena-reset" aria-label="Reset camera" title="Reset camera"><i data-lucide="rotate-ccw" aria-hidden="true"></i></button>
+                        </div>
+                        <label class="wall-control"><input type="checkbox" id="arena-solid-walls">Solid walls</label>
+                    </div>
+                    <div id="arena" class="arena-viewport"><p id="arena-message" class="arena-message" role="status">Waiting for environment.</p></div>
+                    <div class="replay-controls" aria-label="Replay playback">
+                        <div class="replay-selection"><label for="replay">Recording</label><select id="replay"><option value="">Spawn state</option></select>
+                            <button type="button" id="replay-refresh" aria-label="Refresh recordings" title="Refresh recordings"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
+                        </div>
+                        <div class="replay-transport">
+                            <button type="button" id="replay-start" aria-label="Restart replay" title="Restart replay" disabled><i data-lucide="skip-back" aria-hidden="true"></i></button>
+                            <button type="button" id="replay-back" aria-label="Previous tick" title="Previous tick" disabled><i data-lucide="step-back" aria-hidden="true"></i></button>
+                            <button type="button" id="replay-play" aria-label="Play replay" title="Play replay" disabled><i data-lucide="play" aria-hidden="true"></i></button>
+                            <button type="button" id="replay-next" aria-label="Next tick" title="Next tick" disabled><i data-lucide="step-forward" aria-hidden="true"></i></button>
+                            <label class="replay-speed" for="replay-speed">Speed<select id="replay-speed" disabled><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select></label>
+                            <label class="replay-loop"><input id="replay-loop" type="checkbox" disabled>Loop</label>
+                        </div>
+                        <input id="replay-timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Replay tick" disabled>
+                        <output id="replay-position" for="replay-timeline">Tick --</output>
+                        <p id="replay-status" role="status">No recordings loaded.</p>
+                    </div>
+                </section>
+                <section class="player-equipment player-two" aria-labelledby="player-two-title">
+                    <h3 id="player-two-title"><span class="player-dot"></span>Player 2</h3>
+                    <p id="player-two-state" class="player-state">--</p><dl id="player-two-gear"></dl>
+                </section>
+            </div>
+            <details><summary>Run settings, loadouts and rewards</summary><dl id="config"></dl></details>
+        </section>
         <section class="summary" aria-label="Latest metrics">
             <div><h2>PPO update</h2><strong id="stat-update">--</strong><span id="stat-total">0 updates recorded</span></div>
             <div><h2>Player samples</h2><strong id="stat-samples">--</strong><span>Cumulative</span></div>
@@ -29,6 +78,12 @@
             <div><h2>Transitions / second</h2><strong id="stat-throughput">--</strong><span>Latest update</span></div>
             <div><h2>Completed rounds</h2><strong id="stat-rounds">--</strong><span>Cumulative</span></div>
             <div><h2>Timeouts</h2><strong id="stat-timeouts">--</strong><span>Across recorded updates</span></div>
+        </section>
+        <section class="summary timing" aria-label="Training time estimates">
+            <div><h2>Estimated time remaining</h2><strong id="stat-remaining">--</strong><span id="stat-remaining-detail">Waiting for updates</span></div>
+            <div><h2>Recorded training time</h2><strong id="stat-elapsed">--</strong><span>Collection + optimization this session</span></div>
+            <div><h2>Average update duration</h2><strong id="stat-average">--</strong><span>Last 20 timed updates</span></div>
+            <div><h2>Training target</h2><strong id="stat-target">--</strong><span>Current session</span></div>
         </section>
         <section class="view-controls" aria-label="Chart settings">
             <fieldset><legend>Update window</legend><div class="segments">
@@ -45,13 +100,13 @@
             <article class="chart"><h2>Mean reward / step <span>Per rollout</span></h2><div class="plot"><canvas id="reward-chart" role="img" aria-label="Mean reward per player step by PPO update"></canvas></div></article>
             <article class="chart"><h2>Total reward <span>Per update</span></h2><div class="plot"><canvas id="total-reward-chart" role="img" aria-label="Total player reward by PPO update"></canvas></div></article>
             <article class="chart reward-breakdown"><h2>Reward breakdown <span>Per update</span></h2><div class="plot"><canvas id="reward-types-chart" role="img" aria-label="Reward contributions by type and PPO update"></canvas><p id="reward-types-empty" class="plot-empty">No per-type reward data recorded.</p></div></article>
-            <article class="chart"><h2>PPO losses <span>Policy, value, total</span></h2><div class="plot"><canvas id="loss-chart" role="img" aria-label="Policy, value and total loss by PPO update"></canvas></div></article>
+            <article class="chart"><h2>Policy loss <span>PPO objective</span></h2><div class="plot"><canvas id="policy-loss-chart" role="img" aria-label="Policy loss by PPO update"></canvas></div></article>
+            <article class="chart"><h2>PPO losses <span>Value, total</span></h2><div class="plot"><canvas id="loss-chart" role="img" aria-label="Value and total loss by PPO update"></canvas></div></article>
             <article class="chart"><h2>Policy entropy <span>Exploration</span></h2><div class="plot"><canvas id="entropy-chart" role="img" aria-label="Policy entropy by PPO update"></canvas></div></article>
             <article class="chart"><h2>Throughput <span>Player transitions / second</span></h2><div class="plot"><canvas id="throughput-chart" role="img" aria-label="Player transitions per second by PPO update"></canvas></div></article>
             <article class="chart"><h2>Duel endings <span>Per update</span></h2><div class="plot"><canvas id="duels-chart" role="img" aria-label="Terminated duels and timeouts by PPO update"></canvas></div></article>
             <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Rollout collection and optimization seconds by PPO update"></canvas></div></article>
         </section>
-        <section class="configuration" aria-labelledby="config-title"><h2 id="config-title">Run configuration</h2><dl id="config"></dl></section>
         <section class="updates" aria-labelledby="updates-title">
             <div class="section-title"><h2 id="updates-title">Recent updates</h2><span id="row-count">0 recorded</span></div>
             <div class="table-scroll" tabindex="0" aria-label="Recent training updates"><table><thead><tr><th scope="col">Update</th><th scope="col">Samples</th><th scope="col">Reward / step</th><th scope="col">Policy loss</th><th scope="col">Value loss</th><th scope="col">Entropy</th><th scope="col">Rounds</th><th scope="col">Timeouts</th></tr></thead><tbody id="updates"><tr><td colspan="8">No updates recorded.</td></tr></tbody></table></div>

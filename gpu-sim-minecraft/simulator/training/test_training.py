@@ -790,6 +790,8 @@ class TrainingChecks(unittest.TestCase):
             checkpoint_path = str(Path(output) / "latest.pt")
             checkpoint = torch.load(checkpoint_path, weights_only=True)
             self.assertEqual(checkpoint["samples"], 16)
+            self.assertEqual(json.loads((Path(output) / "config.json").read_text())["training"],
+                             {"start_update": 0, "target_update": 1})
             self.assertEqual(checkpoint["metadata"]["reward_semantics"], REWARD_SEMANTICS)
             self.assertFalse((Path(output) / "replays").exists())
             self.assertTrue(any(not torch.equal(value, initial[key]) for key, value in checkpoint["model"].items()))
@@ -802,6 +804,8 @@ class TrainingChecks(unittest.TestCase):
             self.assertNotEqual(resumed["metadata"]["native_build"]["library_path"], "other-machine/artifact")
             self.assertEqual(resumed["update"], 2)
             self.assertEqual(resumed["samples"], 32)
+            self.assertEqual(json.loads((Path(output) / "config.json").read_text())["training"],
+                             {"start_update": 1, "target_update": 2})
             metrics = [json.loads(line) for line in (Path(output) / "metrics.jsonl").read_text().splitlines()]
             self.assertEqual(len(metrics), 2)
             for row in metrics:

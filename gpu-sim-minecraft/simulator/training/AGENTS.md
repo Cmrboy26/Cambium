@@ -197,14 +197,28 @@ Launcher `./scripts/serve-dashboard.ps1`; direct
 `http://127.0.0.1:8767`, Python 3.10+ only, no torch/native imports/legacy backend.
 Bundled Chart.js 4.5.1/MIT supports offline use.
 
-- List live/saved runs under default runs root; initially choose newest, refresh
-  every three seconds. Training may start before/after server, with no trainer flags.
+- List live/saved runs under default runs root in descending natural name order
+  (newest timestamp/job names first); refresh every three seconds. Training may
+  start before/after server, with no trainer flags.
 - `--runs-dir` selects a parent; repeat `--run` for individual extra directories.
   Use `--port` if occupied; Ctrl+C stops server.
-- Charts: mean reward/player step, total/update, stacked reward types, PPO
-  losses, entropy, player-transition throughput, terminated/timeouts and
-  collection/optimization duration. Window/EMA/config/pause controls are local.
-  Counts use all updates, not chart window. Connected means readable, not training.
+- Environment identity, source, episode limit and arena/policy appear above the
+  metrics; expandable settings include loadouts and resolved reward weights.
+- Charts: mean reward/player step, total/update, stacked reward types, separate
+  policy loss, value/total losses, entropy, player-transition throughput,
+  terminated/timeouts and collection/optimization duration. Each chart has a
+  value/derivative mode. Derivatives are differences of EMA-smoothed values
+  divided by update-number differences, computed before windowing; missing
+  values break the series. Reward derivatives retain signed stacking.
+  Window/EMA/pause controls are local. Counts use all updates, not chart window.
+  Connected means readable, not training.
+- Time estimates use the last 20 timed updates' mean collection + optimization
+  duration multiplied by remaining updates, independent of chart window/EMA.
+  Recorded training time sums these durations for the current session, not wall
+  time/checkpoint overhead. New `config.json` records `training.start_update`
+  and `training.target_update`; these do not change checkpoint metadata.
+  Legacy fresh runs use `options.updates`; legacy resumed runs with unknown
+  session boundaries leave remaining time and session duration unavailable.
 - Read only `config.json` and newline-complete `metrics.jsonl`; never load, alter,
   save or serve checkpoints. Wait for partial final lines, warn on malformed
   records, replace superseded logged updates after older-checkpoint resume.
@@ -220,7 +234,8 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
 - Counters exclude replay evaluation and include per-update contributions from
   episodes crossing update boundaries. No per-duel returns/opponent win rates.
 - Tests: `python -B -m unittest simulator.training.test_dashboard -v`, also in
-  `scripts/check.ps1`.
+  `scripts/check.ps1`. Chart math, run ordering and timing checks use Node.js
+  when installed; HTTP/store checks need only Python's standard library.
 
 ## Periodic Minecraft Replays
 

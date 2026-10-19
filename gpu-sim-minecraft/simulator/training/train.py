@@ -328,7 +328,8 @@ def main(argv=None):
                                options.replay_dir or output / "replays", options.seed, completed_rounds)
         output.mkdir(parents=True, exist_ok=True)
         configuration = vars(options)
-        (output / "config.json").write_text(json.dumps({"options": configuration, "metadata": manifest}, indent=2), encoding="utf-8")
+        (output / "config.json").write_text(json.dumps({"options": configuration, "metadata": manifest,
+            "training": {"start_update": base_update, "target_update": base_update + options.updates}}, indent=2), encoding="utf-8")
         observations = environment.observe()
         print(f"Physics + policy: {device}; worlds: {environment.count}; players/world: 2; host-staged transfers")
         print(f"Policy: {environment.schema.get('id', 'configured')} ({environment.observation_dim} features, {environment.action_count} heads)")
