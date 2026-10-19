@@ -24,6 +24,14 @@ tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 
 ## Local Replays And Duels
 
+For passwordless SSH on Windows, run once with GlobalVPN connected:
+
+```powershell
+.\rosie\setup-ssh-key.ps1 -SshHost 2 -SshUser reissmannc
+```
+
+Enter any prompts only in the terminal. [Key setup options](AGENTS.md#ssh-key-setup).
+
 On your local computer, install the updated mod and use a Python environment
 with the training requirements (CPU inference needs no native simulator build).
 With GlobalVPN connected, configure your Minecraft game folder once:

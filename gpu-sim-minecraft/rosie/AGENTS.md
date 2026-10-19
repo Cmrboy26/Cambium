@@ -78,6 +78,34 @@ The trainer writes metrics and checkpoints under its run directory. A one-update
 smoke job is a wiring check, not a useful training duration; check its logs before
 scaling up.
 
+## SSH Key Setup
+
+On Windows, run `.\rosie\setup-ssh-key.ps1 -SshHost 2 -SshUser <account>` from
+`gpu-sim-minecraft` with GlobalVPN connected. Windows OpenSSH Client (`ssh` and
+`ssh-keygen`) must already be installed. Host/user defaults come from
+`ROSIE_SSH_JUMP` and `ROSIE_SSH_USER`; missing values prompt in the terminal.
+Hosts accept a node number (`1`-`4`), hostname or SSH alias. Bare account names
+get `@ad.msoe.edu` appended. This does not change launcher or SSH configuration.
+
+The helper reuses `$HOME/.ssh/id_ed25519` or creates it interactively, and can
+recover a missing public key from the existing private key. It never overwrites
+an existing key pair or transmits the private key. Passwords, key passphrases
+and host-key confirmations are handled directly by OpenSSH in the terminal;
+host-key checking stays enabled. Only the public key goes to Rosie, encoded
+separately from the remote shell script to avoid Windows argument-quoting issues.
+Installation preserves existing `authorized_keys` entries, backs up that file
+before adding a missing entry, avoids duplicate entries on reruns, and sets
+remote `.ssh`/`authorized_keys` permissions to `700`/`600`.
+
+The final check uses public-key-only authentication with `BatchMode=yes`, so
+success verifies that noninteractive Rosie helpers can authenticate. For a
+passphrase-protected key, load it into a running SSH agent using
+`ssh-add "$HOME/.ssh/id_ed25519"`, then rerun setup. Agent installation or
+service configuration is not performed automatically and the passphrase is
+not removed. `-DryRun` previews the target and key choice without creating files
+or opening connections; specify `-SshHost` to avoid prompting. GlobalVPN is
+still required after key setup.
+
 ## Dashboard And SSH Tunnel
 
 With a `cambium-sim` training job running, start
