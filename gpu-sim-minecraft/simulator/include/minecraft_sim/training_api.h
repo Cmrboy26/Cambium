@@ -25,6 +25,9 @@ int mcsim_step(void* handle, const int32_t* actions, float* observations, float*
 /* Additive ABI 2 calls. Return 0 on success, -1 on error; obtain the
    thread-local error with mcsim_last_error(). The caller owns all buffers. */
 int mcsim_set_reward_weights(void* handle, const float* weights);
+/* Replace the episode timeout in 1..1000000 without rebuilding terrain.
+   Call at a stage reset boundary; this does not reset worlds or counters. */
+int mcsim_set_max_ticks(void* handle, int max_ticks);
 
 /* json_utf8 is a world-count array. Selected entries are two concrete Scene
    player definitions; unselected entries must be null. A null mask selects all.

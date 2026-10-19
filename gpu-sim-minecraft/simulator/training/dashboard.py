@@ -14,8 +14,64 @@ ASSETS = Path(__file__).resolve().parent / "dashboard"
 METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "timeouts",
            "replays_exported", "reward_mean", "reward_total", "loss", "policy_loss", "value_loss", "entropy",
            "collection_seconds", "update_seconds", "player_transitions_per_second")
+COUNTS = {"update", "samples", "completed_rounds", "terminated_duels", "timeouts", "replays_exported"}
 MAX_REPLAY_BYTES = 64 * 1024 * 1024
 MAX_REPLAY_FRAMES = 100001
+
+
+def count(value):
+    if type(value) is not int or value < 0:
+        raise ValueError("Expected a nonnegative integer count")
+    return value
+
+
+def finite(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        raise ValueError("Expected a finite number")
+    return value
+
+
+def metric_metadata(record):
+    result = {}
+    if "stage" in record:
+        if not isinstance(record["stage"], str) or not record["stage"]:
+            raise ValueError("Expected a stage name")
+        result["stage"] = record["stage"]
+    for name in ("stage_index", "next_stage_index"):
+        if name in record:
+            result[name] = None if name == "next_stage_index" and record[name] is None else count(record[name])
+    if "stage_progress" in record:
+        progress = record["stage_progress"]
+        if not isinstance(progress, dict):
+            raise ValueError("Expected stage progress")
+        result["stage_progress"] = {name: count(progress.get(name)) for name in ("updates", "episodes", "transitions")}
+    if "completed_curriculum" in record:
+        if type(record["completed_curriculum"]) is not bool:
+            raise ValueError("Expected curriculum completion boolean")
+        result["completed_curriculum"] = record["completed_curriculum"]
+    if "evaluations" in record:
+        suites = record["evaluations"]
+        if not isinstance(suites, dict):
+            raise ValueError("Expected evaluation suites")
+        evaluations = {}
+        for label, evaluation in suites.items():
+            if not label or not isinstance(evaluation, dict):
+                raise ValueError("Expected a named evaluation result")
+            win_rate = finite(evaluation.get("win_rate"))
+            if not 0 <= win_rate <= 1:
+                raise ValueError("Expected win rate between zero and one")
+            evaluations[label] = {"win_rate": win_rate, "reward_mean": finite(evaluation.get("reward_mean")),
+                                  "episodes": count(evaluation.get("episodes"))}
+        result["evaluations"] = evaluations
+    if "curriculum_boundary" in record:
+        boundary = record["curriculum_boundary"]
+        if not isinstance(boundary, dict) or "next_stage" not in boundary:
+            raise ValueError("Expected a curriculum boundary")
+        upcoming = boundary.get("next_stage")
+        if upcoming is not None and (not isinstance(upcoming, str) or not upcoming):
+            raise ValueError("Expected upcoming stage name or null")
+        result["curriculum_boundary"] = {"reset_worlds": count(boundary.get("reset_worlds")), "next_stage": upcoming}
+    return result
 
 
 class RunStore:
@@ -160,9 +216,8 @@ class RunStore:
                         for name in METRICS:
                             value = record.get(name)
                             if value is not None:
-                                if type(value) not in (int, float) or not math.isfinite(value):
-                                    raise ValueError("Expected finite numeric metrics")
-                                row[name] = value
+                                row[name] = count(value) if name in COUNTS else finite(value)
+                        row.update(metric_metadata(record))
                         if "reward_types" in record:
                             contributions = record["reward_types"]
                             if not isinstance(contributions, dict) or not all(

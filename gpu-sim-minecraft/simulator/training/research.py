@@ -15,9 +15,21 @@ import torch
 from backend.fast_rl_model import ActorCritic, FastRLAgent
 from simulator.training.contract import fingerprint
 from simulator.training.controllers import create_controller
-from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT
+from simulator.training.environment import Environment, REWARD_SEMANTICS, ROOT
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions
+from simulator.training.ppo import compute_gae, metadata, optimize
+
+
+def scene_key(scenario):
+    return [{"weight": arena.get("weight", 1), **{name: arena["environment"].get(name)
+            for name in ("bounds", "blocks", "rules")}} for arena in scenario["arenas"]]
+
+
+def deployment_summary(plan, stage, stage_index):
+    return {"name": plan.get("name", "Experiment"), "stage": stage["name"], "stage_index": stage_index,
+            "environment": stage.get("environment_name", stage["name"]), "arenas": stage.get("arena_names", []),
+            "controllers": "shared_learner", "sampling": "fixed_checkpoint_episode"}
 
 
 class SampledWorlds:
@@ -26,6 +38,7 @@ class SampledWorlds:
     def __init__(self, scenario, contract, count, device, library, max_ticks, seed, state=None):
         self.resources = ExitStack()
         self.count, self.device, self.contract = count, device, contract
+        self.max_ticks_override = max_ticks
         self.schema = contract
         self.observation_dim = contract["observation_dim"]
         self.action_names = tuple(contract["action_names"])
@@ -34,7 +47,6 @@ class SampledWorlds:
         if state is not None:
             self.sampler.load_state_dict(state)
         self.groups = []
-        self.definitions = [deepcopy(scenario["arenas"][arena_id]["environment"]) for arena_id in self.sampler.arenas]
         directory = Path(self.resources.enter_context(tempfile.TemporaryDirectory()))
         try:
             initial = [self.sampler.players(world) for world in range(count)]
@@ -42,7 +54,6 @@ class SampledWorlds:
                 ids = np.flatnonzero(np.asarray(self.sampler.arenas) == arena_id)
                 definition = deepcopy(scenario["arenas"][arena_id]["environment"])
                 definition["players"] = initial[int(ids[0])]
-                definition["policy"] = contract
                 path = directory / f"arena-{arena_id}.json"
                 path.write_text(json.dumps(definition, allow_nan=False), encoding="utf-8")
                 environment = self.resources.enter_context(Environment(len(ids), device, path, library,
@@ -58,15 +69,13 @@ class SampledWorlds:
     def configure(self, stage):
         self.sampler.configure(stage["scenario"])
         for ids, environment in self.groups:
-            original = self.definitions[int(ids[0])].get("reward_weights", {})
-            reward = stage["rewards"]
-            if reward["mode"] == "replace":
-                resolved = dict.fromkeys(REWARD_NAMES, 0.0)
-            else:
-                from simulator.training.environment import resolve_reward_weights
-                resolved = resolve_reward_weights({"reward_weights": original})
-            resolved.update(reward.get("weights", {}))
-            environment.set_rewards(resolved)
+            arena_id = self.sampler.arenas[int(ids[0])]
+            definition = stage["scenario"]["arenas"][arena_id]["environment"]
+            limit = self.max_ticks_override if self.max_ticks_override is not None else definition.get("max_ticks", 300)
+            if environment.max_ticks != limit:
+                environment.set_max_ticks(limit)
+            environment.set_rewards(stage["rewards"]["weights"])
+        self.max_ticks = max(environment.max_ticks for _, environment in self.groups)
 
     def observe(self):
         result = np.empty((self.count, 2, self.observation_dim), dtype=np.float32)
@@ -169,8 +178,6 @@ class OpponentPool:
 
 @torch.no_grad()
 def collect(model, worlds, pool, observations, steps, device, fixed):
-    from simulator.training.train import compute_gae
-
     shape = (steps, worlds.count)
     rollout = {name: torch.empty(shape, dtype=torch.bool if name in ("terminated", "truncated")
                                 else torch.float32, device=device)
@@ -279,6 +286,7 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
                               "backend": options.device.upper(), "players": 2, "ticks_per_second": 20,
                               "environment": environment.scenario, "policy": plan["policy"],
                               "training": {"stage": stage["name"], "controls": stage["controls"],
+                                           "experiment": deployment_summary(plan, stage, plan["stages"].index(stage)),
                                            "opponent": provenance, "completed_rounds": rounds, "policy_update": update}}
                     written = 0
 
@@ -313,8 +321,6 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
 
 
 def run(options, checkpoint=None):
-    from simulator.training.train import metadata, optimize
-
     if options.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA training requested but unavailable")
     os.environ["OMP_NUM_THREADS"] = str(options.threads)
@@ -328,17 +334,34 @@ def run(options, checkpoint=None):
         raw = checkpoint["research"]["plan"]
     else:
         raise ValueError("Research training requires a plan")
-    plan = resolve_plan(raw)
+    plan = resolve_plan(raw, base_dir=Path(options.plan).parent if options.plan else ROOT)
+    for name in ("hidden_dim", "lr", "epochs", "minibatch_size"):
+        override = getattr(options, name)
+        if override is not None:
+            plan["learner"][name] = override
+        setattr(options, name, plan["learner"][name])
+    plan = resolve_plan(plan)
+    saved = {} if checkpoint is None else checkpoint.get("research", {})
+    if options.envs is None:
+        options.envs = saved.get("world_count", 16 if options.device == "cpu" else 8192)
+    if options.rollout_steps is None:
+        options.rollout_steps = saved.get("rollout_steps", 128)
+    if checkpoint is not None and options.max_ticks is None:
+        options.max_ticks = saved.get("max_ticks_override")
     if checkpoint is not None:
         if checkpoint.get("research", {}).get("plan_hash") != plan_hash(plan):
             raise ValueError("Training plan differs from checkpoint; use --initialize for a new experiment")
         if checkpoint["research"]["world_count"] != options.envs:
             raise ValueError("Research resume requires the original world count")
+    if options.replay_every and any(
+            (options.max_ticks if options.max_ticks is not None else arena["environment"]["max_ticks"]) > 100000
+            for stage in plan["stages"] for arena in stage["scenario"]["arenas"]):
+        raise ValueError("Enabled replays require every training stage max_ticks <= 100000")
     torch.manual_seed(plan["seed"])
-    output = Path(options.output) if options.output else ROOT / "simulator/training/runs" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    output = (Path(options.output) if options.output else Path(options.resume).resolve().parent if options.resume else
+              ROOT / "simulator/training/runs" / datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
     if output.exists() and any(output.iterdir()) and checkpoint is None:
         raise ValueError("Output directory is not empty; choose another output or use --resume")
-    saved = {} if checkpoint is None else checkpoint["research"]
     stage_index = saved.get("stage_index", 0)
     progress = saved.get("progress", {"updates": 0, "episodes": 0, "transitions": 0})
     completed = saved.get("completed", False)
@@ -348,8 +371,6 @@ def run(options, checkpoint=None):
     worlds = SampledWorlds(stage["scenario"], plan["policy"], options.envs, options.device, options.library,
                           options.max_ticks, plan["seed"], saved.get("sampler"))
     try:
-        if options.replay_every and worlds.max_ticks > 100000:
-            raise ValueError("Enabled replays require max_ticks <= 100000")
         pool = OpponentPool(plan["opponents"], plan["policy"], options.envs, options.device, plan["seed"])
         pool.configure(stage["opponents"])
         model = ActorCritic(worlds.observation_dim, options.hidden_dim, movement_bins=9,
@@ -388,9 +409,10 @@ def run(options, checkpoint=None):
         evaluations = saved.get("evaluations", {})
         config = vars(options).copy()
         run_metadata = metadata(worlds.groups[0][1], options.hidden_dim)
-        run_metadata.update(learner="opponent_pool", controls=stage["controls"])
+        run_metadata.update(learner="opponent_pool", controls=stage["controls"],
+                            experiment=deployment_summary(plan, stage, stage_index))
         (output / "config.json").write_text(json.dumps({"options": config, "metadata": run_metadata,
-            "plan": plan, "training": {"start_update": base_update, "target_update": base_update + options.updates}},
+            "experiment": plan, "training": {"start_update": base_update, "target_update": base_update + options.updates}},
             indent=2), encoding="utf-8")
         print(f"Research training: {options.envs} worlds; {worlds.observation_dim} observations; stage {stage['name']}")
         if checkpoint is not None:
@@ -432,20 +454,22 @@ def run(options, checkpoint=None):
                     stage_index += 1
                     next_stage = plan["stages"][stage_index]
                     statistics["curriculum_boundary"] = {"reset_worlds": options.envs, "next_stage": next_stage["name"]}
-                    if next_stage["scenario"]["arenas"] != stage["scenario"]["arenas"]:
+                    statistics["next_stage_index"] = stage_index
+                    if scene_key(next_stage["scenario"]) != scene_key(stage["scenario"]):
                         worlds.close()
                         worlds = SampledWorlds(next_stage["scenario"], plan["policy"], options.envs, options.device,
                             options.library, options.max_ticks, plan["seed"] + stage_index)
+                        worlds.configure(next_stage)
                     else:
-                        worlds.sampler.configure(next_stage["scenario"])
+                        worlds.configure(next_stage)
                         worlds.reset()
                     stage = next_stage
-                    worlds.configure(stage)
                     observations = worlds.observe()
                     pool.configure(stage["opponents"])
                     pool.reset(np.ones(options.envs, dtype=bool))
                     progress = {"updates": 0, "episodes": 0, "transitions": 0}
                     evaluations = {}
+            statistics["completed_curriculum"] = completed
             print(json.dumps(statistics, allow_nan=False))
             with (output / "metrics.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps(statistics, allow_nan=False) + "\n")
@@ -453,7 +477,8 @@ def run(options, checkpoint=None):
                 scenario, _ = worlds.episode(0)
                 manifest = metadata(worlds.groups[0][1], options.hidden_dim)
                 manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario, scenario=scenario,
-                                learner="opponent_pool", controls=stage["controls"])
+                                learner="opponent_pool", controls=stage["controls"],
+                                experiment=deployment_summary(plan, stage, stage_index))
                 research = {"plan": plan, "plan_hash": plan_hash(plan), "stage_index": stage_index,
                             "progress": progress, "completed": completed, "evaluations": evaluations,
                             "sampler": worlds.sampler.state_dict(), "pool": pool.state_dict(),

@@ -13,6 +13,99 @@ from simulator.training.dashboard import RunStore, make_server
 
 
 class DashboardChecks(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for curriculum DOM checks")
+    def test_experiment_stage_evaluation_and_replay_dom(self):
+        directory = Path(__file__).with_name("dashboard")
+        result = subprocess.run([shutil.which("node"), "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+class Node {
+    constructor() {this.children=[]; this.dataset={}; this.hidden=false; this.value='run';}
+    set textContent(value) {this.text=String(value); this.children=[];}
+    get textContent() {return this.text ?? this.children.map(child=>child.textContent).join(' ');}
+    set innerHTML(value) {throw new Error('Untrusted content must never use innerHTML');}
+    append(...children) {this.text=undefined; this.children.push(...children);}
+    replaceChildren(...children) {this.text=undefined; this.children=children;}
+    addEventListener() {}
+    setAttribute() {}
+}
+const nodes = new Map();
+const document = {getElementById(id) {if (!nodes.has(id)) nodes.set(id,new Node()); return nodes.get(id);},
+    createElement:()=>new Node(), createDocumentFragment:()=>new Node(), querySelectorAll:()=>[],
+    addEventListener() {}, dispatchEvent() {}};
+const context = vm.createContext({document, Intl, CustomEvent:class {}, setInterval() {}, cancelAnimationFrame() {}});
+vm.runInContext(fs.readFileSync(path.join(process.argv[1],'dashboard.js'),'utf8'), context);
+const text = id=>document.getElementById(id).textContent;
+const hidden = id=>document.getElementById(id).hidden;
+const scene = name=>({name,max_ticks:50,players:[],bounds:{min:[0,0,0],size:[8,4,8]}});
+const experiment = {format:'minecraft_sim_experiment',version:1,name:'<img src=x onerror=alert(1)>',seed:17,
+    learner:{lr:0.01,epochs:3,minibatch_size:16},policy:{},evaluations:{'<held>':{},unseen:{}},
+    stages:[
+        {name:'aim',environment_name:'Aim environment',arena_names:['Flat'],scenario:{arenas:[{environment:scene('flat'),weight:1}]},
+            controls:{attack:false},opponents:[{id:'target',weight:1}],advance:{updates:2}},
+        {name:'fight',environment_name:'Fight environment',arena_names:['Hill','Pit'],
+            scenario:{arenas:[{environment:scene('hill'),weight:1},{environment:scene('pit'),weight:3}]},
+            controls:{},opponents:[{id:'sword',weight:1},{id:'axe',weight:3}],
+            advance:{all:[{episodes:10},{any:[{updates:4},{transitions:128}]}]}}
+    ]};
+const config = {options:{device:'cpu',updates:1000,seed:0},metadata:{environment:scene('deployment'),
+    learner:'opponent_pool',reward_weights:{doing_damage:1}},experiment};
+context.fixture=config;
+vm.runInContext('records=[]; renderConfig(fixture); renderCurriculum();',context);
+assert.match(text('curriculum-status'),/Initial stage: aim/);
+assert.match(text('stage-context'),/Aim environment.*Flat.*target.*100%.*attack=false/);
+assert.match(text('config'),/Seed 17.*Learning rate 0.01/);
+assert.equal(hidden('experiment-details'),false);
+assert.equal(document.getElementById('experiment-details').open,undefined,'Research details must default collapsed');
+assert.equal(text('curriculum-title'),experiment.name,'Labels must be literal text');
+assert.deepEqual(JSON.parse(text('experiment-json')),experiment);
+assert.match(text('environment-name'),/Deployment snapshot/);
+assert.match(text('evaluations'),/<held>.*--.*unseen/);
+vm.runInContext(`records=[{update:2,stage:'aim',stage_index:0,next_stage_index:1,
+    stage_progress:{updates:2,episodes:3,transitions:64},completed_curriculum:false,
+    curriculum_boundary:{reset_worlds:2,next_stage:'fight'},
+    evaluations:{'<held>':{win_rate:0.75,reward_mean:-1.5,episodes:4}}}]; renderCurriculum();`,context);
+assert.match(text('curriculum-status'),/Upcoming stage: fight.*latest rollout is from aim/);
+assert.match(text('stage-summary'),/Latest rollout stage aim.*updates: 2 \/ 2.*Not complete.*Upcoming stage fight/);
+assert.match(text('stage-context-title'),/Latest rollout conditions — aim/);
+assert.equal(hidden('upcoming-stage'),false);
+assert.match(text('upcoming-context'),/Fight environment.*Hill.*Pit.*sword \(25%\).*axe \(75%\).*all heads learned/);
+assert.match(text('stage-timeline'),/2 aim.*2 worlds reset → fight/);
+assert.match(text('evaluations'),/<held> 2 aim 75% -1.5 4/);
+vm.runInContext(`records.push({update:3,stage:'fight',stage_index:1,next_stage_index:1,stage_progress:{updates:1,episodes:4,transitions:32},
+    completed_curriculum:false,evaluations:{}}); renderCurriculum();`,context);
+assert.match(text('curriculum-status'),/Active stage.*fight/);
+assert.equal(hidden('upcoming-stage'),true);
+assert.match(text('stage-summary'),/ALL \(episodes: 4 \/ 10; ANY \(updates: 1 \/ 4; transitions: 32 \/ 128\)\)/);
+assert.match(text('evaluations'),/<held> 2 aim 75% -1.5 4/,'Periodic results must retain their original update/stage');
+vm.runInContext(`records.push({update:4,stage:'fight',stage_index:1,next_stage_index:1,
+    stage_progress:{updates:2,episodes:10,transitions:128},completed_curriculum:true}); renderCurriculum();`,context);
+assert.equal(text('curriculum-status'),'Curriculum complete','Completion is explicit, not inferred from final stage');
+assert.equal(hidden('upcoming-stage'),true,'Complete wins over stale next stage');
+assert.match(text('stage-timeline'),/3–4 fight.*Curriculum complete/);
+vm.runInContext(`records=[{update:1}]; renderConfig({options:{seed:5},metadata:{environment:{name:'Historical'}}}); renderCurriculum();`,context);
+assert.equal(hidden('curriculum'),true);
+assert.equal(hidden('experiment-details'),true);
+assert.equal(text('environment-name'),'Historical');
+vm.runInContext(`records=[]; renderConfig({plan:{name:'Old plan',scenario:{base:'missing.json'},controls:{fixed:{attack:true}},
+    stages:[{name:'old'}]}}); renderCurriculum();`,context);
+assert.match(text('curriculum-status'),/Initial stage: old/);
+assert.match(text('stage-context'),/Fixed controls Not recorded/,'Never resolve authoring inheritance');
+// Replay metadata is independent of self-play, and equipment remains concrete.
+const arenaSource=fs.readFileSync(path.join(process.argv[1],'arena.js'),'utf8');
+vm.runInContext(arenaSource.slice(arenaSource.indexOf('function renderReplayTraining'),arenaSource.indexOf('\nclass ArenaViewer')),context);
+vm.runInContext(`renderReplayTraining({stage:'<aim>',opponent:{id:'frozen',type:'checkpoint'},
+    controls:{fixed:{movement:'neutral',attack:false}},policy_update:2,completed_rounds:4});`,context);
+assert.equal(hidden('replay-training'),false);
+assert.match(text('replay-training'),/Stage <aim>.*Opponent.*frozen.*movement="neutral", attack=false.*Policy update 2/);
+vm.runInContext('renderReplayTraining(null);',context);
+assert.equal(hidden('replay-training'),true);
+assert.equal(text('replay-training'),'');
+""", str(directory)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for world-view checks")
     def test_world_view_toggle(self):
         script = Path(__file__).with_name("dashboard") / "arena.js"
@@ -156,6 +249,7 @@ assert.deepEqual(evaluate(`trainingTime([{update:102,collection_seconds:3,update
     {target:null,remaining:null,average:5,elapsed:null,eta:null});
 assert.equal(evaluate(`trainingTime([],{training:{start_update:100,target_update:110}}).eta`),null);
 assert.equal(evaluate(`trainingTime([{update:111}],{training:{start_update:100,target_update:110}}).eta`),0);
+assert.equal(evaluate(`trainingTime([{update:2,completed_curriculum:true}],{options:{updates:1000}}).eta`),0);
 assert.equal(evaluate(`trainingTime([{update:1,collection_seconds:3}],{options:{updates:5}}).average`),null);
 assert.equal(evaluate(`trainingTime(Array.from({length:25},(_,index)=>({update:index+1,
     collection_seconds:index,update_seconds:1})),{options:{updates:30}}).average`),15.5);
@@ -165,9 +259,9 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = tempfile.TemporaryDirectory(prefix=".dashboard-tests-", dir=".")
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.run = self.root / "runs" / "first"
         self.run.mkdir(parents=True)
         (self.run / "config.json").write_text('{"options":{"device":"cpu","envs":4}}', encoding="utf-8")
@@ -217,6 +311,69 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         rows = self.store.read(identity)["metrics"]
         self.assertEqual([row["update"] for row in rows], [1, 2])
         self.assertEqual(rows[-1]["samples"], 64)
+
+    def test_resolved_experiment_and_metric_metadata(self):
+        experiment = {"format": "minecraft_sim_experiment", "version": 1, "name": "combat", "seed": 17,
+                      "policy": {"observations": [], "actions": []},
+                      "learner": {"hidden_dim": 32, "lr": 0.001, "epochs": 2, "minibatch_size": 8},
+                      "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
+                      "stages": [{"name": "aim", "environment_name": "duel", "arena_names": ["flat"],
+                                  "scenario": {"arenas": [{"environment": {"version": 1, "name": "flat"}, "weight": 1}]},
+                                  "controls": {"attack": False}, "advance": {"updates": 2},
+                                  "rewards": {"weights": {"doing_damage": 1}},
+                                  "opponents": [{"id": "target", "weight": 1}]}],
+                      "evaluations": {"held": {"episodes": 4}}}
+        config = {"options": {"device": "cpu"}, "metadata": {"learner": "opponent_pool",
+                  "environment": {"version": 1, "name": "deployment"}, "controls": {"attack": False},
+                  "max_ticks": 50, "hidden_dim": 32, "reward_weights": {"doing_damage": 1}},
+                  "experiment": experiment}
+        (self.run / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        row = {"update": 2, "stage": "aim", "stage_index": 0, "next_stage_index": 1,
+               "stage_progress": {"updates": 2, "episodes": 4, "transitions": 128}, "completed_curriculum": False,
+               "evaluations": {"held": {"win_rate": 0.75, "reward_mean": -1.5, "episodes": 4}},
+               "curriculum_boundary": {"reset_worlds": 2, "next_stage": "combat"}}
+        self.metrics.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        identity = self.store.list_runs()[0]["id"]
+        data = self.store.read(identity)
+        self.assertEqual(data["config"], config)
+        self.assertEqual(data["metrics"], [row])
+        self.assertEqual(data["warnings"], [])
+        row.update(update=3, next_stage_index=None, completed_curriculum=True)
+        row["curriculum_boundary"]["next_stage"] = None
+        with self.metrics.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(row) + "\n")
+        self.assertEqual(self.store.read(identity)["metrics"][-1], row)
+        config["plan"] = config.pop("experiment")
+        (self.run / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        self.assertEqual(self.store.read(identity)["config"], config)
+
+    def test_invalid_research_metadata_is_skipped_without_losing_valid_rows(self):
+        invalid = [
+            {"stage": 1}, {"stage": ""}, {"stage_index": True}, {"stage_index": -1},
+            {"next_stage_index": 1.5}, {"completed_curriculum": 1},
+            {"stage_progress": []}, {"stage_progress": {"updates": 1}},
+            *({"stage_progress": {"updates": 1, "episodes": value, "transitions": 4}}
+              for value in (True, -1, 1.5, "2", None)),
+            {"evaluations": []}, {"evaluations": {"held": None}}, {"evaluations": {"held": {}}},
+            *({"evaluations": {"held": {"win_rate": value, "reward_mean": 0, "episodes": 2}}}
+              for value in (float("nan"), float("inf"), -0.1, 1.1, True, None)),
+            {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": float("inf"), "episodes": 2}}},
+            {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 1, "episodes": 2.5}}},
+            {"evaluations": {"": {"win_rate": 0, "reward_mean": 0, "episodes": 0}}},
+            {"curriculum_boundary": []}, {"curriculum_boundary": {"reset_worlds": 2}},
+            {"curriculum_boundary": {"reset_worlds": True, "next_stage": "combat"}},
+            {"curriculum_boundary": {"reset_worlds": 2, "next_stage": {}}},
+            {"samples": 1.5}, {"timeouts": -1}, {"completed_rounds": False},
+        ]
+        with self.metrics.open("a", encoding="utf-8") as output:
+            for index, fields in enumerate(invalid, 2):
+                output.write(json.dumps({"update": index, **fields}) + "\n")
+            output.write(json.dumps({"update": len(invalid) + 2, "completed_curriculum": True,
+                                     "evaluations": {"held": {"win_rate": 1, "reward_mean": 0, "episodes": 0}}}) + "\n")
+        identity = self.store.list_runs()[0]["id"]
+        data = self.store.read(identity)
+        self.assertEqual([row["update"] for row in data["metrics"]], [1, len(invalid) + 2])
+        self.assertEqual(data["warnings"], [f"Skipped {len(invalid)} invalid metric record(s)."])
 
     def test_reward_history_and_logged_contributions(self):
         self.metrics.write_text(

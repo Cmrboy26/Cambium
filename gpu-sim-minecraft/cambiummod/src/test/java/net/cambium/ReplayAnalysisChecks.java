@@ -44,6 +44,7 @@ public final class ReplayAnalysisChecks {
 		System.out.println("PASS: replay food profile is frozen independently of world rules");
 		checkLivePolicy();
 		checkDescriptiveContract();
+		BoundaryContractChecks.check();
 		checkPolicyFixtures();
 		EquipmentObservationChecks.check();
 		require(CambiumFabric.BUILD_ID.matches(".*source=[0-9a-f]{64} built=.+"), "Mod build identity must be packaged");
@@ -243,16 +244,6 @@ public final class ReplayAnalysisChecks {
 	}
 
 	private static void checkLivePolicy() {
-		JsonArray weapons = JsonParser.parseString("[\"minecraft:diamond_sword\",\"minecraft:diamond_axe\"]").getAsJsonArray();
-		require(LivePolicy.weaponSlot(weapons, "minecraft:diamond_sword") == 0
-				&& LivePolicy.weaponSlot(weapons, "minecraft:diamond_axe") == 1,
-				"Human weapon switching must use that fighter's loadout order");
-		require(LivePolicy.weaponSlot(weapons, "minecraft:air") == 0,
-				"An empty human hotbar slot must not pause live inference");
-		JsonArray reversed = JsonParser.parseString("[\"minecraft:diamond_axe\",\"minecraft:diamond_sword\"]").getAsJsonArray();
-		require(LivePolicy.weaponSlot(reversed, "minecraft:diamond_axe") == 0
-				&& LivePolicy.weaponSlot(reversed, "minecraft:diamond_sword") == 1,
-				"Opponent equipment must use the opponent's loadout, not the observing bot's");
 		var source = new ObservationEncoder.State(0.5, 1, -1.5, 20, 0, 0, true);
 		var target = new ObservationEncoder.State(0.5, 1, 2.5, 10, 180, 0, true);
 		float[] rays = {0.1F, 0.2F, 0.3F, 0.4F, 0.5F, 0.6F, 0.7F, 0.8F};
@@ -312,7 +303,9 @@ public final class ReplayAnalysisChecks {
 		loadout.add("weapons", fixture.get("weapons"));
 		contract.validateLoadouts(java.util.List.of(loadout, loadout));
 		var controls = contract.decode(fixture.getAsJsonArray("action"), loadout);
-		require(ReplayAnalysis.JSON.toJsonTree(controls).equals(fixture.get("controls")), "Shared semantic action decoding");
+		JsonObject semantic = ReplayAnalysis.JSON.toJsonTree(controls).getAsJsonObject();
+		semantic.remove("select_slot");
+		require(semantic.equals(fixture.get("controls")), "Shared semantic action decoding retains historical item fields");
 		for (var invalid : fixture.getAsJsonArray("invalid")) {
 			JsonObject change = invalid.getAsJsonObject();
 			JsonObject descriptor = fixture.getAsJsonObject("policy").deepCopy();

@@ -17,8 +17,18 @@ final class ReplayTrace {
 
 	record Controls(boolean forward, boolean backward, boolean left, boolean right,
 			boolean jump, boolean sprint, boolean sneak, boolean attack, float yaw_delta, float pitch_delta,
-			boolean select_weapon, String weapon, boolean use_item) {
-		Controls { if (weapon == null) weapon = "minecraft:diamond_sword"; }
+			boolean select_weapon, String weapon, boolean use_item, Integer select_slot) {
+		Controls {
+			if (weapon == null) weapon = "minecraft:diamond_sword";
+			if (select_slot == null) select_slot = -1;
+			if (select_slot < -1 || select_slot >= PolicyCatalogue.MAX_WEAPON_SLOTS || !select_weapon && select_slot != -1) {
+				throw new IllegalArgumentException("Invalid semantic selected slot");
+			}
+		}
+		Controls(boolean forward, boolean backward, boolean left, boolean right, boolean jump, boolean sprint,
+				boolean sneak, boolean attack, float yaw, float pitch, boolean select, String weapon, boolean use) {
+			this(forward, backward, left, right, jump, sprint, sneak, attack, yaw, pitch, select, weapon, use, -1);
+		}
 		Controls(boolean forward, boolean backward, boolean left, boolean right, boolean jump, boolean sprint,
 				boolean sneak, boolean attack, float yaw, float pitch) {
 			this(forward, backward, left, right, jump, sprint, sneak, attack, yaw, pitch, false, "minecraft:diamond_sword", false);
@@ -34,26 +44,28 @@ final class ReplayTrace {
 			boolean on_ground, boolean sprinting, int pose, float health, float absorption,
 			int damage_cooldown, int hurt_time, int attack_strength_ticks, Controls controls, Outcome outcome,
 			String weapon, boolean shield_equipped, boolean using_shield, int shield_use_ticks, int shield_cooldown,
-			int item_use_delay, boolean attack_suppressed, JsonObject armor) {
+			int item_use_delay, boolean attack_suppressed, JsonObject armor, Integer weapon_slot) {
 		Actor {
 			if (weapon == null) weapon = "minecraft:diamond_sword";
 			if (armor == null) armor = new JsonObject();
+			if (weapon_slot == null) weapon_slot = -1;
+			if (weapon_slot < -1 || weapon_slot >= PolicyCatalogue.MAX_WEAPON_SLOTS) throw new IllegalArgumentException("Invalid actor weapon slot");
 		}
 		Actor(int id, double[] position, double[] velocity, float yaw, float pitch, boolean ground, boolean sprint,
 				int pose, float health, float absorption, int cooldown, int hurt, int charge, Controls controls, Outcome outcome) {
 			this(id, position, velocity, yaw, pitch, ground, sprint, pose, health, absorption, cooldown, hurt, charge,
-					controls, outcome, "minecraft:diamond_sword", false, false, 0, 0, 0, false, new JsonObject());
+					controls, outcome, "minecraft:diamond_sword", false, false, 0, 0, 0, false, new JsonObject(), -1);
 		}
 		Actor withLoadout(JsonObject loadout) {
 			return new Actor(id, position, velocity, yaw, pitch, on_ground, sprinting, pose, health, absorption,
 					damage_cooldown, hurt_time, attack_strength_ticks, controls, outcome,
 					loadout.getAsJsonArray("weapons").get(loadout.get("selected").getAsInt()).getAsString(),
 					loadout.get("offhand").getAsString().equals("minecraft:shield"), false, 0, 0, 0, false,
-					loadout.getAsJsonObject("armor").deepCopy());
+					loadout.getAsJsonObject("armor").deepCopy(), loadout.get("selected").getAsInt());
 		}
 		Actor at(double[] position, float yaw, float pitch) {
 			return new Actor(id, position, new double[]{0, 0, 0}, yaw, pitch, false, false, 0, health, absorption,
-					0, 0, attack_strength_ticks, controls, outcome, weapon, shield_equipped, false, 0, 0, 0, false, armor.deepCopy());
+					0, 0, attack_strength_ticks, controls, outcome, weapon, shield_equipped, false, 0, 0, 0, false, armor.deepCopy(), weapon_slot);
 		}
 	}
 	record Frame(int tick, List<Actor> actors) {}
@@ -131,6 +143,7 @@ final class ReplayTrace {
 				Actor actor = frame.actors().get(index);
 				JsonObject loadout = loadouts.get(index);
 				if (!actor.weapon().equals(loadout.getAsJsonArray("weapons").get(loadout.get("selected").getAsInt()).getAsString())
+						|| actor.weapon_slot() >= 0 && actor.weapon_slot() != loadout.get("selected").getAsInt()
 						|| actor.shield_equipped() != loadout.get("offhand").getAsString().equals("minecraft:shield")
 						|| actor.using_shield() || actor.shield_use_ticks() != 0 || actor.shield_cooldown() != 0
 						|| actor.item_use_delay() != 0 || actor.attack_suppressed()) {
@@ -223,6 +236,10 @@ final class ReplayTrace {
 					}
 					if (header.get("version").getAsInt() == 3) {
 						JsonObject actorJson = raw.getAsJsonArray("actors").get(index).getAsJsonObject();
+						if (actorJson.has("weapon_slot")) SimulationContract.integer(actorJson.get("weapon_slot"));
+						if (actorJson.getAsJsonObject("controls").has("select_slot")) {
+							SimulationContract.integer(actorJson.getAsJsonObject("controls").get("select_slot"));
+						}
 						for (String field : List.of("weapon", "shield_equipped", "using_shield", "shield_use_ticks", "shield_cooldown",
 								"item_use_delay", "attack_suppressed", "armor")) {
 							if (!actorJson.has(field)) throw new IOException("Missing explicit actor equipment field: " + field);
@@ -231,6 +248,13 @@ final class ReplayTrace {
 							if (!actorJson.getAsJsonObject("controls").has(field)) throw new IOException("Missing semantic control: " + field);
 						}
 						JsonObject loadout = environment.loadouts.get(index);
+						if (actor.weapon_slot() >= 0) SimulationContract.selectedSlot(loadout, actor.weapon(), actor.weapon_slot(), -1);
+						if (actor.controls().select_slot() >= 0) {
+							SimulationContract.selectedSlot(loadout, actor.controls().weapon(), actor.controls().select_slot(), -1);
+							if (actor.weapon_slot() >= 0 && !actor.weapon_slot().equals(actor.controls().select_slot())) {
+								throw new IOException("Actor slot disagrees with selected control at tick " + frame.tick());
+							}
+						}
 						if (!loadout.getAsJsonArray("weapons").contains(ReplayAnalysis.JSON.toJsonTree(actor.weapon()))
 								|| actor.shield_equipped() != loadout.get("offhand").getAsString().equals("minecraft:shield")
 								|| !actor.armor().equals(loadout.getAsJsonObject("armor"))

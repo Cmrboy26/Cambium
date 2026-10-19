@@ -63,11 +63,39 @@ These checks protect the supported adapter, not arbitrary raw C callers.
 Selected library paths/device are recorded by Python; source/build identity is
 diagnostic, not a physics-parity or checkpoint-compatibility claim.
 
+The additive ABI 2 `mcsim_set_max_ticks(handle, limit)` returns 0 on success,
+-1 on error, and accepts limits in 1..1,000,000. Apply it at a stage reset
+boundary; it changes the existing batch's timeout without resetting players,
+counters or immutable terrain. Python reapplies timeout-normalized shaping
+weights. The setter does not rewrite the original scenario metadata.
+
 The default remains an unarmored diamond sword without shield; v1 policies stay
 sword-only. [V2](training/AGENTS.md#swordaxeshield-v2) adds weapon/shield controls.
 [Descriptive contracts](../docs/simulation_contract.md) configure slots/armor and
 controls independently of presets. Envelope 3 carries equipment/use state;
 movement CSV remains movement-only.
+
+The split experiment compiler supplies concrete `minecraft_sim_environment`
+version 1 plus a policy descriptor. Native code does not resolve authoring
+arena/environment/policy references or equipment/spawn distributions. Compiled
+players have nine physical hotbar slots, independently of equipped items;
+repeated `minecraft:air` entries are valid, duplicate nonair entries are not.
+Historical concrete fixtures with shorter loadouts remain supported.
+
+`TrainingBatch` tracks each player's selected slot separately from the physical
+`PlayerState::weapon`. Initialize it from concrete `loadout.selected`, update
+from the weapon head's semantic slot value, and use it for self/opponent slot
+observations. Never recover a selected empty slot by matching item IDs. Slot
+changes retain the existing item-based charge behavior: air-to-air selection
+does not reset attack charge. Episode scenario serialization retains the
+requested initial slot, not a reconstructed or current selection.
+
+Training replay frames add optional actor `weapon_slot` and controls
+`select_slot` metadata. The latter is the requested slot when `select_weapon`
+is true, otherwise -1; existing `weapon` item IDs remain for mechanics and old
+readers. This is additive within envelope 3 and does not change native physics
+state, `Controls`, or ABI size. Legacy standalone replay producers without
+tracked slot identity may omit these fields.
 
 Obtain `PlayerView` from `WorldView::player()` to preserve the world's sine table
 for directional checks. Configure through setters:

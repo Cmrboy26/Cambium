@@ -283,7 +283,19 @@ class Environment:
         result = function(self._handle, environment)
         if result is None:
             raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
-        return {**json.loads(result), "reward_weights": self.weights.copy()}
+        return {**json.loads(result), "reward_weights": self.weights.copy(), "max_ticks": self.max_ticks}
+
+    def set_max_ticks(self, max_ticks):
+        if type(max_ticks) is not int or not 1 <= max_ticks <= MAX_MAX_TICKS:
+            raise ValueError("Episode limit must be an integer in [1,1000000]")
+        function = getattr(self.native, "mcsim_set_max_ticks", None)
+        if function is None:
+            raise RuntimeError("Rebuild minecraft_sim_training for stage-specific episode limits")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        function.restype = ctypes.c_int
+        self._check(function(self._handle, max_ticks))
+        self.max_ticks = max_ticks
+        self.set_rewards(self.weights)
 
     def set_rewards(self, weights):
         resolved = resolve_reward_weights({}, weights)

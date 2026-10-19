@@ -6,12 +6,14 @@ Keep human-facing startup commands in [README.md](README.md).
 ## Training Architecture
 
 Standalone training reuses backend `ActorCritic`/PPO loss without FastAPI,
-Minecraft, RCON or legacy timers. Two players/world share one policy; worlds are
-independent. Both decisions use the same pre-tick observation before ordered
+Minecraft, RCON or legacy timers. Each world has one learner and one independently
+selected scripted/checkpoint opponent; worlds are independent. Both decisions
+use the same pre-tick observation before ordered
 physics updates. Hold weights fixed through a rollout, then synchronously update
-PPO minibatches. No opponent pool/frozen-opponent schedule or distributed/multi-GPU
-optimization is implemented in the legacy path. Research plans use a separate
-orchestrator over the same physics/model/PPO helpers; see below.
+PPO minibatches. Only learner decisions enter PPO. Distributed/multi-GPU
+optimization is not implemented. Historical shared-self-play code is isolated in
+[compatibility_training.py](compatibility_training.py) for regression fixtures;
+it is not the public training entry point. Common PPO/GAE lives in [ppo.py](ppo.py).
 
 The native library exposes a small C ABI through `ctypes`, without pybind11 or
 Python development headers. CPU worlds use OpenMP when available, sequential
@@ -21,41 +23,48 @@ rates as full PPO rates. Collection time includes enabled replay sampling.
 
 ## Research Training Plans
 
-Pass `--plan simulator/training/presets/gear-curriculum.json` (PowerShell
-`-Plan`) to opt into the research orchestrator. No plan preserves legacy shared
-self-play. Plans are `minecraft_sim_training_plan`, version 1; unknown fields,
-capabilities, controls, rewards and items fail rather than silently defaulting.
-Paths inside plans are relative to the project root, not the plan's directory.
+Pass `--plan simulator/training/presets/shield-axe-curriculum.json` (PowerShell
+`-Plan`), also the default for new runs. Plans are
+`minecraft_sim_training_plan`, version 2; unknown fields, capabilities, controls,
+rewards and items fail rather than silently defaulting. Version-1 authoring plans
+must be rewritten; historical checkpoint inference/replay remains supported.
+Paths inside authoring files are relative to the containing file's directory.
 `--updates` is the maximum additional updates for this invocation; stage
 budgets may complete the curriculum sooner. The plan's seed owns sampling and
-learner initialization; the legacy `--seed` does not override it.
+learner initialization. The removed `--schema`, `--environment` and `--seed`
+training flags have no implicit migration aliases.
 
 ### Plan And Episode Contracts
 
-- `policy`: either a complete semantic descriptor, `{"preset":"v1"}`,
-  `{"preset":"v2"}`, or `{"preset":"equipment_v3"}`. V1/v2 constants live in
-  [legacy.py](legacy.py) and are re-exported by the environment for compatibility.
-  All stages share one immutable layout. V3 fixes 78 named catalogue
+- Authoring separates [arenas](../arenas/) (bounds/blocks/rules),
+  [environments](../tasks/) (initialization/distributions/task),
+  [policies](../policies/) (observation/action descriptors) and
+  [plans](presets/) (learner/controllers/mixtures/stages/evaluation).
+  The compiler produces one `minecraft_sim_experiment`, version 1, with no
+  unresolved authoring references. Config uses `experiment`, not an authored plan
+  copied alongside repeated environment defaults.
+- All stages share one immutable policy layout. The equipment policy fixes 78 named catalogue
   features and eight heads with a stable weapon-slot count across all stages
   and evaluation scenes; later catalogue additions do not change it. Explicit
-  descriptors permit smaller research layouts. V3 includes own slot contents,
+  descriptors permit smaller research layouts. It includes own slot contents,
   but only visible selected-weapon/shield/armor information for the opponent,
   not hidden inventory or the legacy opponent slot index.
-- `scenario.base`: existing environment JSON. Alternatively `scenario.arenas`
-  is a weighted list of `{"base":"...", "weight":1}`. Environments are embedded
-  into the resolved plan/checkpoint; edited/deleted source files do not alter
+- Arenas contain geometry only. Environment arena selection resolves to a
+  weighted set of concrete episode templates internally. Environments are embedded
+  into the resolved experiment/checkpoint; edited/deleted source files do not alter
   implicit resumes. Arena assignment is sampled once per world. Worlds sharing
   a scene use one native batch and immutable terrain. Changing only player
   state/loadouts never rebuilds or uploads terrain.
-- `scenario.spawns`: `sample: world|episode`, optional `region` with `min/max`
+- Environment spawn sampling: `sample: world|episode`, optional `region` with `min/max`
   XYZ, `minimum_separation` (at least 0.6), `yaw` and `pitch`. Sampling uses
   bounded rejection for collision-free positions in the supported air/stone
   scene; exhaustion is an explicit error. Without a region, preserve positions.
-- `scenario.equipment`: `sample: world|episode`, `players: independent`, and
+- Environment equipment sampling: `sample: world|episode`, `players: independent`, and
   `loadout`. Specified loadout fields replace the base field; unspecified ones
-  inherit it. Weapon slots never shift. Air means an empty hand/absent shield
-  or armor. Each slot can be literal or a weighted choice. Possible duplicate
-  weapon IDs across slots are rejected under the existing scene contract.
+  inherit it. Weapon slots never shift; the compiler pads missing slots with air
+  to preserve the nine-slot policy interface. Air means an empty hand/absent shield
+  or armor. Each slot can be literal or a weighted choice. Duplicate non-air
+  weapon IDs across slots are rejected; repeated air is valid.
   Armor can vary independently by slot using the same choice syntax.
 - Weighted choices use `{"choices":[{"value":"minecraft:shield","weight":1},
   {"value":"minecraft:air","weight":1}]}`. Look values also accept
@@ -117,12 +126,14 @@ them. Do not overwrite unconstrained samples after sampling.
 
 ### Stages, Evaluation And Checkpoints
 
-Stages have unique `name`, a weighted `opponents` mixture of `{"id":..., "weight":...}`,
-optional `controls`, `rewards`, `scenario` overrides, and `advance`. Stage
-configuration resolves independently from plan defaults, not the previous stage.
-Reward modes: `environment` preserves scene/default weights, `override` changes
-named weights, `replace` starts all weights at zero. Replace is useful for aiming
-without accidental no-damage/timeout penalties. Supported reward mechanics/units
+Stages have unique names, an environment reference, a named opponent mixture,
+optional controls, typed environment/task patches and advancement criteria.
+Stage configuration resolves independently from the declared environment,
+not the previous stage. Arrays replace, null disables optional sampling,
+and partial spawn patches need not repeat an entire environment.
+Environment task rewards are explicit: unspecified terms are zero. A stage's
+task reward patch replaces the reward map, avoiding accidental inherited
+no-damage/timeout penalties. Supported reward mechanics/units
 remain those documented above/below; adding weights does not implement mechanics.
 
 Advancement supports `{"updates":300}`, `{"episodes":1000}`,
@@ -135,8 +146,9 @@ budgets can overshoot by one rollout. Transitions reset active episodes without
 combat losses and record `curriculum_boundary` in metrics. Completed plans stop;
 extending them is a new experiment, not an incompatible resume.
 
-Named `evaluations` define `every_updates`, `episodes`, `seed`, an opponent
-mixture, optional scenario, and optional controls (default unrestricted).
+Named `evaluations` define `every_updates`, `episodes`, `seed`, an environment
+and a named opponent mixture, plus optional typed patches and controls
+(default unrestricted).
 Intervals use global completed updates. Suites run separate seeded worlds,
 model eval mode and isolated RNG, never contribute training transitions, and
 report exact episode count, mean episode return and wins/episodes. Wins require
@@ -144,12 +156,12 @@ opponent death/exit with the learner still alive/in bounds; timeouts count as
 non-wins. Up to 16 evaluation worlds provide stable scene/gear combinations.
 Metrics retain stage, budget progress and suite results in JSONL.
 
-Research replay cadence counts completed training episodes, like legacy replay.
+Replay cadence counts completed training episodes.
 Samples are separate complete duels using a concrete sampled scene, real pool
 opponent, learner side and stage constraints, with semantic replay controls.
 Evaluation/replay must leave learner RNG and subsequent training unchanged.
 
-Research checkpoints retain the PPO envelope and embed plan, stage/budget
+Research checkpoints retain the PPO envelope and embed the resolved experiment, stage/budget
 progress, sampler caches/streams, pool/controller state, and opponent identities.
 Resume without `--plan` restores the embedded plan. World count, rollout length,
 episode-limit override and architecture must match. Resume starts fresh episodes,
@@ -159,11 +171,44 @@ only, starting new optimizer/schedule/sampling state. Research checkpoints serve
 through the same descriptor-based HTTP/mod bridge as existing policies.
 
 Run `python -B -m unittest simulator.training.test_controllers
-simulator.training.test_research -v` after building the native library; Training
+simulator.training.test_experiments simulator.training.test_research
+simulator.training.test_deployment -v` after building the native library; Training
 and All launcher/CI scopes include these checks. CUDA and JDK25/live gates remain
 separate. For new primitives, follow the extension recipes below, including
 independent native/live encoders and fixtures; do not add preset-specific PPO
 branches.
+
+## Shield/Axe Curriculum Preset
+
+[shield-axe-curriculum.json](presets/shield-axe-curriculum.json) is a 1,500-update
+experiment: aiming 150, attack timing 250, pursuit 350, equipment combat 750.
+Budgets are fixed updates, not evaluation thresholds. The run needs an invocation
+cap of at least 1,500 updates to finish in one invocation.
+The preset owns its H100-oriented learner settings: hidden width 512, two PPO
+epochs and minibatches of 16,384. General compiler defaults are 256/4/1,024;
+explicit CLI overrides are saved into the resolved experiment.
+
+All stages use the same flat enclosed arena, no armor, iron sword in slot 0,
+and slot 1 containing an iron axe with probability 0.75 or air otherwise.
+An offhand shield is present with probability 0.75. Both players independently
+sample equipment once per world; ordinary resets and stage changes preserve it.
+Spawns and look directions resample each episode. The attack stage samples
+separations 2.0..approximately 2.61 blocks, but leaves movement learned so
+knockback cannot permanently put the target out of reach. It fixes sprint,
+jump, shield and weapon selection. The pursuit stage introduces moving/attacking
+sword opponents; the final stage releases all constraints.
+
+Final opponent probabilities are 10% sword fighter, 30% shield fighter,
+30% axe-switching fighter, 30% shield-and-axe fighter. These describe controller
+behaviors, not guaranteed gear: absent-axe fighters fall back to their sword;
+absent-shield fighters do not request shield use. Optional gear observations
+gate builtin equipment choices; older contracts without those features retain
+their existing behavior. Fixed-seed held-out combat evaluation runs 64 episodes
+every 50 global updates with unrestricted learner controls. It monitors progress
+without advancing stages early.
+
+This is a starting research budget, not a convergence claim or measured H100
+runtime. No block edits, procedural terrain or checkpoint opponents are used.
 
 ## Setup
 
@@ -222,17 +267,21 @@ python -B -m simulator.training.train --device cuda --envs 8192 \
 ## Task And Controls
 
 Custom experiments use [the contract](../../docs/simulation_contract.md) and
-[research-duel.json](../environments/research-duel.json). Embedded `policy`
+the reusable authoring files linked above. Separate policy
 descriptors select/order named observations/categorical controls; per-player
 `loadout` defines supported Minecraft-ID weapons, armor/shields. Dimensions derive
 from descriptors, not new preset IDs. Replay/live consume the resolved contract.
 
-`--environment` selects an arena (default [duel.json](../environments/duel.json)).
-Parse/cache during native setup. Resets reuse spawns/immutable terrain; CUDA
-terrain stays resident. Seed RNG per world/player/episode.
+The environment selects geometry and task settings; `--plan` selects the
+experiment. Parse/cache during setup. Resets reuse immutable terrain; CUDA
+terrain stays resident. Stage timeout changes update the native task limit
+without rebuilding geometry. Future block edits must use separate mutable state.
+
+Historical low-level presets below describe compatibility fixtures, not the
+public authoring API:
 
 - One decision advances one physics tick; never real-time sleeps.
-- V1 default: movement(9), jump(2), sprint(2), attack(2), yaw(9), pitch(5).
+- Historical V1: movement(9), jump(2), sprint(2), attack(2), yaw(9), pitch(5).
   Movement order: neutral, forward, forward-right, right, backward-right,
   backward, backward-left, left, forward-left. Not legacy movement indices.
 - Yaw deltas: `[-20,-10,-5,-2,0,2,5,10,20]`; pitch: `[-5,-2,0,2,5]` degrees.
@@ -253,10 +302,12 @@ terrain stays resident. Seed RNG per world/player/episode.
 
 ### Reward Semantics
 
-Load default [reward_weights.json](reward_weights.json) from this component at
-environment startup. An environment's top-level `reward_weights` object overrides
-individual values; omitted values inherit defaults, explicit zero disables a
-term. Record resolved settings and `reward_semantics` in checkpoint metadata.
+Authored environment `task.rewards` maps explicitly define enabled rewards;
+omitted terms are zero. Compiler output carries every supported weight.
+The low-level concrete fixture adapter still reads historical
+[reward_weights.json](reward_weights.json) defaults when no explicit weights are
+supplied; this is not the authoring contract. Record resolved settings and
+`reward_semantics` in checkpoint metadata.
 Changed weights or semantics require a new run, not incompatible resume.
 Rebuild older native libraries for reward ABI 2; ABI 1 is rejected explicitly.
 
@@ -267,7 +318,7 @@ Rebuild older native libraries for reward ABI 2; ABI 1 is rejected explicitly.
   Misses, blocks and absorption-only hits earn no damage reward and do not
   satisfy the episode's damage requirement. Critical/sweep mechanics remain,
   but have no separate reward multiplier: their actual damage is counted once.
-- `blocked_with_shield` defaults 5, rewards actual non-axe blocks only. Axe hits,
+- `blocked_with_shield` rewards actual non-axe blocks only. Axe hits,
   including disables, earn no block bonus. Held shields alone earn nothing;
   blocked hits earn neither damage reward nor damage penalty.
 - Apply terminal win/loss and timeout/no-damage penalties once. Simultaneous
@@ -279,21 +330,21 @@ Rebuild older native libraries for reward ABI 2; ABI 1 is rejected explicitly.
   the remainder unpaid. CLI episode-limit overrides use the same normalization.
   Damage/block/win/loss/timeout rewards are not divided by episode length.
 
-Environment override example, with other defaults inherited:
+Authored task example, with other rewards disabled:
 
 ```json
 {
-  "reward_weights": {
-    "aim_hold": 2.0,
-    "pitch_control": 0.0
+  "task": {
+    "max_ticks": 300,
+    "rewards": {"aim_hold": 2.0}
   }
 }
 ```
 
-### Sword/Axe/Shield V2
+### Historical Sword/Axe/Shield V2
 
-`./scripts/train.ps1 -Schema v2`, or
-`python -B -m simulator.training.train --schema v2`, opts in.
+This is the historical fixed-layout artifact contract; new authoring uses
+separate semantic policies rather than a public preset selector.
 `minecraft_sim_duel_31_v2` preserves first 22 observations/six heads, appending
 `weapon` (0=diamond sword,1=diamond axe) and `shield` (0=release,1=hold use).
 Players start unarmored, sword selected, offhand shield. Existing arenas work;
@@ -316,8 +367,7 @@ opponent cooldown/charge/raise progress. Lowered is not disabled. Disable lasts
 preserves charge, switching resets. Attack/use are independent: no auto-lowering
 or bypass. Both heads execute in shared physics.
 
-V1 remains default/unchanged. Match schema on resume; v1/v2 are not interchangeable.
-Wrapper restores schema from adjacent config unless explicitly overridden.
+V1/V2 meanings remain unchanged for old artifact readers; they are not interchangeable.
 Older libraries must fail with a rebuild message, not accept incorrect strides.
 V2 supports periodic replays/live duels: store semantic controls, not head indices.
 `/info` advertises descriptors/fingerprint for v1/v2/custom layouts.
@@ -331,10 +381,10 @@ and normal completion; `--save-every` changes cadence. Nonempty output requires
 
 Resume restores policy, optimizer, counters and PyTorch RNG, but starts fresh
 episodes, not an exact simulator snapshot. `--updates` means additional updates.
-Match observation/action schema, environment, rewards, hidden size and episode
-limit; device/world count may change. Without explicit `--environment`, recover
-the embedded definition even if source moved/changed; explicit overrides must
-match. Reject legacy eight-movement-head checkpoints; existing backend callers
+Match the resolved experiment, world count, rollout length and smoke episode-limit
+override; device may change. Without `--plan`, recover the embedded experiment
+even if source moved/changed. Explicit incompatible overrides fail.
+Reject legacy eight-movement-head checkpoints; existing backend callers
 still default to eight movement categories and otherwise remain unchanged.
 
 ## Training Dashboard
@@ -351,6 +401,10 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   Use `--port` if occupied; Ctrl+C stops server.
 - Environment identity, source, episode limit and arena/policy appear above the
   metrics; expandable settings include loadouts and resolved reward weights.
+- Resolved experiments show stage budgets, environment/arena identity, opponent
+  mixtures, fixed controls and held-out evaluations. Boundary rows distinguish
+  the just-finished stage from the upcoming stage; completion is explicit.
+  The timeline and resolved JSON are read-only, not a configuration editor.
 - Charts: mean reward/player step, total/update, stacked reward types, separate
   policy loss, value/total losses, entropy, player-transition throughput,
   terminated/timeouts and collection/optimization duration. Each chart has a
@@ -379,7 +433,8 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   trainer. Stop training before rebuilding a loaded Windows DLL. Use the actual
   CUDA build directory for CUDA runs.
 - Counters exclude replay evaluation and include per-update contributions from
-  episodes crossing update boundaries. No per-duel returns/opponent win rates.
+  episodes crossing update boundaries. Training rewards are not a win rate;
+  separately logged held-out suites report episode returns and wins/episodes.
 - Tests: `python -B -m unittest simulator.training.test_dashboard -v`, also in
   `scripts/check.ps1`. Chart math, run ordering and timing checks use Node.js
   when installed; HTTP/store checks need only Python's standard library.
@@ -393,15 +448,15 @@ experience, preserving training RNG. No export before N completions; multiple
 crossings in one batch step each export.
 
 ```powershell
-.\scripts\train.ps1 -Environment simulator/environments/duel-full-gear.json `
+.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json `
   -ReplayEvery 100 -ReplayToMinecraft
 ```
 
 Choose game folder via explicit directory, environment variable or unambiguous
 detection ([selection rules](../../scripts/AGENTS.md#minecraft-folder)). Other
 destinations: wrapper `-ReplayDirectory`, direct `--replay-dir`; fallback run's
-`replays`. Omit interval/set zero to disable. Create sample environment once,
-reset between samples, never reload terrain per sample. Larger N limits added
+`replays`. Omit interval/set zero to disable. Sample export uses isolated worlds
+and RNG so it cannot perturb subsequent training. Larger N limits added
 wall time/disk cost with many worlds.
 
 Unique envelope-3 JSONL includes arena/frame zero, every transition through
@@ -507,7 +562,8 @@ Keep architecture and supported-slice decisions in the
 
 ### Reward Changes
 
-1. Defaults belong in `reward_weights.json`; experiments override by name.
+1. Task rewards belong in environment authoring files; omitted terms are zero.
+  `reward_weights.json` is historical low-level fixture configuration only.
   Define event versus per-episode-budget units and terminal/reset behavior.
 2. Keep native evaluation/totals, Python ordering/counts and dashboard labels
   synchronized. Update the native buffer descriptor when counts change.

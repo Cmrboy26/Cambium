@@ -25,6 +25,20 @@
         </section>
         <p id="run-path" class="run-path"></p>
         <p id="notice" class="notice" role="status" hidden></p>
+        <section id="curriculum" class="curriculum" aria-labelledby="curriculum-title" hidden>
+            <h2 id="curriculum-title">Experiment stages</h2>
+            <p id="curriculum-status" role="status"></p>
+            <dl id="stage-summary"></dl>
+            <h3 id="stage-context-title">Stage conditions</h3><dl id="stage-context"></dl>
+            <div id="upcoming-stage" hidden><h3>Upcoming stage conditions</h3><dl id="upcoming-context"></dl></div>
+            <details open><summary>Stage timeline / chart update markers</summary>
+                <p class="section-note">Update ranges refer to the stage that produced each rollout. Boundary rows describe the just-finished stage, not the upcoming stage.</p>
+                <div class="table-scroll"><table><thead><tr><th>Updates</th><th>Stage</th><th>Last budget progress</th><th>Boundary / completion</th></tr></thead><tbody id="stage-timeline"></tbody></table></div>
+            </details>
+            <h3>Evaluations</h3>
+            <p class="section-note">Latest recorded result per suite (independent of chart window); mean return is per evaluation episode.</p>
+            <div class="table-scroll"><table><thead><tr><th>Suite</th><th>Update</th><th>Rollout stage</th><th>Win rate</th><th>Mean return</th><th>Episodes</th></tr></thead><tbody id="evaluations"></tbody></table></div>
+        </section>
         <section class="configuration" aria-labelledby="environment-name">
             <h2 id="environment-name">Environment</h2><dl id="environment"></dl>
             <div id="world-view" class="duel-preview" aria-label="Environment and player equipment">
@@ -62,6 +76,7 @@
                         <input id="replay-timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Replay tick" disabled>
                         <output id="replay-position" for="replay-timeline">Tick --</output>
                         <p id="replay-status" role="status">No recordings loaded.</p>
+                        <dl id="replay-training" hidden></dl>
                     </div>
                 </section>
                 <section class="player-equipment player-two" aria-labelledby="player-two-title">
@@ -70,6 +85,7 @@
                 </section>
             </div>
             <details><summary>Run settings, loadouts and rewards</summary><dl id="config"></dl></details>
+            <details id="experiment-details" hidden><summary>Resolved experiment JSON (research details)</summary><pre id="experiment-json"></pre></details>
         </section>
         <section class="summary" aria-label="Latest metrics">
             <div><h2>PPO update</h2><strong id="stat-update">--</strong><span id="stat-total">0 updates recorded</span></div>

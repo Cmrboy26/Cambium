@@ -46,6 +46,21 @@ on the same machine, loopback-only `127.0.0.1:8766`. Trusted standalone PPO form
 only; v1/v2/custom descriptive contracts/loadouts share the adapter. Unsupported
 primitives/items fail before spawning. [Contract](../docs/simulation_contract.md).
 
+The mod consumes only concrete `minecraft_sim_environment` version 1 and the
+resolved policy descriptor. It does not parse split experiment authoring
+references, distributions, or training plans. Compiled loadouts have nine
+physical hotbar slots; repeated air is allowed, duplicate nonair is rejected.
+Historical concrete loadouts with fewer slots remain supported.
+
+Optional `/info.experiment` deployment metadata supplies experiment name,
+stage name/index, environment and arena names, `controllers=shared_learner`,
+and `sampling=fixed_checkpoint_episode`. Startup and `/simduel status` show
+the supplied experiment/stage/environment (displaying the zero-based stage
+index as one-based). Missing metadata remains compatible with historical
+services. Live rounds run the fixed embedded checkpoint scenario with a shared
+learner, not a curriculum, opponent pool, or reset-time distribution sampler;
+world mode still substitutes its marked spawns/current terrain.
+
 Launch `./scripts/serve-policy.ps1 -List`, then `./scripts/serve-policy.ps1`.
 CPU default supports GPU-trained weights without native DLL. Python requirements
 are needed, not a native build when using somebody else's checkpoint.
@@ -79,7 +94,7 @@ Small-flat-arena policies may fail on stairs/water/cliffs/special blocks/distanc
 | `/simduel leave` | Restore participant and return to bot versus bot. |
 | `/simduel pause`, `/simduel resume` | Pause/resume controlled steps, discard pending actions/request fresh observations. |
 | `/simduel reset` | Reset both at original spawns, resume. |
-| `/simduel status` | Round/tick, health, wins/draws, request-to-application latency. |
+| `/simduel status` | Round/tick, health, wins/draws, latency, optional deployment stage and fixed-scenario scope. |
 | `/simduel stop` | Cancel pending work, remove actors, restore arena-mode blocks. |
 
 Death, arena exit (arena mode), falling below world height or checkpoint tick
@@ -110,6 +125,11 @@ An in-memory snapshot cannot survive a crash; this is not a complete backup.
   from full-cube training. Other entities/rules still apply; PvP must be enabled.
 - Freeze bots' food/both natural-regeneration paths; never change world rules.
   Human game mode changes temporarily, but Peaceful may still regenerate humans.
+- Weapon-slot observations read the actual inventory selected slot for bots
+  and humans, including any empty slot; do not infer it by matching item IDs.
+  Descriptor decoding carries the semantic slot in controls `select_slot`.
+  Bots keep the resolved hotbar and select that physical slot. Charge resets
+  only when the selected item changes, not when switching between empty slots.
 - HTTP is asynchronous with two-second timeout and session/tick tags. Apply at
   most one action pair/server tick. Waiting neither repeats prior inputs nor
   blocks server thread. Timeout/error pauses; fix issue then resume.
@@ -239,6 +259,16 @@ unbreakable resolved gear, JSONL <=64 MiB, same
 applies gear/use state; input feeds semantic controls without forcing damage.
 PvP required. Attacks target replay players; other entities are allies for sweep
 filtering. Cleanup on stop/reload/dimension change/open-to-LAN/server shutdown.
+
+Envelope 3 accepts optional actor `weapon_slot` and controls `select_slot`.
+Explicit indices must match the concrete loadout/item; frame-zero selection
+must match `loadout.selected`. `select_slot` is -1 when no slot is requested.
+New native training frames preserve exact empty-slot identity in both fields;
+absolute playback and input playback honor it, and analysis compares supplied
+slot state against actual inventory selection. Historical frames without these
+fields use -1 internally and retain item-based fallback: keep a matching
+current slot, otherwise choose the first matching item. Unknown historical
+slot identity is not scored as an actual slot mismatch.
 
 Input is diagnostic, not full network-client parity: no full local sprint
 eligibility, arbitrary packet timing, RNG reconstruction or unsupported kits.

@@ -64,6 +64,8 @@ class Policy:
                      "checkpoint": str(self.path), "update": saved.get("update", 0),
                      "max_ticks": limit, "device": str(self.device), "deterministic": deterministic,
                      "controls": manifest.get("controls", {"fixed": {}})}
+        if "experiment" in manifest:
+            self.info["experiment"] = manifest["experiment"]
 
     @torch.inference_mode()
     def act(self, request):

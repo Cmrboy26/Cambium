@@ -118,8 +118,8 @@ final class LivePolicy implements AutoCloseable {
 		catalogue[28] = Math.min(cooldown / 100.0F, 1);
 		catalogue[29] = source.getAttackStrengthScale(0.5F);
 		catalogue[30] = source.isUsingItem() ? Math.min(source.getTicksUsingItem() / 5.0F, 1) : 0;
-		catalogue[31] = weaponSlot(source, sourceIndex);
-		catalogue[32] = weaponSlot(target, 1 - sourceIndex);
+		catalogue[31] = source.getInventory().getSelectedSlot();
+		catalogue[32] = target.getInventory().getSelectedSlot();
 		ObservationEncoder.equipment(catalogue, equipment(source), equipment(target), weaponSlots(source));
 		return contract.project(catalogue);
 	}
@@ -152,16 +152,6 @@ final class LivePolicy implements AutoCloseable {
 
 	private static int shieldCooldown(ServerPlayer player) {
 		return Math.round(player.getCooldowns().getCooldownPercent(new ItemStack(Items.SHIELD), 0) * 100);
-	}
-
-	private int weaponSlot(ServerPlayer player, int index) {
-		String selected = BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).toString();
-		return weaponSlot(loadouts.get(index).getAsJsonArray("weapons"), selected);
-	}
-
-	static int weaponSlot(JsonArray weapons, String selected) {
-		for (int slot = 0; slot < weapons.size(); slot++) if (weapons.get(slot).getAsString().equals(selected)) return slot;
-		return 0;
 	}
 
 	private CompletableFuture<JsonObject> request(String path, JsonObject body) {

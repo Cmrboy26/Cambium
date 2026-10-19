@@ -170,6 +170,32 @@ class ScriptedChecks(unittest.TestCase):
         second = controller.act(obs)
         np.testing.assert_array_equal(decoded(contract, second, "shield"), [True, False, True])
 
+    def test_optional_equipment_uses_present_items_only(self):
+        contract = policy(observations=[*policy()["observations"],
+            {"feature": "self.attack_charge"},
+            {"feature": "self.shield_using"},
+            {"feature": "self.shield_disabled"},
+            {"feature": "self.has_shield"},
+            {"feature": "self.weapon_slot_1.present", "scale": 2},
+            {"feature": "opponent.shield_using"},
+            {"feature": "opponent.shield_disabled_observed"},
+        ], actions=[*policy()["actions"],
+            {"name": "weapon", "values": [1, 0]},
+            {"name": "shield", "values": [False, True]},
+        ])
+        controller = BasicMeleeController(contract, 4, options={
+            "axe_slot": 1, "sword_slot": 0, "shield": True})
+        obs = observations(contract, 4, **{
+            "target.distance_fraction": 0.2, "self.attack_charge": 0.2,
+            "self.has_shield": [1, 1, 0, 0],
+            "self.weapon_slot_1.present": [1, 0, 1, 0],
+            "opponent.shield_using": 1,
+        })
+        controller.act(obs)
+        actions = controller.act(obs)
+        np.testing.assert_array_equal(decoded(contract, actions, "weapon"), [1, 0, 1, 0])
+        np.testing.assert_array_equal(decoded(contract, actions, "shield"), [True, True, False, False])
+
     def test_required_features_and_options_are_not_silently_ignored(self):
         for feature in ("target.distance_fraction", "target.yaw_error", "target.pitch_error"):
             for remove in (False, True):

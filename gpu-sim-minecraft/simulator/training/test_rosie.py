@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -18,6 +19,148 @@ from simulator.training.rosie import (
     REMOTE_SCRIPT, SESSION_SCRIPT, Rosie, configure, connect_terminal, connection_id,
     main, session_path, session_response, valid_name,
 )
+
+
+@unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
+class SetupTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "project with spaces"
+        rosie = self.root / "rosie"
+        rosie.mkdir(parents=True)
+        source = Path(__file__).resolve().parents[2] / "rosie/setup.sh"
+        self.script = rosie / "setup.sh"
+        shutil.copyfile(source, self.script)
+        self.bin = self.root / "tools"
+        self.bin.mkdir()
+        self.log = self.root / "calls"
+        self.environment = self.root / ".venv-rosie"
+        self.python = self.bin / "python3"
+        self.python.write_text(
+            '#!/usr/bin/env bash\n'
+            'printf "%s\\n" "$*" >> "$SETUP_TEST_LOG"\n'
+            'if [[ "$1" == "-m" && "$2" == "venv" ]]; then\n'
+            '  mkdir -p "$3/bin"\n'
+            '  printf "test\\n" > "$3/pyvenv.cfg"\n'
+            '  cp "$0" "$3/bin/python"\n'
+            '  chmod u+x "$3/bin/python"\n'
+            'fi\n'
+            'if [[ "$1" == "-c" && "${SETUP_TEST_BROKEN:-0}" == "1" ]]; then exit 7; fi\n',
+            encoding="utf-8",
+        )
+        self.python.chmod(0o700)
+
+    def run_setup(self, broken=False):
+        environment = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+                       "SETUP_TEST_LOG": str(self.log), "SETUP_TEST_BROKEN": "1" if broken else "0"}
+        return subprocess.run(["bash", str(self.script)], env=environment, capture_output=True,
+                              text=True, timeout=10)
+
+    def existing(self):
+        (self.environment / "bin").mkdir(parents=True)
+        (self.environment / "pyvenv.cfg").write_text("test\n")
+        shutil.copyfile(self.python, self.environment / "bin/python")
+        (self.environment / "bin/python").chmod(0o700)
+        activation = self.environment / "bin/activate"
+        activation.write_text("preserve this activation script\n")
+        activation.chmod(0o444)
+        return activation
+
+    def test_reuses_environment_without_rewriting_readonly_activation(self):
+        activation = self.existing()
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Reusing Python environment", result.stdout)
+        self.assertEqual(activation.read_text(), "preserve this activation script\n")
+        self.assertEqual(activation.stat().st_mode & 0o777, 0o444)
+        calls = self.log.read_text().splitlines()
+        self.assertFalse(any(line.startswith("-m venv ") for line in calls))
+        self.assertEqual(sum(line.startswith("-m pip install") for line in calls), 3)
+
+    def test_creates_new_environment(self):
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.environment / "pyvenv.cfg").is_file())
+        self.assertTrue(self.log.read_text().startswith("-m venv "))
+
+    def test_incomplete_environment_is_preserved(self):
+        self.environment.mkdir()
+        marker = self.environment / "keep"
+        marker.write_text("untouched")
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("incomplete", result.stderr)
+        self.assertEqual(marker.read_text(), "untouched")
+        self.assertFalse(self.log.exists())
+
+    def test_broken_environment_fails_before_package_changes(self):
+        activation = self.existing()
+        result = self.run_setup(broken=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("failed validation", result.stderr)
+        self.assertNotIn("-m pip", self.log.read_text())
+        self.assertEqual(activation.stat().st_mode & 0o777, 0o444)
+
+
+@unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
+class TrainingJobTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "project with spaces"
+        self.tools = self.root / "tools"
+        self.tools.mkdir(parents=True)
+        (self.root / "simulator/training/presets").mkdir(parents=True)
+        (self.root / "simulator/training/presets/shield-axe-curriculum.json").write_text("{}")
+        (self.root / "simulator/build-rosie-cuda-75").mkdir()
+        (self.root / "simulator/build-rosie-cuda-75/minecraft_sim_training.so").touch()
+        (self.root / ".venv-rosie/bin").mkdir(parents=True)
+        self.log = self.root / "arguments"
+        for name in ("module", "nvcc", "nvidia-smi"):
+            self.executable(self.tools / name, "#!/usr/bin/env bash\nexit 0\n")
+        self.executable(self.tools / "cmake",
+                        '#!/usr/bin/env bash\nif [[ "$1" == "--version" ]]; then echo "cmake version 3.25.0"; fi\n')
+        self.executable(self.root / ".venv-rosie/bin/python",
+                        '#!/usr/bin/env bash\nif [[ "$1" == "-B" ]]; then printf "%s\\n" "$@" > "$JOB_TEST_LOG"; fi\n')
+        self.script = Path(__file__).resolve().parents[2] / "rosie/train.sbatch"
+
+    def executable(self, path, text):
+        path.write_text(text)
+        path.chmod(0o700)
+
+    def launch(self, **settings):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("SIM_")}
+        environment.update(PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
+                           SLURM_SUBMIT_DIR=str(self.root), SLURM_JOB_ID="77", JOB_TEST_LOG=str(self.log),
+                           MCSIM_CUDA_ARCHITECTURES="75", **settings)
+        return subprocess.run(["bash", str(self.script)], env=environment, capture_output=True,
+                              text=True, timeout=10)
+
+    def test_defaults_use_plan_learner_without_legacy_flags(self):
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertIn("--plan", arguments)
+        self.assertEqual(arguments[arguments.index("--envs") + 1], "256")
+        for removed in ("--schema", "--environment", "--seed", "--epochs", "--hidden-dim", "--minibatch-size"):
+            self.assertNotIn(removed, arguments)
+
+    def test_resume_does_not_override_checkpoint_settings(self):
+        checkpoint = self.root / "latest.pt"
+        checkpoint.touch()
+        result = self.launch(SIM_RESUME=str(checkpoint))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertIn(str(checkpoint), arguments)
+        for omitted in ("--plan", "--envs", "--rollout-steps", "--hidden-dim", "--epochs"):
+            self.assertNotIn(omitted, arguments)
+
+    def test_removed_configuration_fails_before_build(self):
+        result = self.launch(SIM_ENVIRONMENT="old-scene.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("were replaced", result.stdout)
+        self.assertFalse(self.log.exists())
 
 
 class RosieTests(unittest.TestCase):

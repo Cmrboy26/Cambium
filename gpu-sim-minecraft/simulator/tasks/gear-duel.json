@@ -1,0 +1,58 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 2,
+  "minecraft": "26.3",
+  "name": "mixed-gear-duel",
+  "arena": "../arenas/flat-duel.json",
+  "players": {
+    "shared": {
+      "velocity": [0, -0.0784000015258789, 0],
+      "pitch": 0,
+      "on_ground": true,
+      "health": 20,
+      "absorption": 0,
+      "attack_strength_ticks": 20,
+      "loadout": {
+        "weapons": ["minecraft:iron_sword", "minecraft:iron_axe"],
+        "selected": 0,
+        "offhand": "minecraft:air",
+        "armor": {"boots": "minecraft:air", "leggings": "minecraft:air",
+                  "chestplate": "minecraft:air", "helmet": "minecraft:air"}
+      }
+    },
+    "overrides": [
+      {"position": [-5.5, 1, -5.5], "yaw": 315},
+      {"position": [5.5, 1, 5.5], "yaw": 135}
+    ]
+  },
+  "spawns": {
+    "sample": "episode",
+    "region": {"min": [-4.5, 1, -4.5], "max": [4.5, 1, 4.5]},
+    "minimum_separation": 2,
+    "yaw": {"uniform": [-180, 180]},
+    "pitch": {"uniform": [-20, 20]}
+  },
+  "equipment": {
+    "sample": "world",
+    "players": "independent",
+    "loadout": {
+      "weapons": [
+        "minecraft:iron_sword",
+        {"choices": [{"value": "minecraft:iron_axe", "weight": 3},
+                     {"value": "minecraft:air", "weight": 1}]}
+      ],
+      "selected": 0,
+      "offhand": {"choices": [{"value": "minecraft:shield", "weight": 1},
+                              {"value": "minecraft:air", "weight": 1}]}
+    }
+  },
+  "task": {
+    "max_ticks": 300,
+    "rewards": {
+      "doing_damage": 10, "taking_damage": -2, "won_duel": 90, "death": -20,
+      "episode_timeout": -10, "no_damage_penalty": -10, "blocked_with_shield": 5,
+      "good_aim": 1, "proximity": 0.5, "pitch_control": 0.25,
+      "aim_hold": 1.5, "extreme_pitch_penalty": -1
+    }
+  }
+}

@@ -56,7 +56,8 @@ function trainingTime(rows, config) {
         .map((row) => row.collection_seconds + row.update_seconds);
     const recent = durations.slice(-20);
     const average = recent.length ? recent.reduce((sum, value) => sum + value, 0) / recent.length : null;
-    const remaining = Number.isFinite(target) && Number.isFinite(latest) ? Math.max(0, target - latest) : null;
+    const remaining = rows.at(-1)?.completed_curriculum === true ? 0
+        : Number.isFinite(target) && Number.isFinite(latest) ? Math.max(0, target - latest) : null;
     return {
         target, remaining, average,
         elapsed: start !== null && durations.length ? durations.reduce((sum, value) => sum + value, 0) : null,
@@ -158,7 +159,7 @@ function renderConfig(config) {
     element("arena").scenario = environment;
     element("arena").runId = element("run").value;
     document.dispatchEvent(new CustomEvent("arena-config", { detail: { scenario: environment, runId: element("run").value } }));
-    element("environment-name").textContent = environment.name ?? "Environment";
+    element("environment-name").textContent = config?.experiment ? `Deployment snapshot — ${environment.name ?? "Environment"}` : environment.name ?? "Environment";
     renderFields("environment", [
         ["Environment source", options.environment ?? "Checkpoint / default"],
         ["Max ticks / round", metadata.max_ticks ?? options.max_ticks ?? environment.max_ticks],
@@ -166,9 +167,11 @@ function renderConfig(config) {
         ["Policy", metadata.schema?.id ?? options.schema],
     ]);
     const fields = [
-        ["Device", options.device], ["Worlds", options.envs], ["Seed", options.seed],
-        ["Learning rate", options.lr], ["Rollout steps", options.rollout_steps],
-        ["Epochs / update", options.epochs], ["Minibatch size", options.minibatch_size],
+        ["Device", options.device], ["Worlds", options.envs], ["Seed", config?.experiment?.seed ?? options.seed],
+        ["Learner", metadata.learner ?? (config?.plan ? "Historical research plan" : "Legacy self-play")],
+        ["Learning rate", config?.experiment?.learner?.lr ?? options.lr], ["Rollout steps", options.rollout_steps],
+        ["Epochs / update", config?.experiment?.learner?.epochs ?? options.epochs],
+        ["Minibatch size", config?.experiment?.learner?.minibatch_size ?? options.minibatch_size],
         ["Max ticks / round", metadata.max_ticks ?? options.max_ticks],
         ["Hidden dimension", metadata.hidden_dim ?? options.hidden_dim],
         ["Policy", metadata.schema?.id ?? options.schema],
@@ -185,6 +188,127 @@ function renderConfig(config) {
         fields.push([`Reward: ${name}`, weight]);
     }
     renderFields("config", fields);
+    const experiment = resolvedExperiment(config);
+    element("experiment-details").hidden = !experiment;
+    element("experiment-json").textContent = experiment ? JSON.stringify(experiment, null, 2) : "";
+}
+
+function resolvedExperiment(config) {
+    const experiment = config?.experiment ?? config?.plan ?? config?.metadata?.plan;
+    return experiment && typeof experiment === "object" && !Array.isArray(experiment) ? experiment : null;
+}
+
+function fixedControls(controls) {
+    if (controls == null) return "Not recorded";
+    return Object.entries(controls?.fixed ?? controls ?? {}).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join(", ") || "None (all heads learned)";
+}
+
+function stageFor(row, experiment) {
+    const stages = experiment?.stages ?? [];
+    return Number.isInteger(row?.stage_index) ? stages[row.stage_index] : stages.find((stage) => stage.name === row?.stage);
+}
+
+function stageName(row, experiment) {
+    return row?.stage ?? stageFor(row, experiment)?.name ?? (Number.isInteger(row?.stage_index) ? `Stage ${row.stage_index + 1}` : "--");
+}
+
+function progressText(progress) {
+    return progress ? ["updates", "episodes", "transitions"].map((key) => `${format(progress[key])} ${key}`).join(" / ") : "Not recorded";
+}
+
+function budgetText(advance, progress = {}) {
+    if (!advance || typeof advance !== "object") return "Not recorded";
+    for (const combination of ["any", "all"]) {
+        if (Array.isArray(advance[combination])) return `${combination.toUpperCase()} (${advance[combination].map((item) => budgetText(item, progress)).join("; ")})`;
+    }
+    return Object.entries(advance).map(([key, value]) => {
+        if (["updates", "episodes", "transitions"].includes(key)) return `${key}: ${format(progress[key])} / ${format(value)}`;
+        if (key === "evaluation") return `${value.suite}: ${value.metric} ≥ ${format(value.at_least, 4)}`;
+        return `${key}: ${JSON.stringify(value)}`;
+    }).join("; ") || "Not recorded";
+}
+
+function stageConditions(stage) {
+    const arenas = stage?.scenario?.arenas ?? [];
+    const opponents = Array.isArray(stage?.opponents) ? stage.opponents : [];
+    const total = opponents.reduce((sum, opponent) => sum + opponent.weight, 0);
+    return [
+        ["Environment", stage?.environment_name ?? arenas[0]?.environment?.name],
+        ["Arena mixture", arenas.map((arena, index) => `${stage?.arena_names?.[index] ?? arena.environment?.name ?? `Arena ${index + 1}`} (weight ${format(arena.weight, 3)})`).join(", ") || stage?.arena_names?.join(", ")],
+        ["Opponent mix", opponents.map((opponent) => `${opponent.id} (${total > 0 ? `${format(opponent.weight / total * 100, 1)}%` : `weight ${opponent.weight}`})`).join(", ") || "Not recorded"],
+        ["Fixed controls", stage ? fixedControls(stage.controls) : "Not recorded"],
+        ["Episode limit", arenas[0]?.environment?.max_ticks],
+    ];
+}
+
+function renderTable(id, rows, columns, empty) {
+    const fragment = document.createDocumentFragment();
+    for (const values of rows.length ? rows : [[empty]]) {
+        const row = document.createElement("tr");
+        for (const value of values) {
+            const cell = document.createElement("td");
+            cell.textContent = value ?? "--";
+            if (!rows.length) cell.colSpan = columns;
+            row.append(cell);
+        }
+        fragment.append(row);
+    }
+    element(id).replaceChildren(fragment);
+}
+
+function renderCurriculum() {
+    const experiment = resolvedExperiment(configuration);
+    const latest = records.at(-1);
+    const hasResearchMetrics = records.some((row) => row.stage !== undefined || row.stage_index !== undefined
+        || row.completed_curriculum !== undefined || row.evaluations !== undefined);
+    element("curriculum").hidden = !experiment && !hasResearchMetrics;
+    const stage = stageFor(latest, experiment);
+    const initial = !latest ? experiment?.stages?.[0] : null;
+    const boundary = latest?.curriculum_boundary;
+    const nextIndex = Number.isInteger(latest?.next_stage_index) && latest.next_stage_index !== latest.stage_index ? latest.next_stage_index : null;
+    const upcoming = nextIndex !== null ? experiment?.stages?.[nextIndex]
+        : experiment?.stages?.find((item) => item.name === boundary?.next_stage);
+    const upcomingName = upcoming?.name ?? boundary?.next_stage ?? (nextIndex !== null ? `Stage ${nextIndex + 1}` : null);
+    const complete = latest?.completed_curriculum === true;
+    element("curriculum-title").textContent = experiment?.name ?? "Experiment stages";
+    element("curriculum-status").textContent = complete ? "Curriculum complete"
+        : upcomingName ? `Upcoming stage: ${upcomingName} (latest rollout is from ${stageName(latest, experiment)})`
+        : latest?.stage !== undefined || latest?.stage_index !== undefined ? `Active stage (latest rollout): ${stageName(latest, experiment)}`
+        : initial ? `Initial stage: ${initial.name} (waiting for updates)` : "Stage status not recorded";
+    renderFields("stage-summary", [
+        ["Latest rollout stage", latest ? stageName(latest, experiment) : "No rollout yet"],
+        ["Budget progress (latest rollout)", progressText(latest?.stage_progress)],
+        ["Advance budget (latest rollout stage)", budgetText((stage ?? initial)?.advance, latest?.stage_progress)],
+        ["Curriculum completion", complete ? "Complete (explicit metric)" : latest?.completed_curriculum === false ? "Not complete" : "Not recorded"],
+        ["Upcoming stage", complete ? "None — curriculum complete" : upcomingName ?? "No transition recorded"],
+        ["Boundary reset worlds", boundary?.reset_worlds],
+    ]);
+    element("stage-context-title").textContent = initial ? `Initial stage conditions — ${initial.name}` : `Latest rollout conditions — ${stageName(latest, experiment)}`;
+    renderFields("stage-context", stageConditions(stage ?? initial));
+    element("upcoming-stage").hidden = !upcomingName || complete;
+    renderFields("upcoming-context", stageConditions(upcoming));
+
+    const timeline = [];
+    for (const row of records) {
+        if (row.stage === undefined && row.stage_index === undefined && !row.curriculum_boundary && row.completed_curriculum === undefined) continue;
+        const key = `${row.stage_index ?? ""}:${stageName(row, experiment)}`;
+        const previous = timeline.at(-1);
+        if (previous && previous.key === key && !previous.end.curriculum_boundary && !previous.end.completed_curriculum) previous.end = row;
+        else timeline.push({key, start: row.update, end: row});
+    }
+    renderTable("stage-timeline", timeline.map(({start, end}) => [
+        start === end.update ? format(start) : `${format(start)}–${format(end.update)}`,
+        stageName(end, experiment), progressText(end.stage_progress),
+        end.completed_curriculum ? "Curriculum complete" : end.curriculum_boundary
+            ? `${format(end.curriculum_boundary.reset_worlds)} worlds reset → ${end.curriculum_boundary.next_stage ?? "not recorded"}` : "--",
+    ]), 4, "No stage metrics recorded.");
+    const evaluations = new Map(Object.keys(experiment?.evaluations ?? {}).map((suite) => [suite, null]));
+    for (const row of records) for (const [suite, result] of Object.entries(row.evaluations ?? {})) evaluations.set(suite, {row, result});
+    renderTable("evaluations", [...evaluations].map(([suite, entry]) => [
+        suite, format(entry?.row.update), entry ? stageName(entry.row, experiment) : "--",
+        entry ? `${format(entry.result.win_rate * 100, 2)}%` : "--", format(entry?.result.reward_mean, 4),
+        format(entry?.result.episodes),
+    ]), 6, "No evaluation results recorded.");
 }
 
 function renderFields(id, fields) {
@@ -203,6 +327,7 @@ function renderFields(id, fields) {
 
 function renderRecords() {
     const latest = records.at(-1) ?? {};
+    renderCurriculum();
     element("reward-types-empty").hidden = records.some((row) => row.reward_types && Object.keys(row.reward_types).length > 0);
     element("stat-update").textContent = format(latest.update);
     element("stat-total").textContent = `${format(records.length)} updates recorded`;
@@ -215,7 +340,8 @@ function renderRecords() {
     const timing = trainingTime(records, configuration);
     element("stat-target").textContent = timing.target === null ? "Target unavailable" : `Target: ${format(timing.target)} updates`;
     element("stat-remaining").textContent = duration(timing.eta);
-    element("stat-remaining-detail").textContent = timing.remaining === null ? "Session target unavailable" : `${format(timing.remaining)} updates remaining`;
+    element("stat-remaining-detail").textContent = latest.completed_curriculum === true ? "Curriculum complete"
+        : timing.remaining === null ? "Session target unavailable" : `${format(timing.remaining)} updates remaining`;
     element("stat-elapsed").textContent = duration(timing.elapsed);
     element("stat-average").textContent = timing.average === null ? "--" : `${format(timing.average, 2)}s`;
     element("row-count").textContent = `${format(records.length)} recorded`;

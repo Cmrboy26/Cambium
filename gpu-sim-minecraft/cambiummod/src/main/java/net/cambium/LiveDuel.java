@@ -46,6 +46,7 @@ final class LiveDuel implements AutoCloseable {
 	private final SimulationReplay.Session session;
 	private final LivePolicy policy;
 	private final int maxTicks;
+	private final String deploymentSummary;
 	private CompletableFuture<JsonObject> pending;
 	private String epoch;
 	private int tick;
@@ -67,6 +68,7 @@ final class LiveDuel implements AutoCloseable {
 		this.session = session;
 		this.policy = policy;
 		this.maxTicks = info.get("max_ticks").getAsInt();
+		this.deploymentSummary = DeploymentSummary.describe(info);
 	}
 
 	static void cancelConnection() {
@@ -203,6 +205,7 @@ final class LiveDuel implements AutoCloseable {
 					SimulationReplay.active = candidate;
 					tell(current, "Live duel started: " + (arena ? "checkpoint arena" : "existing world; no arena edits")
 							+ ". Policy: " + info.get("checkpoint").getAsString());
+					tell(current, candidate.live.deploymentSummary);
 					if (!arena) tell(current, "World mode is experimental: terrain, fluids and hazards may be outside this policy's training distribution.");
 					tell(current, "Use /simduel join [1|2] to fight, or hit either bot while they duel. Spectator mode gives an undisturbed match.");
 					if (!level.isPvpAllowed()) {
@@ -253,6 +256,7 @@ final class LiveDuel implements AutoCloseable {
 			case "stop" -> { active.close(); SimulationReplay.active = null; tell(viewer, "Live duel stopped."); }
 			case "status" -> {
 				tell(viewer, active.live.status());
+				tell(viewer, active.live.deploymentSummary);
 				tell(viewer, "Mod " + CambiumFabric.BUILD_ID + "; catalogue=" + PolicyCatalogue.HASH);
 			}
 			default -> throw new IllegalArgumentException("Unknown live command");

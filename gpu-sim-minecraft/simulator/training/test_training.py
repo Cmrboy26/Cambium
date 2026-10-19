@@ -22,7 +22,7 @@ from simulator.training.environment import (
 )
 from simulator.training.contract import FEATURES, from_legacy, validate_contract, resolve_scenario
 from simulator.training.serve import Policy, make_server
-from simulator.training.train import ReplaySamples, collect_rollout, compute_gae, main
+from simulator.training.compatibility_training import ReplaySamples, collect_rollout, compute_gae, main
 
 
 def neutral(count, heads=6):

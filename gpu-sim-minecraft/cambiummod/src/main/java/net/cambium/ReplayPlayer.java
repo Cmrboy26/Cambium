@@ -134,6 +134,12 @@ final class ReplayPlayer extends ServerPlayer {
 		crouching = actor.pose() == 1;
 		observedOpponentDisable = 0;
 		stopUsingItem();
+		if (loadout != null) {
+			String previous = BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString();
+			int requested = actor.weapon_slot() >= 0 ? actor.weapon_slot() : actor.controls().select_slot();
+			getInventory().setSelectedSlot(SimulationContract.selectedSlot(loadout, actor.weapon(), requested, getInventory().getSelectedSlot()));
+			if (!previous.equals(actor.weapon())) refreshMainHand();
+		}
 		equip(EquipmentSlot.MAINHAND, actor.weapon());
 		equip(EquipmentSlot.OFFHAND, actor.shield_equipped() ? "minecraft:shield" : "minecraft:air");
 		for (String slot : SimulationContract.ARMOR_SLOTS) {
@@ -172,10 +178,16 @@ final class ReplayPlayer extends ServerPlayer {
 	void prepare(ReplayTrace.Controls input) {
 		controls = input;
 		if (input.select_weapon()) {
-			if (loadout != null && !loadout.getAsJsonArray("weapons").contains(ReplayAnalysis.JSON.toJsonTree(input.weapon()))) {
-				throw new IllegalArgumentException("Replay selected an item outside the scenario loadout");
+			if (loadout != null) {
+				String previous = BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString();
+				getInventory().setSelectedSlot(SimulationContract.selectedSlot(loadout, input.weapon(), input.select_slot(), getInventory().getSelectedSlot()));
+				if (!previous.equals(input.weapon())) {
+					refreshMainHand();
+					resetAttackStrengthTicker();
+				}
+			} else {
+				if (equip(EquipmentSlot.MAINHAND, input.weapon())) resetAttackStrengthTicker();
 			}
-			if (equip(EquipmentSlot.MAINHAND, input.weapon())) resetAttackStrengthTicker();
 		}
 		attackSuppressed = isUsingItem();
 		if (itemUseDelay > 0) itemUseDelay--;
@@ -334,7 +346,18 @@ final class ReplayPlayer extends ServerPlayer {
 		replayFood.live = false;
 	}
 
-	void setLoadout(JsonObject loadout) { this.loadout = loadout.deepCopy(); }
+	void setLoadout(JsonObject loadout) {
+		this.loadout = loadout.deepCopy();
+		JsonArray weapons = loadout.getAsJsonArray("weapons");
+		for (int slot = 0; slot < PolicyCatalogue.MAX_WEAPON_SLOTS; slot++) {
+			ItemStack stack = slot >= weapons.size() || weapons.get(slot).getAsString().equals("minecraft:air") ? ItemStack.EMPTY
+					: new ItemStack(BuiltInRegistries.ITEM.getValue(Identifier.parse(weapons.get(slot).getAsString())));
+			if (!stack.isEmpty()) stack.set(DataComponents.UNBREAKABLE, Unit.INSTANCE);
+			getInventory().setItem(slot, stack);
+		}
+		getInventory().setSelectedSlot(loadout.get("selected").getAsInt());
+		refreshMainHand();
+	}
 
 	void setLiveTarget(ServerPlayer target) { liveTarget = target; }
 
@@ -367,13 +390,9 @@ final class ReplayPlayer extends ServerPlayer {
 		return true;
 	}
 
-	int weaponSlot() {
-		if (loadout == null) return 0;
-		String selected = BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString();
-		for (int index = 0; index < loadout.getAsJsonArray("weapons").size(); index++) {
-			if (loadout.getAsJsonArray("weapons").get(index).getAsString().equals(selected)) return index;
-		}
-		throw new IllegalStateException("Selected weapon outside scenario loadout");
+	private void refreshMainHand() {
+		((LivingEntityRecordingAccessor) (Object) this).cambium$refreshEquipment();
+		((PlayerEquipmentAccess) (Object) this).cambium$setLastMainHand(getMainHandItem().copy());
 	}
 
 	boolean weaponIsAxe() { return BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString().endsWith("_axe"); }
@@ -426,6 +445,7 @@ final class ReplayPlayer extends ServerPlayer {
 		state.addProperty("health", getHealth());
 		state.addProperty("absorption", getAbsorptionAmount());
 		state.addProperty("weapon", BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString());
+		state.addProperty("weapon_slot", getInventory().getSelectedSlot());
 		state.addProperty("shield_equipped", getOffhandItem().is(Items.SHIELD));
 		state.addProperty("using_shield", isUsingItem());
 		state.addProperty("shield_use_ticks", getTicksUsingItem());

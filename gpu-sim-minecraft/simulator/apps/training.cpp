@@ -38,6 +38,7 @@ struct TrainingBatch {
     std::vector<PlayerState> players;
     std::vector<Controls> queued;
     std::vector<Controls> held;
+    std::vector<int> selected_slots;
     std::vector<WorldState> worlds;
     std::vector<BlockWorldView> blocks;
     std::vector<std::uint8_t> finished;
@@ -71,7 +72,7 @@ struct TrainingBatch {
         : terrain(loadTerrain(path, version)),
           episode_players(count, terrain.parsePlayers(terrain.definition.at("players"))),
           players(std::size_t(count) * 2),
-          queued(players.size()), held(players.size()), worlds(count), blocks(count, terrain.blocks),
+          queued(players.size()), held(players.size()), selected_slots(players.size()), worlds(count), blocks(count, terrain.blocks),
           finished(count), dealt_damage(players.size()), episodes(count), observed_opponent_disable(players.size()),
           seed(initial_seed), max_ticks(limit), schema_version(version), features(version == 2 ? 31 : 22),
           heads(version == 2 ? 8 : 6) {
@@ -128,6 +129,7 @@ struct TrainingBatch {
                 players[index].random.setSeed(seed + index * 1000003ULL + episode * 1000033ULL);
                 queued[index] = {};
                 held[index] = {};
+                selected_slots[index] = episode_players[environment].resolved[player]["loadout"]["selected"].get<int>();
                 dealt_damage[index] = 0;
                 observed_opponent_disable[index] = 0;
                 initial.push_back(players[index]);
@@ -224,11 +226,8 @@ struct TrainingBatch {
                         ? static_cast<float>(minimum(source.shield_use_ticks / 5.0F, 1.0F)) : 0.0F;
                 }
                 if (layout) {
-                    for (int actor = 0; actor < 2; ++actor) {
-                        const auto& slots = episode_players[environment].weapon_slots[actor == 0 ? player : 1 - player];
-                        const auto weapon = actor == 0 ? source.weapon : target.weapon;
-                        catalogue[31 + actor] = static_cast<float>(std::distance(slots.begin(), std::find(slots.begin(), slots.end(), weapon)));
-                    }
+                    catalogue[31] = static_cast<float>(selected_slots[index]);
+                    catalogue[32] = static_cast<float>(selected_slots[index ^ 1]);
                     app::equipmentObservation(catalogue, source, target,
                         episode_players[environment].weapon_slots[player]);
                     for (int feature = 0; feature < features; ++feature) {
@@ -286,6 +285,11 @@ struct TrainingBatch {
             const auto* action = actions + index * heads;
             if (layout) {
                 queued[index] = layout->decode(action, episode_players[index / 2].weapon_slots[index % 2]);
+                for (std::size_t head = 0; head < layout->actions.size(); ++head) {
+                    if (layout->actions[head].kind == 6) {
+                        selected_slots[index] = static_cast<int>(layout->actions[head].values[action[head]]);
+                    }
+                }
                 continue;
             }
             Controls controls;
@@ -303,6 +307,7 @@ struct TrainingBatch {
                 const auto& slots = episode_players[index / 2].weapon_slots[index % 2];
                 if (action[6] >= static_cast<int>(slots.size())) throw std::invalid_argument("Weapon action outside loadout");
                 controls.weapon = slots[action[6]];
+                selected_slots[index] = action[6];
                 controls.use_item = action[7] != 0;
             }
             queued[index] = controls;
@@ -472,6 +477,14 @@ MCSIM_EXPORT void* mcsim_create_schema(int environments, int use_cuda, const cha
     return result;
 }
 MCSIM_EXPORT void mcsim_destroy(void* handle) { delete static_cast<TrainingBatch*>(handle); }
+MCSIM_EXPORT int mcsim_set_max_ticks(void* handle, int max_ticks) {
+    return protect([&] {
+        if (!handle || max_ticks < 1 || max_ticks > 1000000) {
+            throw std::invalid_argument("Episode timeout must be in 1..1000000 with a valid handle");
+        }
+        static_cast<TrainingBatch*>(handle)->max_ticks = max_ticks;
+    });
+}
 MCSIM_EXPORT int mcsim_set_reward_weights(void* handle, const float* weights) {
     return protect([&] {
         if (!handle || !weights) throw std::invalid_argument("Null base reward argument");
@@ -541,7 +554,8 @@ MCSIM_EXPORT const char* mcsim_replay_frame(void* handle, int environment) {
             throw std::invalid_argument("Replay environment index outside batch");
         }
         frame = minecraft_sim::app::replayFrame(batch.worlds[environment].tick,
-            batch.players.data() + environment * 2, batch.held.data() + environment * 2, true).dump();
+            batch.players.data() + environment * 2, batch.held.data() + environment * 2, true,
+            batch.selected_slots.data() + environment * 2).dump();
     });
     return result == 0 ? frame.c_str() : nullptr;
 }

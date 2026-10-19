@@ -109,6 +109,7 @@ final class SimulationContract {
 		boolean forward = false, backward = false, left = false, right = false, jump = false, sprint = false;
 		boolean sneak = false, attack = false, select = false, use = false;
 		float yaw = 0, pitch = 0;
+		int slot = -1;
 		String weapon = "minecraft:diamond_sword";
 		for (int index = 0; index < heads.size(); index++) {
 			Head head = heads.get(index);
@@ -130,11 +131,24 @@ final class SimulationContract {
 				case "shield" -> use = value.getAsBoolean();
 				case "yaw" -> yaw = value.getAsFloat();
 				case "pitch" -> pitch = value.getAsFloat();
-				case "weapon" -> { select = true; weapon = loadout.getAsJsonArray("weapons").get(integer(value)).getAsString(); }
+				case "weapon" -> { select = true; slot = integer(value); weapon = loadout.getAsJsonArray("weapons").get(slot).getAsString(); }
 				default -> throw new IllegalArgumentException("Unsupported control primitive");
 			}
 		}
-		return new ReplayTrace.Controls(forward, backward, left, right, jump, sprint, sneak, attack, yaw, pitch, select, weapon, use);
+		return new ReplayTrace.Controls(forward, backward, left, right, jump, sprint, sneak, attack, yaw, pitch, select, weapon, use, slot);
+	}
+
+	static int selectedSlot(JsonObject loadout, String weapon, int requested, int current) {
+		JsonArray weapons = loadout.getAsJsonArray("weapons");
+		if (requested >= 0) {
+			if (requested >= weapons.size() || !weapons.get(requested).getAsString().equals(weapon)) {
+				throw new IllegalArgumentException("Selected slot disagrees with scenario weapon");
+			}
+			return requested;
+		}
+		if (current >= 0 && current < weapons.size() && weapons.get(current).getAsString().equals(weapon)) return current;
+		for (int slot = 0; slot < weapons.size(); slot++) if (weapons.get(slot).getAsString().equals(weapon)) return slot;
+		throw new IllegalArgumentException("Selected weapon outside scenario loadout");
 	}
 
 	static void capabilities(JsonObject descriptor) {
@@ -154,7 +168,8 @@ final class SimulationContract {
 		JsonArray weapons = result.getAsJsonArray("weapons");
 		if (weapons.size() < 1 || weapons.size() > 9) throw new IllegalArgumentException("Loadout needs 1..9 weapon slots");
 		Set<String> seen = new HashSet<>();
-		for (JsonElement item : weapons) if (!WEAPONS.contains(item.getAsString()) || !seen.add(item.getAsString())) {
+		for (JsonElement item : weapons) if (!WEAPONS.contains(item.getAsString())
+				|| !item.getAsString().equals("minecraft:air") && !seen.add(item.getAsString())) {
 			throw new IllegalArgumentException("Unsupported or duplicate weapon item: " + item);
 		}
 		int selected = result.has("selected") ? integer(result.get("selected")) : 0;

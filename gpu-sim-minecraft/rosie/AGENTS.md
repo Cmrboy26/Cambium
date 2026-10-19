@@ -8,13 +8,20 @@ the simulator guides.
 
 This workflow trains the standalone Minecraft Java 26.3 simulator. It does not
 start the legacy 1.8.9 server, HeadlessMC clients, or FastAPI backend. Submit
-jobs from `gpu-sim-minecraft` so `SLURM_SUBMIT_DIR`, relative environment paths,
+jobs from `gpu-sim-minecraft` so `SLURM_SUBMIT_DIR`, relative plan paths,
 and `rosie/logs` resolve as expected.
 
 `setup.sh` creates `.venv-rosie` and installs CUDA-enabled PyTorch 2.5.1/cu124
 plus the training requirements. It runs on the management node and does not
 compile CUDA. The first training job configures CMake and builds on its allocated
 compute node, which needs network access for the pinned FetchContent dependencies.
+
+Setup reuses an existing virtual environment after checking its interpreter and
+pip; it does not rewrite activation scripts. This permits reruns when activation
+files are read-only. An incomplete or broken environment fails with an explicit
+diagnostic and is never deleted automatically. Move that specific environment
+aside before rerunning setup if it needs recreation; do not copy virtual
+environments between machines.
 
 The training job checks `.venv-rosie/bin/python`. On `dh-dgxh100-*`, the venv's
 management-node interpreter symlink may be unavailable. In that case, the job
@@ -45,29 +52,40 @@ architecture/build directory.
 
 Supported training environment variables:
 
-- `SIM_ENVS`: parallel worlds; default 256.
+- `SIM_ENVS`: parallel worlds; default 256 for new runs, restored on resume.
 - `SIM_UPDATES`: optimizer updates; default 1.
-- `SIM_ROLLOUT_STEPS`: steps per rollout; default 16.
-- `SIM_EPOCHS`, `SIM_MINIBATCH_SIZE`: PPO optimizer settings; defaults 4/1024.
-- `SIM_HIDDEN_DIM`: width of the policy's hidden layers; default 256. Try 512 as a moderate increase; larger networks cost more optimizer time and are not guaranteed to train better.
-- `SIM_THREADS`, `SIM_SEED`, `SIM_SCHEMA`: CPU threads, random seed, and `v1`/`v2` schema.
-- `SIM_ENVIRONMENT`: JSON scenario path relative to `gpu-sim-minecraft` or an absolute path.
-- `SIM_PLAN`: research plan path, exclusive with `SIM_ENVIRONMENT`, e.g.
-  `simulator/training/presets/gear-curriculum.json`. The plan's seed/layout own
-  research initialization; `SIM_SCHEMA`/`SIM_SEED` remain legacy options.
+- `SIM_ROLLOUT_STEPS`: steps per rollout; default 16 for new runs, restored on resume.
+- `SIM_EPOCHS`, `SIM_MINIBATCH_SIZE`, `SIM_HIDDEN_DIM`, `SIM_LR`: optional
+  overrides of the plan's learner settings; unset by default.
+- `SIM_THREADS`: CPU threads; default 4. The plan owns the seed.
+- `SIM_PLAN`: version-2 training plan path relative to `gpu-sim-minecraft` or
+  absolute; defaults to `simulator/training/presets/shield-axe-curriculum.json`
+  for new runs. References inside authoring files resolve relative to their
+  containing file, not the submission directory.
   `SIM_UPDATES` caps this invocation; a completed curriculum stops early.
+- `SIM_RESUME`: resolved-experiment checkpoint; restores embedded configuration.
+- `SIM_INITIALIZE`: compatible checkpoint weights for a new plan, not a resume.
+- `SIM_ENVIRONMENT`, `SIM_SCHEMA`, `SIM_SEED` are removed; nonempty values fail
+  explicitly. Configure the environment, policy and seed through the plan.
 - `SIM_OUTPUT`: run directory; default `simulator/training/runs/rosie-<JOB_ID>`.
 - `SIM_REPLAY_EVERY`: replay interval in completed duels; default 0 (disabled).
 - `SIM_REPLAY_DIR`: optional replay destination; default `<run>/replays` when replay is enabled.
 
-For the close-duel scenario, ensure the JSON exists in the Rosie checkout, then
-submit for up to 24 hours (within the partition's 21-day maximum):
+For the four-stage shield/axe curriculum, submit from `gpu-sim-minecraft`:
 
 ```sh
 sbatch --partition=dgxh100 --gres=gpu:h100:1 --time=1-00:00:00 \
-  --export=ALL,MCSIM_CUDA_ARCHITECTURES=90,SIM_ENVS=8192,SIM_UPDATES=500,SIM_ROLLOUT_STEPS=128,SIM_EPOCHS=2,SIM_MINIBATCH_SIZE=16384,SIM_ENVIRONMENT=simulator/environments/research-duel-close-rebalancedv2.json,SIM_REPLAY_EVERY=50000 \
+  --export=ALL,MCSIM_CUDA_ARCHITECTURES=90,SIM_PLAN=simulator/training/presets/shield-axe-curriculum.json,SIM_ENVIRONMENT=,SIM_SCHEMA=,SIM_SEED=,SIM_ENVS=8192,SIM_UPDATES=1500,SIM_ROLLOUT_STEPS=128,SIM_REPLAY_EVERY=50000 \
   rosie/train.sbatch
 ```
+
+This clears previously exported legacy settings. Learner settings come from the
+plan. Runtime is unmeasured; the requested day is a wall-time limit, not a
+promise of completion. Use a one-update/256-world smoke job before scaling up.
+The job rebuilds native CUDA code; CUDA execution remains a target-device gate.
+
+For another task, create an environment and reference it from a version-2 plan;
+do not pass historical concrete scenario files directly to the trainer.
 
 Windows DLL paths and `%APPDATA%`/`$env:APPDATA` do not exist on Rosie. With
 `SIM_REPLAY_EVERY=50000`, files go to

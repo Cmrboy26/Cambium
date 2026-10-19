@@ -2,19 +2,58 @@
 
 ## Design
 
-Keep three things separate:
+Authoring separates four responsibilities:
 
-1. **Scenario:** terrain, initial state, Minecraft item IDs and supported rules.
-   This describes physics, not a network architecture.
-2. **Policy layout:** ordered named observations and categorical control choices.
-   Head sizes/order and look bins are data, not preset-specific code.
-3. **Replay:** resolved scenario, semantic controls and resulting states.
-   Playback needs neither the policy nor its head indices or original files.
+1. **Arena** (`minecraft_sim_arena`, version 1): bounds, ordered block fills and
+   physical rules. No gear, observations, rewards or learner settings.
+2. **Environment** (`minecraft_sim_environment`, version 2): arena selection,
+   player initialization, gear/spawn distributions and task limits/rewards.
+3. **Policy** (`minecraft_sim_policy`, version 1): ordered observations and
+   semantic action choices, independent of which items an episode samples.
+4. **Training plan** (`minecraft_sim_training_plan`, version 2): learner,
+   controllers, named opponent mixtures, curriculum stages and evaluation.
 
-Research [training plans](../simulator/training/AGENTS.md#research-training-plans)
-wrap these concrete scenarios with controller mixtures, curriculum stages and
-sampling distributions. They are a separate versioned format, not extra physics
-fields in this envelope. Episode artifacts always carry resolved conditions.
+References resolve relative to the file containing them. The compiler resolves
+these into a self-contained `minecraft_sim_experiment`, version 1, before native
+allocation. Stages independently resolve their declared environment and typed
+patches; they do not inherit the previous stage. Arrays replace, unknown keys
+fail, and explicit null disables optional sampling.
+
+Environment rewards are complete task definitions: unspecified terms are zero.
+A stage reward patch replaces the reward map rather than inheriting hidden
+global defaults. One policy layout remains fixed throughout the experiment.
+Weapon choices describe nine stable hotbar slots; absent gear is air, not a
+different network architecture.
+
+Training/checkpoints/dashboard use the resolved experiment. Native physics,
+replays and live Minecraft consume **concrete episodes**, using the internal
+version-1 scenario envelope described below. They never chase authoring
+references or execute curriculum schedules. Replays additionally carry semantic
+controls and resulting state, so playback needs neither weights nor source files.
+See the [training-plan reference](../simulator/training/AGENTS.md#research-training-plans).
+
+In the [shield/axe environment](../simulator/tasks/shield-axe-duel.json),
+`players.shared` holds constant initialization and `players.overrides` contains
+only each actor's spawn differences. `equipment` describes sampled fields:
+
+```json
+{
+  "sample": "world",
+  "players": "independent",
+  "loadout": {
+    "offhand": {"choices": [
+      {"value": "minecraft:shield", "weight": 3},
+      {"value": "minecraft:air", "weight": 1}
+    ]}
+  }
+}
+```
+
+This gives each player a shield with probability 75%, sampled once per world.
+Use `sample: episode` to reroll on reset; literal values do not consume RNG.
+The policy still has a shield control when no shield is present, and observations
+describe actual ownership. Stages patch only changed conditions, for example
+`"task_override": {"rewards": {"good_aim": 5}}` for an aiming-only reward task.
 
 The native simulator, Python trainer/service and mod implement the same bounded
 primitive catalogue. Changing supported loadouts, observation order or action
@@ -46,10 +85,11 @@ proof of game parity. See the [extension recipes](../simulator/training/AGENTS.m
 
 ## Quick Start
 
-Copy/edit [research-duel.json](../simulator/environments/research-duel.json) for a
-new experiment. This complete example has a 5x5 interior, asymmetric armor,
-iron swords, netherite axes, an empty-hand slot, shields, 33 observations and nine
-heads.
+Start with [shield-axe-curriculum.json](../simulator/training/presets/shield-axe-curriculum.json).
+It references reusable [arenas](../simulator/arenas/),
+[environments](../simulator/tasks/) and [policies](../simulator/policies/).
+Edit the environment to change item presence; edit the plan to change training,
+not arena geometry or policy dimensions.
 
 For a new machine, follow the [setup walkthrough](../scripts/README.md#first-time-setup)
 first. Before exporting to Minecraft, [select its game folder](../scripts/README.md#minecraft-folder)
@@ -58,12 +98,12 @@ standard launcher detection. No fixed launcher instance name is required.
 After building the native library, start training:
 
 ```powershell
-.\scripts\train.ps1 -Environment simulator/environments/research-duel.json `
-  -ReplayEvery 100 -ReplayToMinecraft
+.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json `
+  -Updates 1500 -ReplayEvery 100 -ReplayToMinecraft
 ```
 
-The embedded `policy` overrides the legacy `-Schema` preset. CUDA machines can add
-`-Device cuda -Environments 8192`. Replay samples are separate complete evaluation
+CUDA machines can add `-Device cuda -Environments 8192`.
+Replay samples are separate complete evaluation
 duels every N completed training rounds, with the same resolved conditions.
 
 Build/install the updated mod once, closing Minecraft before installation:
@@ -81,10 +121,17 @@ retaining checkpoint equipment/layout. Use a disposable world.
 Supported configuration changes need no further mod rebuild. Start a new run for
 a changed training task/layout; restart the service when switching checkpoints.
 Active sessions do not hot-swap contracts, equipment or weights.
+The live service exposes experiment/stage provenance in `/info`; the mod shows
+that deployment context. Both live actors use the same served learner and fixed
+checkpoint conditions. Scripted/checkpoint opponent pools, curriculum advancement
+and reset-time distribution sampling are trainer functionality, not live-duel
+features. The dashboard reads resolved experiments and metrics; it does not edit
+plans or launch training.
 
 ## Scenario
 
-The envelope stays `minecraft_sim_environment`, version 1, Minecraft `26.3`.
+The **internal concrete episode** envelope stays `minecraft_sim_environment`,
+version 1, Minecraft `26.3`; it is not the version-2 environment authoring schema.
 Use `profile: configured`; old profiles remain legacy defaults. Bounds, ordered
 inclusive air/stone fills and two ordered players use the
 [existing limits](../simulator/AGENTS.md#json-environments).
@@ -103,7 +150,8 @@ Each player's optional `loadout` resolves to an explicit shape:
 }
 ```
 
-- `weapons`: 1..9 distinct IDs; `selected`: zero-based initial slot. Air is empty
+- `weapons`: 1..9 IDs; non-air IDs must be distinct, air may repeat.
+  `selected`: zero-based initial slot. Air is empty
   hand. Sword/axe materials: wooden, stone, copper, golden, iron, diamond,
   netherite. Slots are a control mapping, not a general inventory.
 - `offhand`: air or shield. Equipment is unenchanted and unbreakable.
@@ -124,10 +172,11 @@ entities, terrain and world side effects can still affect real-game behavior.
 
 ## Policy Layout
 
-Embedded `policy` fields: `format: minecraft_sim_policy`, `version: 1`,
+Policy descriptor fields: `format: minecraft_sim_policy`, `version: 1`,
 `minecraft: 26.3`, `ticks_per_action: 1`, `observations`, `actions`, optional
 `requires`. No preset ID is needed. Dimensions are derived; supplied dimension
-metadata must agree with the descriptors.
+metadata must agree with the descriptors. Authoring policies live separately;
+historical concrete fixtures may still embed a descriptor.
 
 Observations are ordered objects like `{"feature":"self.attack_charge"}` or
 `{"feature":"relative.x","scale":2}`. Scale defaults to 1, multiplying the

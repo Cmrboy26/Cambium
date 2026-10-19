@@ -93,6 +93,16 @@ legend { float: left; padding: 0; margin-right: 10px; color: var(--muted); }
 .configuration > h2 { overflow-wrap: anywhere; }
 .configuration details { margin-top: 16px; }
 .configuration summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.curriculum { margin-bottom: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+.curriculum h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.curriculum h3 { margin: 20px 0 10px; font-size: 13px; font-weight: 500; }
+.curriculum details { margin-top: 16px; }
+.curriculum summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+#curriculum-status { font-size: 14px; color: var(--green); overflow-wrap: anywhere; }
+.section-note { font-size: 12px; color: var(--muted); }
+#experiment-json { max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+#replay-training { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 0; }
+#stage-timeline td, #evaluations td { white-space: normal; overflow-wrap: anywhere; }
 .duel-preview { display: grid; grid-template-columns: minmax(160px, 205px) minmax(0, 1fr) minmax(160px, 205px); margin-top: 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .player-equipment { min-width: 0; padding: 16px 14px; --player-color: #18764f; }
 .player-one { border-right: 1px solid var(--line); }

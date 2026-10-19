@@ -272,10 +272,15 @@ class BasicMeleeController(StationaryTargetController):
             use = (near & ~attack & ~release_ahead
                    & (self._feature(observations, "self.attack_charge") < 1)
                    & (self._feature(observations, "self.shield_disabled") < 0.5))
+            if "self.has_shield" in self._features:
+                use &= self._feature(observations, "self.has_shield") >= 0.5
             self._set(actions, "shield", use)
         if self.axe_slot is not None:
             blocked = ((self._feature(observations, "opponent.shield_using") >= 0.5)
                        & (self._feature(observations, "opponent.shield_disabled_observed") < 0.5))
+            slot_present = f"self.weapon_slot_{self.axe_slot}.present"
+            if slot_present in self._features:
+                blocked &= self._feature(observations, slot_present) >= 0.5
             self._set(actions, "weapon", np.where(blocked, self.axe_slot, self.sword_slot))
         self._ticks[indices] = (ticks + 1) % math.lcm(self.attack_interval, 2 * self.strafe_interval)
         return actions

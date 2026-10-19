@@ -26,8 +26,7 @@ CUDA-enabled PyTorch. See the [GPU setup](AGENTS.md#run-gpu).
 | --- | --- |
 | Train on CPU | `.\scripts\train.ps1` |
 | Train on CUDA | `.\scripts\train.ps1 -Device cuda -Environments 8192` |
-| Train sword/axe/shield controls | `.\scripts\train.ps1 -Schema v2` |
-| Train a randomized aiming/combat curriculum | `.\scripts\train.ps1 -Plan simulator/training/presets/gear-curriculum.json -Updates 1800` |
+| Train sword/axe/shield curriculum | `.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json -Updates 1500` |
 | Resume newest checkpoint | `.\scripts\train.ps1 -Resume latest` |
 | Open training charts | `.\scripts\serve-dashboard.ps1` |
 | Choose and serve a saved policy | `.\scripts\serve-policy.ps1` |

@@ -207,7 +207,8 @@ struct Scene {
                 {"yaw", state.yaw}, {"pitch", state.pitch}, {"on_ground", state.on_ground},
                 {"health", state.health}, {"absorption", state.absorption},
                 {"attack_strength_ticks", state.attack_strength_ticks},
-                {"loadout", describeLoadout(state, parsed.weapon_slots[index])}});
+                {"loadout", describeLoadout(state, parsed.weapon_slots[index],
+                    spawn.value("loadout", nlohmann::json::object()).value("selected", 0))}});
         }
         if (concrete && parsed.players[0].bounds().intersects(parsed.players[1].bounds())) {
             throw std::invalid_argument("Initial players intersect each other");

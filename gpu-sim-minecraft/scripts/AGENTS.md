@@ -39,7 +39,7 @@ toolchain separately and use `run-gpu.ps1` for device validation.
 A first training check:
 
 ```powershell
-.\scripts\train.ps1 -Environment simulator/environments/duel-full-gear.json `
+.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json `
   -Updates 1 -Environments 2 -RolloutSteps 16
 ```
 
@@ -76,15 +76,13 @@ select any destination without detecting Minecraft.
 | Parameter | Accepted value / purpose | Default |
 | --- | --- | --- |
 | `-Device` | `cpu`, `cuda` | `cpu` |
-| `-Schema` | `v1`, `v2`; embedded environment policy wins | `v1`; saved v2 restored on resume when available |
 | `-Environments` | Integer 0..65536; parallel worlds | `0`: auto, 16 CPU / 8192 CUDA |
 | `-Updates` | Positive integer; additional PPO updates | `100` |
-| `-RolloutSteps` | Positive integer; ticks per rollout | `128` |
+| `-RolloutSteps` | Positive integer; ticks per rollout | `128`; checkpoint value on resume |
 | `-Threads` | Integer 1..256; CPU threads | `4` |
 | `-ReplayEvery` | Nonnegative integer; completed duels between samples | `0`: disabled |
 | `-SaveEvery` | Positive integer; updates between checkpoint saves | `10` |
-| `-Environment` | Arena/experiment JSON path | Default duel; checkpoint definition on resume |
-| `-Plan` | Research training-plan JSON; exclusive with `-Environment` | Unset: shared self-play |
+| `-Plan` | Version-2 training-plan JSON | Shield/axe curriculum; embedded resolved experiment on resume |
 | `-Initialize` | Compatible learner weights for a new `-Plan`; exclusive with `-Resume` | Unset |
 | `-Library` | Native training DLL/SO | Discover from native builds |
 | `-Output` | Run directory | Timestamped run; checkpoint folder on resume |
@@ -98,15 +96,15 @@ select any destination without detecting Minecraft.
 | `-DryRun` | Preview only | Off |
 
 CUDA requires CUDA PyTorch and a CUDA-built training library; never fall back to
-CPU silently. Build the library first. Embedded environment `policy` descriptors
-override presets and derive custom dimensions. See the
+CPU silently. Build the library first. Separate policy descriptors derive custom
+dimensions independently from environment gear. See the
 [experiment contract](../docs/simulation_contract.md).
 
-Resume appends to the selected run unless `-Output` redirects it. Adjacent
-`config.json`, when present, restores legacy preset, hidden size and round length;
-other options use wrapper defaults unless supplied. Without `-Environment`, the
-embedded task is reconstructed even if source JSON was deleted/edited. Explicit
-incompatible task/layout overrides fail. `latest` is newest-modified, not best.
+Resume appends to the selected run unless `-Output` redirects it. The checkpoint
+restores the resolved experiment, learner settings, world count, rollout length
+and explicit smoke episode-limit override without consulting adjacent config
+or original authoring files. Explicit incompatible overrides fail. `latest` is
+newest-modified, not best. Removed `-Schema`/`-Environment` flags are not aliases.
 
 Replays require `-ReplayEvery > 0`. Choose either `-ReplayDirectory` or a Minecraft
 destination, not both. The interval counts completed duels, including timeouts,
@@ -114,9 +112,8 @@ not PPO updates. Each export is a separate complete evaluation duel, not the
 current rollout or an optimizer update.
 
 ```powershell
-.\scripts\train.ps1 -Schema v2
 .\scripts\train.ps1 -Plan simulator/training/presets/gear-curriculum.json
-.\scripts\train.ps1 -Environment simulator/environments/research-duel.json -ReplayEvery 100 -ReplayToMinecraft
+.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json -ReplayEvery 100 -ReplayToMinecraft
 .\scripts\train.ps1 -Resume latest -Updates 100
 .\scripts\train.ps1 -Updates 1 -Environments 2 -RolloutSteps 16 `
   -ExtraArguments @('--epochs', '1', '--minibatch-size', '64')
@@ -126,7 +123,7 @@ Research plans add scripted/checkpoint opponent mixtures, fixed controls,
 reset-time sampling and curriculum stages. See the
 [plan reference](../simulator/training/AGENTS.md#research-training-plans).
 Research resume restores the embedded plan without the original source files;
-the wrapper recovers world count/rollout length unless explicitly supplied.
+the trainer recovers world count/rollout length unless explicitly supplied.
 Completed curricula stop before the invocation's update cap when appropriate.
 
 ## Serve Policy

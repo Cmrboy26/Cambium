@@ -3,8 +3,9 @@ from copy import deepcopy
 import io
 import json
 from pathlib import Path
-import tempfile
+import shutil
 import unittest
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -21,10 +22,16 @@ from simulator.training.train import arguments, main, optimize
 
 
 PRESET = ROOT / "simulator/training/presets/gear-curriculum.json"
+SHIELD_AXE_PRESET = ROOT / "simulator/training/presets/shield-axe-curriculum.json"
 
 
-def preset():
-    return json.loads(PRESET.read_text(encoding="utf-8"))
+def preset(path=PRESET):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    for key in ("policy", "environment"):
+        value[key] = str((path.parent / value[key]).resolve())
+    for suite in value["evaluations"].values():
+        suite["environment"] = str((path.parent / suite["environment"]).resolve())
+    return value
 
 
 def short_plan():
@@ -36,6 +43,29 @@ def short_plan():
 
 
 class PlanChecks(unittest.TestCase):
+    def test_shield_axe_curriculum_budgets_and_spawn_equipment(self):
+        plan = resolve_plan(preset(SHIELD_AXE_PRESET))
+        self.assertEqual([stage["advance"]["updates"] for stage in plan["stages"]], [150, 250, 350, 750])
+        self.assertEqual(sum(stage["advance"]["updates"] for stage in plan["stages"]), 1500)
+        scenario = plan["stages"][1]["scenario"]
+        sampler = EpisodeSampler(scenario, 16, 42)
+        for world in range(16):
+            players = sampler.players(world)
+            distance = np.linalg.norm(np.subtract(players[0]["position"], players[1]["position"]))
+            self.assertGreaterEqual(distance, 2.0)
+            self.assertLess(distance, 2.7)
+            for player in players:
+                self.assertEqual(player["loadout"]["weapons"][0], "minecraft:iron_sword")
+                self.assertIn(player["loadout"]["weapons"][1], ("minecraft:air", "minecraft:iron_axe"))
+                self.assertTrue(all(item == "minecraft:air" for item in player["loadout"]["armor"].values()))
+        model_slots = plan["policy"]["action_sizes"][plan["policy"]["action_names"].index("weapon")]
+        self.assertEqual(model_slots, 9)
+        for stage in plan["stages"]:
+            self.assertEqual(stage["scenario"]["arenas"][0]["environment"]["blocks"],
+                             plan["scenario"]["arenas"][0]["environment"]["blocks"])
+            self.assertEqual(stage["scenario"]["equipment"], plan["scenario"]["equipment"])
+        self.assertNotIn("movement", plan["stages"][1]["controls"]["fixed"])
+
     def test_legacy_exports_and_roundtrip(self):
         self.assertIs(SCHEMA, LEGACY_SCHEMA)
         self.assertIs(SCHEMA_V2, LEGACY_V2)
@@ -62,17 +92,18 @@ class PlanChecks(unittest.TestCase):
 
     def test_reject_unknown_and_invalid_conditions(self):
         mutations = [
-            lambda plan: plan["scenario"].update(block_edits=True),
+            lambda plan: plan.update(scenario={"block_edits": True}),
             lambda plan: plan["stages"][0]["controls"]["fixed"].update(jump=0),
             lambda plan: plan["stages"][0].update(advance={"updates": True}),
             lambda plan: plan["stages"][0].update(advance={"updates": 3, "episodes": 2}),
-            lambda plan: plan["scenario"]["equipment"].update(sample="sometimes"),
-            lambda plan: plan["stages"][0]["rewards"].update(weights={"unknown": 2}),
-            lambda plan: plan["scenario"]["equipment"]["loadout"]["offhand"].update(
-                choices=[{"value": "minecraft:air", "weight": -1}]),
-            lambda plan: plan["scenario"]["equipment"]["loadout"]["offhand"].update(
-                choices=[{"value": "minecraft:shield", "weight": 1}, {"value": "minecraft:banana", "weight": 0}]),
-            lambda plan: plan["scenario"]["spawns"].update(pitch={"uniform": [-100, 100]}),
+            lambda plan: plan["stages"][0].update(equipment={"sample": "sometimes"}),
+            lambda plan: plan["stages"][0].update(task_override={"rewards": {"unknown": 2}}),
+            lambda plan: plan["stages"][0].update(equipment={"loadout": {"offhand": {
+                "choices": [{"value": "minecraft:air", "weight": -1}]}}}),
+            lambda plan: plan["stages"][0].update(equipment={"loadout": {"offhand": {
+                "choices": [{"value": "minecraft:shield", "weight": 1},
+                            {"value": "minecraft:banana", "weight": 0}]}}}),
+            lambda plan: plan["stages"][0].update(spawns={"pitch": {"uniform": [-100, 100]}}),
         ]
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -133,11 +164,12 @@ class PlanChecks(unittest.TestCase):
 class ResearchChecks(unittest.TestCase):
     def setUp(self):
         torch.set_num_threads(1)
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.directory = Path(self.temp.name)
+        self.directory = ROOT / "simulator/training/runs" / f"test-research-{uuid4().hex}"
+        self.directory.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.directory)
         self.path = self.directory / "plan.json"
-        self.library = load_library()._build_info["library_path"]
+        research_library = ROOT / "simulator/build-research/minecraft_sim_training.so"
+        self.library = load_library(research_library if research_library.exists() else None)._build_info["library_path"]
         self.path.write_text(json.dumps(short_plan()))
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4",
                       "--hidden-dim", "8", "--rollout-steps", "3", "--epochs", "1",
@@ -173,6 +205,28 @@ class ResearchChecks(unittest.TestCase):
         worlds.configure(plan["stages"][1])
         self.assertEqual(addresses, [environment._handle for _, environment in worlds.groups])
 
+    def test_shield_axe_preset_all_stages_smoke(self):
+        plan = preset(SHIELD_AXE_PRESET)
+        for stage in plan["stages"]:
+            stage["advance"] = {"updates": 1}
+        plan["evaluations"]["shield_axe_combat"].update(every_updates=1, episodes=4)
+        self.path.write_text(json.dumps(plan))
+        output = self.directory / "shield-axe-smoke"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "4", "--output", str(output), "--replay-every", "4",
+                  "--max-ticks", "32", "--rollout-steps", "32"])
+        checkpoint = torch.load(output / "latest.pt", weights_only=True)
+        self.assertTrue(checkpoint["research"]["completed"])
+        self.assertEqual(checkpoint["update"], 4)
+        metrics = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertEqual([row["stage"] for row in metrics], ["aim", "attack_timing", "pursuit", "shield_axe_combat"])
+        self.assertEqual(metrics[-1]["evaluations"]["shield_axe_combat"]["episodes"], 4)
+        replay_stages = set()
+        for path in (output / "replays").glob("*.jsonl"):
+            with path.open() as replay:
+                replay_stages.add(json.loads(replay.readline())["training"]["stage"])
+        self.assertEqual(replay_stages, set(row["stage"] for row in metrics))
+
     def test_training_resume_transition_replay_and_inference(self):
         output = self.directory / "run"
         with contextlib.redirect_stdout(io.StringIO()):
@@ -207,13 +261,11 @@ class ResearchChecks(unittest.TestCase):
             main([*flags, "--updates", "1", "--output", str(output), "--resume", str(output / "latest.pt")])
 
     def test_multiscene_groups_and_held_out_evaluation(self):
-        raw = short_plan()
-        base = raw["scenario"].pop("base")
-        arena = json.loads((ROOT / base).read_text())
+        plan = resolve_plan(short_plan())
+        arena = plan["scenario"]["arenas"][0]["environment"]
         second = deepcopy(arena)
         second["name"] = "second-scene"
-        raw["scenario"]["arenas"] = [{"environment": arena}, {"environment": second}]
-        plan = resolve_plan(raw)
+        plan["scenario"]["arenas"].append({"environment": second, "weight": 1})
         worlds = SampledWorlds(plan["scenario"], plan["policy"], 16, "cpu", self.library, 2, 42)
         self.addCleanup(worlds.close)
         self.assertEqual(len(worlds.groups), 2)
@@ -228,13 +280,12 @@ class ResearchChecks(unittest.TestCase):
         self.assertTrue(np.isfinite(result["reward_mean"]))
 
     def test_evaluation_counts_real_combat_wins(self):
-        raw = short_plan()
-        definition = json.loads((ROOT / raw["scenario"]["base"]).read_text())
+        plan = resolve_plan(short_plan())
+        definition = plan["scenario"]["arenas"][0]["environment"]
         for index, player in enumerate(definition["players"]):
             player.update(position=[0.5, 1.0, 0.5 + 2 * index], yaw=180 * index,
                           pitch=0, health=1, attack_strength_ticks=20)
-        raw["scenario"] = {"arenas": [{"environment": definition}]}
-        plan = resolve_plan(raw)
+        plan["scenario"] = {"arenas": [{"environment": definition, "weight": 1}]}
         contract = plan["policy"]
         model = ActorCritic(contract["observation_dim"], 8,
                             action_sizes=dict(zip(contract["action_names"], contract["action_sizes"])))
@@ -267,7 +318,7 @@ class ResearchChecks(unittest.TestCase):
         changed = short_plan()
         changed["evaluations"] = {
             "held": {"every_updates": 1, "episodes": 3, "seed": 101,
-                     "opponents": [{"id": "stationary"}]}
+                     "environment": changed["environment"], "opponents": "target"}
         }
         self.path.write_text(json.dumps(changed))
         with contextlib.redirect_stdout(io.StringIO()):
@@ -292,8 +343,9 @@ class ResearchChecks(unittest.TestCase):
             main([*self.flags, "--updates", "1", "--output", str(source)])
         raw = short_plan()
         raw["opponents"]["frozen"] = {"type": "checkpoint", "path": str(source / "latest.pt")}
+        raw["mixtures"]["frozen_and_fighter"] = [{"id": "frozen", "weight": 1}, {"id": "fighter", "weight": 1}]
         for stage in raw["stages"]:
-            stage["opponents"] = [{"id": "frozen", "weight": 1}, {"id": "fighter", "weight": 1}]
+            stage["opponents"] = "frozen_and_fighter"
         self.path.write_text(json.dumps(raw))
         output = self.directory / "pool"
         with contextlib.redirect_stdout(io.StringIO()):

@@ -41,6 +41,29 @@ function renderEquipment(scenario, playback = false) {
     }
 }
 
+function renderReplayTraining(training) {
+    const list = document.getElementById("replay-training");
+    list.hidden = !training;
+    list.replaceChildren();
+    if (!training) return;
+    const controls = training.controls?.fixed ?? training.controls ?? {};
+    const fields = [
+        ["Stage", training.stage], ["Opponent", typeof training.opponent === "string" ? training.opponent : JSON.stringify(training.opponent)],
+        ["Fixed learner controls", training.controls == null ? "Not recorded"
+            : Object.entries(controls).map(([name, value]) => `${name}=${JSON.stringify(value)}`).join(", ") || "None (all heads learned)"],
+        ["Policy update", training.policy_update], ["Completed rounds", training.completed_rounds],
+    ];
+    for (const [label, value] of fields) {
+        const group = document.createElement("div");
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+        term.textContent = label;
+        description.textContent = value ?? "--";
+        group.append(term, description);
+        list.append(group);
+    }
+}
+
 class ArenaViewer {
     constructor() {
         this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -402,6 +425,7 @@ function restoreSpawn(preserveCamera = true) {
     timeline.value = "0";
     document.getElementById("replay-position").textContent = "Tick --";
     arenaState.textContent = "Spawn state";
+    renderReplayTraining(null);
     renderArena(spawnScenario, preserveCamera);
     renderEquipment(spawnScenario);
     if (viewer && spawnScenario.bounds) viewer.setPlayers(spawnScenario.players ?? [], spawnScenario.profile);
@@ -437,6 +461,7 @@ async function selectReplay() {
         renderArena(data.header.environment, true);
         const training = data.header.training;
         arenaState.textContent = training ? `Replay / Update ${training.policy_update} / Round ${training.completed_rounds}` : "Replay";
+        renderReplayTraining(training);
         timeline.min = String(data.frames[0].tick);
         timeline.max = String(data.frames.at(-1).tick);
         equipmentTick = -1;

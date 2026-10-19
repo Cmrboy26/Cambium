@@ -1,9 +1,11 @@
 #include "minecraft_sim/training_api.h"
-#include "../apps/policy_catalogue.generated.hpp"
+#include "../apps/configuration.hpp"
 
 #include <nlohmann/json.hpp>
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -128,7 +130,7 @@ void checkResetPlayers(const char* environment, int cuda) {
     invalid = definitions; invalid[2][0]["position"][1] = 0; rejects(invalid);
     invalid = definitions; invalid[2][1]["position"] = invalid[2][0]["position"]; rejects(invalid);
     invalid = definitions; invalid[2][0]["break_block"] = true; rejects(invalid);
-    invalid = definitions; invalid[2][0]["loadout"]["weapons"] = {"minecraft:air", "minecraft:air"}; rejects(invalid);
+    invalid = definitions; invalid[2][0]["loadout"]["weapons"] = {"minecraft:iron_sword", "minecraft:iron_sword"}; rejects(invalid);
     invalid = definitions; invalid[2][0]["attack_strength_ticks"] = 1.5; rejects(invalid);
     invalid = definitions; invalid[1] = baseline["players"]; rejects(invalid);
     invalid = definitions; invalid[2] = nullptr; rejects(invalid);
@@ -185,6 +187,101 @@ void checkRewardWeights(int cuda) {
     require(v2 != nullptr && json::parse(mcsim_batch_info(v2.get()))["observation_dim"] == 31, "v2 dimension stays unchanged");
     std::cout << "PASS: finite curriculum reward replacement and legacy v1/v2 dimensions\n";
 }
+
+void checkMaxTicks(int cuda) {
+    const std::array<float, 6> weights{};
+    Handle handle(mcsim_create_schema(1, cuda, nullptr, 1, 1, weights.data(), 1), mcsim_destroy);
+    require(handle != nullptr, "create timeout setter batch");
+    require(mcsim_set_max_ticks(nullptr, 2) == -1, "null timeout handle rejected");
+    require(mcsim_set_max_ticks(handle.get(), 1000000) == 0 && mcsim_set_max_ticks(handle.get(), 2) == 0,
+        "timeout setter accepts supported limits");
+    require(mcsim_set_max_ticks(handle.get(), 0) == -1 && mcsim_set_max_ticks(handle.get(), 1000001) == -1,
+        "out-of-range timeout rejected without mutation");
+    constexpr std::array<int32_t, 12> actions{0, 0, 0, 0, 4, 2, 0, 0, 0, 0, 4, 2};
+    std::array<float, 44> observations{};
+    std::array<float, 2> rewards{};
+    uint8_t terminated = 0, truncated = 0;
+    const auto terrain = scenario(handle.get(), 0)["blocks"];
+    require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(), &terminated, &truncated) == 0
+        && truncated == 0, "increased timeout preserves the first tick");
+    require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(), &terminated, &truncated) == 0
+        && truncated == 1, "updated timeout truncates at the requested tick");
+    require(mcsim_set_max_ticks(handle.get(), 1) == 0
+        && mcsim_reset(handle.get(), nullptr, observations.data()) == 0
+        && mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(), &terminated, &truncated) == 0
+        && truncated == 1, "stage-boundary reset uses replacement timeout");
+    require(scenario(handle.get(), 0)["blocks"] == terrain, "timeout changes never rebuild terrain");
+    std::cout << "PASS: bounded additive episode timeout replacement without terrain rebuild\n";
+}
+
+void checkEmptySlots(const char* environment, int cuda) {
+    json contract{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1},
+        {"observations", {{{"feature", "self.weapon_slot"}}, {{"feature", "opponent.weapon_slot"}}}},
+        {"actions", {{{"name", "weapon"}, {"values", {0, 1}}}}}};
+    const std::array<float, 6> weights{};
+    auto descriptor = contract.dump();
+    Handle seed(mcsim_create_contract(1, cuda, environment, 100, 1, weights.data(), descriptor.c_str()), mcsim_destroy);
+    require(seed != nullptr, "create concrete nine-slot test seed");
+    auto definitions = json::array({scenario(seed.get(), 0)["players"]});
+    for (auto& player : definitions[0]) {
+        player["loadout"] = {{"weapons", {"minecraft:diamond_sword", "minecraft:air", "minecraft:air",
+            "minecraft:air", "minecraft:air", "minecraft:air", "minecraft:air", "minecraft:air", "minecraft:air"}}, {"selected", 7}};
+        player["attack_strength_ticks"] = 20;
+    }
+    std::array<float, 4> observations{};
+    require(mcsim_reset_players(seed.get(), nullptr, definitions.dump().c_str(), observations.data()) == 0,
+        "accept repeated empty slots");
+    require(scenario(seed.get(), 0)["players"][0]["loadout"]["selected"] == 7
+        && observations[0] == 7 && observations[1] == 7 && observations[2] == 7,
+        "resolved initial scenario and both observation perspectives retain requested empty slot");
+    require(frame(seed.get(), 0)["actors"][0]["weapon_slot"] == 7, "initial replay retains empty slot");
+
+    contract["actions"][0]["values"] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+    minecraft_sim::PlayerState state;
+    auto slots = minecraft_sim::app::applyLoadout(state, definitions[0][0]["loadout"]);
+    minecraft_sim::app::PolicyLayout nine(contract, {slots, slots});
+    require(nine.actions[0].values.size() == 9, "nine-slot descriptor accepts padded concrete equipment");
+    const std::string concrete_path = cuda ? "training-nine-slots-cuda.json" : "training-nine-slots-cpu.json";
+    {
+        std::ofstream output(concrete_path);
+        require(static_cast<bool>(output), "open concrete runtime test environment");
+        output << scenario(seed.get(), 0);
+    }
+    descriptor = contract.dump();
+    Handle all_slots(mcsim_create_contract(1, cuda, concrete_path.c_str(), 100, 1, weights.data(), descriptor.c_str()), mcsim_destroy);
+    std::filesystem::remove(concrete_path);
+    require(all_slots != nullptr, "create nine-slot native inference contract from concrete runtime environment");
+    require(mcsim_observe(all_slots.get(), observations.data()) == 0 && observations[0] == 7,
+        "native constructor retains explicitly selected repeated air");
+
+    std::array<int32_t, 2> actions{1, 1};
+    std::array<float, 2> rewards{};
+    uint8_t terminated = 0, truncated = 0;
+    const std::array<int32_t, 2> last_slot{8, 8};
+    require(mcsim_step(all_slots.get(), last_slot.data(), observations.data(), rewards.data(), &terminated, &truncated) == 0
+        && observations[0] == 8 && observations[1] == 8
+        && frame(all_slots.get(), 0)["actors"][0]["controls"]["select_slot"] == 8,
+        "native nine-slot action head selects the last empty physical slot");
+    require(frame(all_slots.get(), 0)["actors"][0]["attack_strength_ticks"] == 21,
+        "last empty slot preserves item-based attack charge");
+    require(mcsim_step(seed.get(), actions.data(), observations.data(), rewards.data(), &terminated, &truncated) == 0,
+        "select another empty slot");
+    const auto switched = frame(seed.get(), 0);
+    require(observations[0] == 1 && observations[1] == 1
+        && switched["actors"][0]["weapon_slot"] == 1
+        && switched["actors"][0]["controls"]["select_slot"] == 1
+        && switched["actors"][0]["weapon"] == "minecraft:air",
+        "empty-slot action, observation and replay agree");
+    require(switched["actors"][0]["attack_strength_ticks"] == 21, "empty-to-empty switching preserves item-based attack charge");
+    require(mcsim_reset(seed.get(), nullptr, observations.data()) == 0 && observations[0] == 7,
+        "reset restores requested initial empty slot");
+    auto invalid = definitions;
+    invalid[0][0]["loadout"]["weapons"][8] = "minecraft:diamond_sword";
+    require(mcsim_reset_players(seed.get(), nullptr, invalid.dump().c_str(), observations.data()) == -1,
+        "duplicate nonempty slots still rejected");
+    std::cout << "PASS: repeated empty hotbar slots preserve initial selection, actions, charge, observations and replay\n";
+}
 }
 
 int main(int argc, char** argv) {
@@ -194,7 +291,9 @@ int main(int argc, char** argv) {
         const int cuda = argc == 3 ? 1 : 0;
         if (cuda && !mcsim_cuda_available()) return 77;
         checkResetPlayers(argv[1], cuda);
+        checkEmptySlots(argv[1], cuda);
         checkRewardWeights(cuda);
+        checkMaxTicks(cuda);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

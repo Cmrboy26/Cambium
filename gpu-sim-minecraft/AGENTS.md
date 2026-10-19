@@ -44,8 +44,9 @@ instance names, usernames and checkout locations are not.
 - `simulator/training/`: Python adapter over a small native C ABI, shared
 	two-player PPO policy, checkpoints, dashboard and inference service. Policy
 	schemas define observations and action heads separately from physics.
-- `backend/`: shared actor-critic model and PPO constants. Reward defaults live
-	in `simulator/training/reward_weights.json`, with environment-level overrides.
+- `backend/`: shared actor-critic model and PPO constants. Authored environment
+	tasks define rewards explicitly; omitted terms are zero. The historical
+	`reward_weights.json` defaults apply only to legacy concrete fixtures.
 	The legacy backend server and tooling have been removed.
 - `cambiummod/`: Fabric recording, replay comparison and real-game policy actors.
 	Live actors use Minecraft mechanics, not embedded simulator physics.
@@ -70,16 +71,18 @@ not a fully GPU-resident PPO pipeline.
 
 ## Cross-Component Contracts
 
-- V1 is the default sword-only schema: 22 observations and six action heads.
-	Replay and live adapters support it.
-- V2 adds sword/axe selection and offhand shield use: 31 observations and eight
-	action heads. Training, resume, replay and live deployment share its contract.
-- Opt-in research plans add scripted/frozen checkpoint opponent pools, constrained
-	curricula and reset-time scenario sampling. `equipment_v3` uses a fixed set of
+- Training authoring separates arena geometry, environment tasks/initialization,
+	policy layout and version-2 training plans. Paths resolve relative to the
+	file containing them. The compiler produces one self-contained resolved
+	experiment for training, checkpoints and the dashboard.
+- Training plans provide scripted/frozen checkpoint opponent pools, constrained
+	curricula and reset-time scenario sampling. The equipment policy uses a fixed set of
 	78 named features, including shield presence, own slot metadata and visible
 	opponent equipment (not hidden opponent inventory).
-	Legacy presets remain isolated and unchanged; descriptors remain the common
-	execution path.
+	Legacy 22/31-feature presets remain isolated for historical artifact readers
+	and regression fixtures, not a second public training configuration path.
+	Version-1 authoring plans must be rewritten; old checkpoint inference/replay
+	remains supported. Semantic descriptors are the common execution path.
 - Custom experiments select/reorder observations and action choices, weapon
 	slots and per-player armor/shields in JSON without a new preset ID.
 - Supported layouts/loadouts are data-driven across training, replay and live

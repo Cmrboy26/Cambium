@@ -8,10 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from simulator.training.contract import FEATURES, from_legacy, resolve_scenario, validate_contract
-from simulator.training.environment import ROOT, resolve_reward_weights
-from simulator.training.legacy import SCHEMAS
-from simulator.training.policies import fixed_indices
+from simulator.training.contract import FEATURES, resolve_scenario
+from simulator.training.environment import ROOT
 
 
 EQUIPMENT_V3_FEATURES = (
@@ -81,7 +79,7 @@ def _validate_equipment(scenario, loadout):
         for index, candidates in enumerate(options):
             if any(not isinstance(item, str) for item in candidates):
                 raise ValueError("Weapon choices must be Minecraft item IDs")
-            if any(set(candidates) & set(other) for other in options[index + 1:]):
+            if any((set(candidates) & set(other)) - {"minecraft:air"} for other in options[index + 1:]):
                 raise ValueError("Weapon-slot choices must not produce duplicate items")
             paths.append((("weapons", index), candidates))
     for name in ("selected", "offhand"):
@@ -207,6 +205,9 @@ def _scenario(value):
             path = path if path.is_absolute() else ROOT / path
             arena["environment"] = json.loads(path.read_text(encoding="utf-8"))
         arena["environment"] = resolve_scenario(arena["environment"])
+    for component in ("spawns", "equipment"):
+        if scenario.get(component, False) is None:
+            scenario.pop(component)
     if "spawns" in scenario:
         spawn = fields(scenario["spawns"], ("sample", "region", "minimum_separation", "yaw", "pitch"), "spawns")
         if spawn.get("sample") not in ("world", "episode"):
@@ -233,112 +234,22 @@ def _scenario(value):
         loadout = fields(equipment.get("loadout"), ("weapons", "selected", "offhand", "armor"), "sampled loadout")
         if "weapons" in loadout and (not isinstance(loadout["weapons"], list) or not 1 <= len(loadout["weapons"]) <= 9):
             raise ValueError("Sampled loadout needs 1..9 stable weapon slots")
+        if "weapons" in loadout:
+            loadout["weapons"].extend(["minecraft:air"] * (9 - len(loadout["weapons"])))
         distribution(loadout)
         _validate_equipment(scenario, loadout)
     return scenario
 
 
-def resolve_plan(value):
-    fields(value, ("format", "version", "seed", "policy", "scenario", "opponents", "stages", "evaluations"), "training plan")
-    if value.get("format") != "minecraft_sim_training_plan" or value.get("version") != 1:
-        raise ValueError("Unsupported training plan format/version")
-    plan = deepcopy(value)
-    seed = plan.get("seed", 1)
-    if type(seed) is not int or not 0 <= seed < 2**63:
-        raise ValueError("Plan seed must be in [0,2**63)")
-    plan["seed"] = seed
-    plan["scenario"] = _scenario(plan["scenario"])
-    opponents = plan.get("opponents")
-    if not isinstance(opponents, dict) or not opponents:
-        raise ValueError("Plan needs named opponents")
-    for name, opponent in opponents.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError("Opponent IDs must be nonempty strings")
-        fields(opponent, ("type", "controller", "options", "path", "deterministic", "sha256"), "opponent")
-        if opponent.get("type") == "checkpoint":
-            path = Path(opponent["path"])
-            path = path if path.is_absolute() else ROOT / path
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if opponent.get("sha256", digest) != digest:
-                raise ValueError(f"Opponent checkpoint changed: {path}")
-            opponent.update(path=str(path.resolve()), sha256=digest)
-        elif opponent.get("type") == "scripted":
-            if not isinstance(opponent.get("controller"), str):
-                raise ValueError("Scripted opponent needs a controller name")
-        else:
-            raise ValueError("Opponent type must be scripted or checkpoint")
-    evaluations = plan.setdefault("evaluations", {})
-    if not isinstance(evaluations, dict):
-        raise ValueError("Evaluations must be named suites")
-    stages = plan.get("stages")
-    if not isinstance(stages, list) or not stages:
-        raise ValueError("Plan needs at least one stage")
-    names = set()
-    for stage in stages:
-        fields(stage, ("name", "scenario", "opponents", "controls", "rewards", "advance"), "stage")
-        if not isinstance(stage.get("name"), str) or not stage["name"] or stage["name"] in names:
-            raise ValueError("Stage names must be nonempty and unique")
-        names.add(stage["name"])
-        if "scenario" in stage:
-            changes = stage["scenario"]
-            fields(changes, ("base", "arenas", "spawns", "equipment"), "stage scenario")
-            base = deepcopy(plan["scenario"])
-            if "base" in changes or "arenas" in changes:
-                base.pop("arenas")
-            stage["scenario"] = _scenario({**base, **changes})
-        else:
-            stage["scenario"] = deepcopy(plan["scenario"])
-        _opponent_mix(stage.get("opponents"), opponents)
-        stage.setdefault("controls", {"fixed": {}})
-        reward = fields(stage.setdefault("rewards", {"mode": "environment"}), ("mode", "weights"), "stage rewards")
-        if reward.get("mode") not in ("environment", "replace", "override"):
-            raise ValueError("Reward mode must be environment, replace or override")
-        if reward["mode"] == "environment" and "weights" in reward:
-            raise ValueError("Environment reward mode cannot contain weights")
-        resolved = resolve_reward_weights({}, reward.get("weights", {}))
-        if not all(math.isfinite(number) for number in resolved.values()):
-            raise ValueError("Reward weights must be finite")
-        advance_rule(stage["advance"], evaluations)
-    for suite in evaluations.values():
-        fields(suite, ("every_updates", "episodes", "seed", "scenario", "opponents", "controls"), "evaluation suite")
-        positive(suite.get("every_updates"), "evaluation interval")
-        positive(suite.get("episodes"), "evaluation episodes")
-        if type(suite.get("seed")) is not int or not 0 <= suite["seed"] < 2**63:
-            raise ValueError("Evaluation seed must be in [0,2**63)")
-        suite["scenario"] = _scenario(suite.get("scenario", plan["scenario"]))
-        suite.setdefault("controls", {"fixed": {}})
-        _opponent_mix(suite.get("opponents"), opponents)
-    policy = plan["policy"]
-    if isinstance(policy, dict) and set(policy) == {"preset"}:
-        if policy["preset"] in SCHEMAS:
-            policy = from_legacy(SCHEMAS[policy["preset"]])
-        elif policy["preset"] == "equipment_v3":
-            slot_counts = set()
-            for stage in [*stages, *evaluations.values()]:
-                scenario = stage["scenario"]
-                for arena in scenario["arenas"]:
-                    for player in arena["environment"]["players"]:
-                        loadout = scenario.get("equipment", {}).get("loadout", {})
-                        slot_counts.add(len(loadout.get("weapons", player["loadout"]["weapons"])))
-            if len(slot_counts) != 1:
-                raise ValueError("equipment_v3 needs one stable weapon-slot count across the plan")
-            slots = slot_counts.pop()
-            policy = from_legacy(SCHEMAS["v2"])
-            policy.pop("observation_dim")
-            policy.pop("action_sizes")
-            policy["observations"] = [{"feature": feature} for feature in EQUIPMENT_V3_FEATURES]
-            policy["requires"] = sorted(set(policy["requires"]) | {"armor"})
-            if any(feature not in FEATURES for feature in EQUIPMENT_V3_FEATURES):
-                raise ValueError("equipment_v3 requires the updated equipment catalogue")
-            next(action for action in policy["actions"] if action["name"] == "weapon")["values"] = list(range(slots))
-        else:
-            raise ValueError("Unknown policy preset")
-    plan["policy"] = validate_contract(policy)
-    for stage in stages:
-        fixed_indices(plan["policy"], stage["controls"])
-    for suite in evaluations.values():
-        fixed_indices(plan["policy"], suite["controls"])
-    return plan
+def resolve_plan(value, base_dir=ROOT):
+    """Compile authored v2 input, or validate a self-contained resolved experiment."""
+    from simulator.training.compiler import resolve_experiment
+    return resolve_experiment(value, base_dir)
+
+
+def load_plan(path):
+    path = Path(path).resolve()
+    return resolve_plan(json.loads(path.read_text(encoding="utf-8")), base_dir=path.parent)
 
 
 def _opponent_mix(mix, opponents):
@@ -353,6 +264,12 @@ def plan_hash(plan):
     return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def scene_key(scenario):
+    """Identity of immutable terrain and assignment weights, excluding task/actors."""
+    return plan_hash([{"weight": arena.get("weight", 1), **{key: arena["environment"].get(key)
+                       for key in ("bounds", "blocks", "rules")}} for arena in scenario["arenas"]])
+
+
 class EpisodeSampler:
     def __init__(self, scenario, count, seed):
         self.scenario = deepcopy(scenario)
@@ -364,10 +281,15 @@ class EpisodeSampler:
         self.cache = [{"spawns": None, "equipment": None} for _ in range(count)]
 
     def configure(self, scenario):
-        if scenario["arenas"] != self.scenario["arenas"]:
+        if scene_key(scenario) != scene_key(self.scenario):
             raise ValueError("Changing arenas requires a new scene assignment")
         for component in ("spawns", "equipment"):
-            if scenario.get(component) != self.scenario.get(component):
+            keys = ("position", "yaw", "pitch") if component == "spawns" else ("loadout",)
+            def defaults(value):
+                return [[{key: player.get(key) for key in keys} for player in arena["environment"]["players"]]
+                        for arena in value["arenas"]]
+            if (scenario.get(component) != self.scenario.get(component)
+                    or defaults(scenario) != defaults(self.scenario)):
                 for cache in self.cache:
                     cache[component] = None
         self.scenario = deepcopy(scenario)
@@ -381,7 +303,13 @@ class EpisodeSampler:
             if gear["sample"] == "episode" or cache["equipment"] is None:
                 cache["equipment"] = [draw(gear["loadout"], self.gear_rng) for _ in range(2)]
             for player, loadout in zip(players, cache["equipment"]):
-                player["loadout"].update(deepcopy(loadout))
+                override = deepcopy(loadout)
+                armor = override.pop("armor", {})
+                player["loadout"].update(override)
+                player["loadout"]["armor"].update(armor)
+        for player in players:
+            slots = player["loadout"]["weapons"]
+            slots.extend(["minecraft:air"] * (9 - len(slots)))
         spawn = self.scenario.get("spawns")
         if spawn:
             if spawn["sample"] == "episode" or cache["spawns"] is None:
@@ -413,6 +341,8 @@ class EpisodeSampler:
     @staticmethod
     def _valid_position(position, base):
         origin, size = base["bounds"]["min"], base["bounds"]["size"]
+        if not origin[1] <= position[1] < origin[1] + size[1]:
+            return False
         if any(position[axis] - 0.3 < origin[axis] or position[axis] + 0.3 >= origin[axis] + size[axis]
                for axis in (0, 2)):
             return False
@@ -428,14 +358,35 @@ class EpisodeSampler:
                                 return False
                             break
         return True
+
     def state_dict(self):
-        return {"arenas": self.arenas, "cache": deepcopy(self.cache),
+        return {"arenas": list(self.arenas), "cache": deepcopy(self.cache),
                 "rng": [deepcopy(rng.bit_generator.state) for rng in (self.arena_rng, self.spawn_rng, self.gear_rng)]}
 
     def load_state_dict(self, state):
-        if len(state["arenas"]) != len(self.arenas) or len(state["cache"]) != len(self.cache):
+        fields(state, ("arenas", "cache", "rng"), "sampler state")
+        if (not isinstance(state.get("arenas"), list) or not isinstance(state.get("cache"), list)
+                or len(state["arenas"]) != len(self.arenas) or len(state["cache"]) != len(self.cache)):
             raise ValueError("Sampler state world count differs")
+        if any(type(index) is not int or not 0 <= index < len(self.scenario["arenas"]) for index in state["arenas"]):
+            raise ValueError("Sampler state contains an invalid arena index")
+        if not isinstance(state.get("rng"), list) or len(state["rng"]) != 3:
+            raise ValueError("Sampler state needs three component RNG states")
+        for cache in state["cache"]:
+            fields(cache, ("spawns", "equipment"), "sampler cache")
+            if set(cache) != {"spawns", "equipment"}:
+                raise ValueError("Sampler cache needs spawn and equipment entries")
+            for component in ("spawns", "equipment"):
+                if cache[component] is not None and (
+                        not isinstance(cache[component], list) or len(cache[component]) != 2
+                        or any(not isinstance(item, dict) for item in cache[component])):
+                    raise ValueError("Sampler cache must contain two player samples")
+        generators = [np.random.default_rng() for _ in range(3)]
+        for rng, saved in zip(generators, state["rng"]):
+            try:
+                rng.bit_generator.state = deepcopy(saved)
+            except (TypeError, ValueError, KeyError) as error:
+                raise ValueError("Invalid sampler RNG state") from error
         self.arenas = list(state["arenas"])
         self.cache = deepcopy(state["cache"])
-        for rng, saved in zip((self.arena_rng, self.spawn_rng, self.gear_rng), state["rng"]):
-            rng.bit_generator.state = deepcopy(saved)
+        self.arena_rng, self.spawn_rng, self.gear_rng = generators

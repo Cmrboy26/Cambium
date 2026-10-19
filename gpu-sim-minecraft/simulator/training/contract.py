@@ -120,7 +120,8 @@ def resolve_scenario(definition):
         slots = loadout.get("weapons", ["minecraft:diamond_sword"])
         selected = loadout.get("selected", 0)
         if (not isinstance(slots, list) or not 1 <= len(slots) <= 9 or any(not isinstance(item, str) or item not in weapons for item in slots)
-                or len(set(slots)) != len(slots) or type(selected) is not int or not 0 <= selected < len(slots)):
+                or len({item for item in slots if item != "minecraft:air"}) != sum(item != "minecraft:air" for item in slots)
+                or type(selected) is not int or not 0 <= selected < len(slots)):
             raise ValueError("Unsupported weapon loadout or selected slot")
         offhand = loadout.get("offhand", "minecraft:air")
         if offhand not in ("minecraft:air", "minecraft:shield"):

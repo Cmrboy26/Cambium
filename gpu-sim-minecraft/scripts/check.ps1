@@ -50,7 +50,8 @@ if ($runPython) {
     $testArguments = @('-B', '-m', 'unittest')
     if ($Scope -ne 'Dashboard') { $testArguments += 'simulator.training.test_training' }
     if ($Scope -in @('All', 'Training')) {
-        $testArguments += @('simulator.training.test_controllers', 'simulator.training.test_research')
+        $testArguments += @('simulator.training.test_controllers', 'simulator.training.test_experiments',
+            'simulator.training.test_research', 'simulator.training.test_deployment')
     }
     if ($Scope -in @('All', 'Dashboard')) { $testArguments += 'simulator.training.test_dashboard' }
     if ($Scope -in @('All', 'Training')) { $testArguments += 'simulator.training.test_rosie' }

@@ -1,6 +1,6 @@
 # Batched Simulator PPO
 
-Train shared self-play or a learner against scripted/checkpoint opponents.
+Train a learner against scripted/checkpoint opponents using staged experiments.
 No Minecraft, RCON or legacy backend server is needed for training.
 
 ## Setup
@@ -20,19 +20,20 @@ CUDA needs a CUDA-built simulator and CUDA-enabled PyTorch; see
 
 ```powershell
 .\scripts\train.ps1
-.\scripts\train.ps1 -Schema v2
 .\scripts\train.ps1 -Device cuda -Environments 8192
-.\scripts\train.ps1 -Environment simulator/environments/research-duel.json
-.\scripts\train.ps1 -Plan simulator/training/presets/gear-curriculum.json
+.\scripts\train.ps1 -Plan simulator/training/presets/shield-axe-curriculum.json -Updates 1500
 ```
 
-Default training uses CPU, 16 worlds and 100 updates. V1 is sword-only; V2 adds
-sword/axe selection and shields. Customize terrain, equipment, observations,
-controls and reward overrides with the [scenario contract](../../docs/simulation_contract.md).
-The [research preset](presets/gear-curriculum.json) adds aiming/combat stages,
-random spawns, optional shields/axes and held-out evaluation. See the
+Default training uses CPU, 16 worlds and a 100-update invocation cap.
+Configuration separates reusable [arenas](../arenas/), [environments](../tasks/),
+[policies](../policies/) and [training plans](presets/); the trainer compiles them
+into one resolved experiment. See the [experiment contract](../../docs/simulation_contract.md)
+and the
 [training-plan reference](AGENTS.md#research-training-plans) for custom bots,
 checkpoint pools, sampling frequencies and advancement rules.
+The [shield/axe curriculum](presets/shield-axe-curriculum.json) trains aiming,
+attack timing, pursuit and equipment combat for 150/250/350/750 updates.
+Set `-Updates 1500` to allow the entire four-stage schedule to run.
 
 ## Checkpoints
 
@@ -56,7 +57,8 @@ In another terminal:
 .\scripts\serve-dashboard.ps1
 ```
 
-Open **http://127.0.0.1:8767** for live/saved reward, loss and throughput charts.
+Open **http://127.0.0.1:8767** for live/saved charts, curriculum stages,
+environment/opponent mixtures and held-out evaluation results.
 It needs only Python, not PyTorch or a native library. Ctrl+C stops the server;
 use `-Port` if occupied. Missing historical reward breakdowns remain blank.
 
@@ -83,6 +85,9 @@ Replay intervals count completed duels, not updates; each export is a separate
 policy sample. Without a destination, samples stay in the run's `replays` folder.
 Follow the [mod guide](../../cambiummod/README.md) for installation, game-folder
 selection, playback and live duels. Inference defaults to loopback port 8766.
+The mod consumes resolved checkpoint conditions, not authoring files. Live duels
+use the same served learner for both actors and fixed checkpoint equipment;
+curriculum schedules and opponent pools run only in the trainer.
 
 ## Development
 

@@ -6,7 +6,7 @@
 namespace minecraft_sim::app {
 
 inline nlohmann::json replayFrame(std::uint64_t tick, const PlayerState* players, const Controls* actions,
-                                  bool equipment = false) {
+                                  bool equipment = false, const int* selected_slots = nullptr) {
     auto actors = nlohmann::json::array();
     for (int index = 0; index < 2; ++index) {
         const auto& state = players[index];
@@ -37,6 +37,10 @@ inline nlohmann::json replayFrame(std::uint64_t tick, const PlayerState* players
             actor["controls"].update({{"select_weapon", input.select_weapon},
                 {"weapon", weaponName(input.weapon)},
                 {"use_item", input.use_item}});
+            if (selected_slots) {
+                actor["weapon_slot"] = selected_slots[index];
+                actor["controls"]["select_slot"] = input.select_weapon ? selected_slots[index] : -1;
+            }
             actor["outcome"].update({{"blocked_damage", attack.blocked_damage}, {"shield_disabled", attack.shield_disabled}});
             auto armor = nlohmann::json::object();
             for (int slot = 0; slot < 4; ++slot) armor[armor_slots[slot]] = armorName(state.armor_items[slot], slot);

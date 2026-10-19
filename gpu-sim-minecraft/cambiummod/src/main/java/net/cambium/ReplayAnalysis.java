@@ -23,7 +23,7 @@ final class ReplayAnalysis {
 	static final Gson JSON = new GsonBuilder().serializeNulls().create();
 	private static final String[] STATE_FIELDS = {"position", "velocity", "yaw", "pitch", "on_ground",
 			"sprinting", "pose", "health", "absorption", "damage_cooldown", "hurt_time", "attack_strength_ticks",
-			"weapon", "shield_equipped", "using_shield", "shield_use_ticks", "shield_cooldown", "item_use_delay", "attack_suppressed", "armor"};
+			"weapon", "weapon_slot", "shield_equipped", "using_shield", "shield_use_ticks", "shield_cooldown", "item_use_delay", "attack_suppressed", "armor"};
 	private static final String[] OUTCOME_FIELDS = {"target", "attempted", "accepted", "damage", "health_lost"};
 	final Path detailsPath;
 	final Path summaryPath;
@@ -75,6 +75,7 @@ final class ReplayAnalysis {
 			JsonObject reference = expected.get(actor).getAsJsonObject();
 			JsonObject observed = actual.get(actor).getAsJsonObject();
 			for (String field : STATE_FIELDS) {
+				if (field.equals("weapon_slot") && reference.has(field) && reference.get(field).getAsInt() < 0) continue;
 				if (reference.has(field)) compare(tick, actor, field, reference.get(field), observed.get(field), differences);
 			}
 			if (reference.has("outcome")) {

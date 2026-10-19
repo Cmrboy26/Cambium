@@ -48,8 +48,8 @@ inline std::vector<WeaponItem> applyLoadout(PlayerState& state, const nlohmann::
     std::vector<WeaponItem> slots;
     for (const auto& item : weapons) {
         const auto weapon = parseWeapon(item.get<std::string>());
-        if (std::find(slots.begin(), slots.end(), weapon) != slots.end()) {
-            throw std::invalid_argument("Weapon slots must be distinct");
+        if (weapon != WeaponItem::unarmed && std::find(slots.begin(), slots.end(), weapon) != slots.end()) {
+            throw std::invalid_argument("Nonempty weapon slots must be distinct");
         }
         slots.push_back(weapon);
     }
@@ -90,12 +90,14 @@ inline std::vector<WeaponItem> applyLoadout(PlayerState& state, const nlohmann::
     return slots;
 }
 
-inline nlohmann::json describeLoadout(const PlayerState& state, const std::vector<WeaponItem>& slots) {
+inline nlohmann::json describeLoadout(const PlayerState& state, const std::vector<WeaponItem>& slots, int selected = -1) {
     auto weapons = nlohmann::json::array();
-    int selected = 0;
+    if (selected < 0) selected = static_cast<int>(std::distance(slots.begin(), std::find(slots.begin(), slots.end(), state.weapon)));
     for (std::size_t index = 0; index < slots.size(); ++index) {
         weapons.push_back(weaponName(slots[index]));
-        if (slots[index] == state.weapon) selected = static_cast<int>(index);
+    }
+    if (selected >= static_cast<int>(slots.size()) || slots[selected] != state.weapon) {
+        throw std::invalid_argument("Selected slot disagrees with equipped weapon");
     }
     auto armor = nlohmann::json::object();
     for (int slot = 0; slot < 4; ++slot) armor[armor_slots[slot]] = armorName(state.armor_items[slot], slot);

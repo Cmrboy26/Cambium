@@ -17,17 +17,17 @@ BUILD_DIR="${SIM_BUILD_DIR:-$SIM_ROOT/simulator/build-rosie-cuda-$CUDA_ARCHITECT
 VENV_DIR="$SIM_ROOT/.venv-rosie"
 LIBRARY="$BUILD_DIR/minecraft_sim_training.so"
 
-SIM_ENVS="${SIM_ENVS:-256}"
+SIM_ENVS="${SIM_ENVS:-}"
 SIM_UPDATES="${SIM_UPDATES:-1}"
-SIM_ROLLOUT_STEPS="${SIM_ROLLOUT_STEPS:-16}"
-SIM_EPOCHS="${SIM_EPOCHS:-4}"
-SIM_MINIBATCH_SIZE="${SIM_MINIBATCH_SIZE:-1024}"
-SIM_HIDDEN_DIM="${SIM_HIDDEN_DIM:-256}"
+SIM_ROLLOUT_STEPS="${SIM_ROLLOUT_STEPS:-}"
+SIM_EPOCHS="${SIM_EPOCHS:-}"
+SIM_MINIBATCH_SIZE="${SIM_MINIBATCH_SIZE:-}"
+SIM_HIDDEN_DIM="${SIM_HIDDEN_DIM:-}"
+SIM_LR="${SIM_LR:-}"
 SIM_THREADS="${SIM_THREADS:-4}"
-SIM_SEED="${SIM_SEED:-1}"
-SIM_SCHEMA="${SIM_SCHEMA:-v1}"
-SIM_ENVIRONMENT="${SIM_ENVIRONMENT:-}"
 SIM_PLAN="${SIM_PLAN:-}"
+SIM_RESUME="${SIM_RESUME:-}"
+SIM_INITIALIZE="${SIM_INITIALIZE:-}"
 SIM_REPLAY_EVERY="${SIM_REPLAY_EVERY:-0}"
 SIM_REPLAY_DIR="${SIM_REPLAY_DIR:-}"
 SIM_OUTPUT="${SIM_OUTPUT:-$SIM_ROOT/simulator/training/runs/rosie-${SLURM_JOB_ID}}"
@@ -40,18 +40,31 @@ if [[ ! -d "$SIM_ROOT/simulator/training" ]]; then
     exit 1
 fi
 
-if [[ -n "$SIM_ENVIRONMENT" && ! -f "$SIM_ENVIRONMENT" ]]; then
-    echo "ERROR: Environment file not found from $SIM_ROOT: $SIM_ENVIRONMENT"
+if [[ -n "${SIM_ENVIRONMENT:-}" || -n "${SIM_SCHEMA:-}" || -n "${SIM_SEED:-}" ]]; then
+    echo "ERROR: SIM_ENVIRONMENT/SIM_SCHEMA/SIM_SEED were replaced by the environment, policy and seed in SIM_PLAN."
     exit 1
+fi
+if [[ -z "$SIM_PLAN" && -z "$SIM_RESUME" ]]; then
+    SIM_PLAN="simulator/training/presets/shield-axe-curriculum.json"
+fi
+if [[ -z "$SIM_RESUME" ]]; then
+    SIM_ENVS="${SIM_ENVS:-256}"
+    SIM_ROLLOUT_STEPS="${SIM_ROLLOUT_STEPS:-16}"
 fi
 if [[ -n "$SIM_PLAN" && ! -f "$SIM_PLAN" ]]; then
     echo "ERROR: Training plan not found from $SIM_ROOT: $SIM_PLAN"
     exit 1
 fi
-if [[ -n "$SIM_PLAN" && -n "$SIM_ENVIRONMENT" ]]; then
-    echo "ERROR: Choose SIM_PLAN or SIM_ENVIRONMENT, not both."
+if [[ -n "$SIM_RESUME" && -n "$SIM_INITIALIZE" ]]; then
+    echo "ERROR: Choose SIM_RESUME or SIM_INITIALIZE, not both."
     exit 1
 fi
+for checkpoint in "$SIM_RESUME" "$SIM_INITIALIZE"; do
+    if [[ -n "$checkpoint" && ! -f "$checkpoint" ]]; then
+        echo "ERROR: Checkpoint not found from $SIM_ROOT: $checkpoint"
+        exit 1
+    fi
+done
 if [[ "$SIM_REPLAY_EVERY" -lt 0 ]]; then
     echo "ERROR: SIM_REPLAY_EVERY must be zero or greater."
     exit 1
@@ -107,27 +120,25 @@ if [[ ! -f "$LIBRARY" ]]; then
     exit 1
 fi
 
-echo "Training on $(hostname): envs=$SIM_ENVS updates=$SIM_UPDATES rollout_steps=$SIM_ROLLOUT_STEPS epochs=$SIM_EPOCHS minibatch=$SIM_MINIBATCH_SIZE hidden_dim=$SIM_HIDDEN_DIM schema=$SIM_SCHEMA"
+echo "Training on $(hostname): envs=$SIM_ENVS updates=$SIM_UPDATES rollout_steps=$SIM_ROLLOUT_STEPS plan=$SIM_PLAN resume=$SIM_RESUME"
 TRAIN_ARGS=(
     --device cuda \
-    --schema "$SIM_SCHEMA" \
-    --envs "$SIM_ENVS" \
     --updates "$SIM_UPDATES" \
-    --rollout-steps "$SIM_ROLLOUT_STEPS" \
-    --epochs "$SIM_EPOCHS" \
-    --minibatch-size "$SIM_MINIBATCH_SIZE" \
-    --hidden-dim "$SIM_HIDDEN_DIM" \
     --threads "$SIM_THREADS" \
-    --seed "$SIM_SEED" \
     --library "$LIBRARY" \
     --output "$SIM_OUTPUT"
 )
-if [[ -n "$SIM_ENVIRONMENT" ]]; then
-    TRAIN_ARGS+=(--environment "$SIM_ENVIRONMENT")
-fi
+if [[ -n "$SIM_ENVS" ]]; then TRAIN_ARGS+=(--envs "$SIM_ENVS"); fi
+if [[ -n "$SIM_ROLLOUT_STEPS" ]]; then TRAIN_ARGS+=(--rollout-steps "$SIM_ROLLOUT_STEPS"); fi
 if [[ -n "$SIM_PLAN" ]]; then
     TRAIN_ARGS+=(--plan "$SIM_PLAN")
 fi
+if [[ -n "$SIM_RESUME" ]]; then TRAIN_ARGS+=(--resume "$SIM_RESUME"); fi
+if [[ -n "$SIM_INITIALIZE" ]]; then TRAIN_ARGS+=(--initialize "$SIM_INITIALIZE"); fi
+if [[ -n "$SIM_EPOCHS" ]]; then TRAIN_ARGS+=(--epochs "$SIM_EPOCHS"); fi
+if [[ -n "$SIM_MINIBATCH_SIZE" ]]; then TRAIN_ARGS+=(--minibatch-size "$SIM_MINIBATCH_SIZE"); fi
+if [[ -n "$SIM_HIDDEN_DIM" ]]; then TRAIN_ARGS+=(--hidden-dim "$SIM_HIDDEN_DIM"); fi
+if [[ -n "$SIM_LR" ]]; then TRAIN_ARGS+=(--lr "$SIM_LR"); fi
 if [[ "$SIM_REPLAY_EVERY" -gt 0 ]]; then
     TRAIN_ARGS+=(--replay-every "$SIM_REPLAY_EVERY")
     if [[ -n "$SIM_REPLAY_DIR" ]]; then
