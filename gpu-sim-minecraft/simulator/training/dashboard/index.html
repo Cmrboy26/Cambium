@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cambium | Training</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/dashboard.css">
+    <script defer src="/chart.umd.min.js"></script>
+    <script defer src="/dashboard.js"></script>
+</head>
+<body>
+    <header class="masthead">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">C</span><h1>Cambium <span>/ Training</span></h1></div>
+        <div class="connection"><span id="connection" role="status">Connecting</span><time id="checked"></time></div>
+    </header>
+    <main>
+        <section class="toolbar" aria-label="Run selection">
+            <div class="run-field"><label for="run">Training run</label><select id="run"><option value="">Loading runs...</option></select></div>
+            <label class="live-control"><input type="checkbox" id="live" checked> Live updates</label>
+            <button id="refresh" type="button">Refresh</button>
+        </section>
+        <p id="run-path" class="run-path"></p>
+        <p id="notice" class="notice" role="status" hidden></p>
+        <section class="summary" aria-label="Latest metrics">
+            <div><h2>PPO update</h2><strong id="stat-update">--</strong><span id="stat-total">0 updates recorded</span></div>
+            <div><h2>Player samples</h2><strong id="stat-samples">--</strong><span>Cumulative</span></div>
+            <div><h2>Mean reward / step</h2><strong id="stat-reward">--</strong><span>Latest rollout</span></div>
+            <div><h2>Transitions / second</h2><strong id="stat-throughput">--</strong><span>Latest update</span></div>
+            <div><h2>Completed rounds</h2><strong id="stat-rounds">--</strong><span>Cumulative</span></div>
+            <div><h2>Timeouts</h2><strong id="stat-timeouts">--</strong><span>Across recorded updates</span></div>
+        </section>
+        <section class="view-controls" aria-label="Chart settings">
+            <fieldset><legend>Update window</legend><div class="segments">
+                <label><input type="radio" name="window" value="50"><span>50</span></label>
+                <label><input type="radio" name="window" value="100" checked><span>100</span></label>
+                <label><input type="radio" name="window" value="500"><span>500</span></label>
+                <label><input type="radio" name="window" value="0"><span>All</span></label>
+            </div></fieldset>
+            <div class="smoothing"><label for="smooth">Smoothing</label><select id="smooth"><option value="1">Off</option><option value="5">EMA 5</option><option value="10">EMA 10</option><option value="20">EMA 20</option></select></div>
+            <span id="window-info">No updates</span>
+        </section>
+        <p id="empty" class="empty" hidden>No training runs found.</p>
+        <section class="charts" aria-label="Training charts">
+            <article class="chart"><h2>Mean reward / step <span>Per rollout</span></h2><div class="plot"><canvas id="reward-chart" role="img" aria-label="Mean reward per player step by PPO update"></canvas></div></article>
+            <article class="chart"><h2>Total reward <span>Per update</span></h2><div class="plot"><canvas id="total-reward-chart" role="img" aria-label="Total player reward by PPO update"></canvas></div></article>
+            <article class="chart reward-breakdown"><h2>Reward breakdown <span>Per update</span></h2><div class="plot"><canvas id="reward-types-chart" role="img" aria-label="Reward contributions by type and PPO update"></canvas><p id="reward-types-empty" class="plot-empty">No per-type reward data recorded.</p></div></article>
+            <article class="chart"><h2>PPO losses <span>Policy, value, total</span></h2><div class="plot"><canvas id="loss-chart" role="img" aria-label="Policy, value and total loss by PPO update"></canvas></div></article>
+            <article class="chart"><h2>Policy entropy <span>Exploration</span></h2><div class="plot"><canvas id="entropy-chart" role="img" aria-label="Policy entropy by PPO update"></canvas></div></article>
+            <article class="chart"><h2>Throughput <span>Player transitions / second</span></h2><div class="plot"><canvas id="throughput-chart" role="img" aria-label="Player transitions per second by PPO update"></canvas></div></article>
+            <article class="chart"><h2>Duel endings <span>Per update</span></h2><div class="plot"><canvas id="duels-chart" role="img" aria-label="Terminated duels and timeouts by PPO update"></canvas></div></article>
+            <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Rollout collection and optimization seconds by PPO update"></canvas></div></article>
+        </section>
+        <section class="configuration" aria-labelledby="config-title"><h2 id="config-title">Run configuration</h2><dl id="config"></dl></section>
+        <section class="updates" aria-labelledby="updates-title">
+            <div class="section-title"><h2 id="updates-title">Recent updates</h2><span id="row-count">0 recorded</span></div>
+            <div class="table-scroll" tabindex="0" aria-label="Recent training updates"><table><thead><tr><th scope="col">Update</th><th scope="col">Samples</th><th scope="col">Reward / step</th><th scope="col">Policy loss</th><th scope="col">Value loss</th><th scope="col">Entropy</th><th scope="col">Rounds</th><th scope="col">Timeouts</th></tr></thead><tbody id="updates"><tr><td colspan="8">No updates recorded.</td></tr></tbody></table></div>
+        </section>
+    </main>
+</body>
+</html>

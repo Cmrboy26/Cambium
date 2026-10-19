@@ -1,0 +1,18 @@
+{
+	"required": true,
+	"package": "net.cambium.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"LivingEntityRecordingAccessor",
+		"LocalPlayerRecordingAccessor",
+		"LocalPlayerRecordingMixin",
+		"PlayerEquipmentAccess",
+		"ReplayInputAccess"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}

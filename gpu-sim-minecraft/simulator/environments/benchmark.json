@@ -1,0 +1,38 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "enclosed-movement-benchmark",
+  "profile": "unarmored_diamond_sword",
+  "bounds": { "min": [-8, 0, -8], "size": [16, 8, 16] },
+  "blocks": [
+    { "from": [-8, 0, -8], "to": [7, 0, 7], "block": "minecraft:stone" },
+    { "from": [-2, 1, 2], "to": [2, 3, 2], "block": "minecraft:stone" },
+    { "from": [-8, 1, -8], "to": [-8, 3, 7], "block": "minecraft:stone" },
+    { "from": [7, 1, -8], "to": [7, 3, 7], "block": "minecraft:stone" },
+    { "from": [-8, 1, -8], "to": [7, 3, -8], "block": "minecraft:stone" },
+    { "from": [-8, 1, 7], "to": [7, 3, 7], "block": "minecraft:stone" }
+  ],
+  "players": [
+    {
+      "position": [0.5, 1.0, -2.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20
+    },
+    {
+      "position": [0.75, 1.0, -2.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20
+    }
+  ]
+}

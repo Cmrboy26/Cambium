@@ -1,0 +1,12 @@
+{
+    "cmake.sourceDirectory": "C:/Projects/gpu-sim-minecraft/simulator",
+    "cmake.buildDirectory": "${workspaceFolder}/simulator/build",
+    "cmake.generator": "MinGW Makefiles",
+    "cmake.configureSettings": {
+        "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
+        "CMAKE_MAKE_PROGRAM": "C:/msys64/ucrt64/bin/make.exe"
+    },
+    "C_Cpp.default.compilerPath": "C:/msys64/ucrt64/bin/g++.exe",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/simulator/build/compile_commands.json",
+    "C_Cpp.default.cppStandard": "c++20"
+}

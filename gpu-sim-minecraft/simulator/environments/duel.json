@@ -1,0 +1,37 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "enclosed-5x5-duel",
+  "profile": "unarmored_diamond_sword",
+  "bounds": { "min": [-3, 0, -3], "size": [7, 4, 7] },
+  "blocks": [
+    { "from": [-3, 0, -3], "to": [3, 0, 3], "block": "minecraft:stone" },
+    { "from": [-3, 1, -3], "to": [-3, 3, 3], "block": "minecraft:stone" },
+    { "from": [3, 1, -3], "to": [3, 3, 3], "block": "minecraft:stone" },
+    { "from": [-2, 1, -3], "to": [2, 3, -3], "block": "minecraft:stone" },
+    { "from": [-2, 1, 3], "to": [2, 3, 3], "block": "minecraft:stone" }
+  ],
+  "players": [
+    {
+      "position": [0.5, 1.0, -1.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20
+    },
+    {
+      "position": [0.5, 1.0, 2.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": 180.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20
+    }
+  ]
+}

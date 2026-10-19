@@ -1,0 +1,38 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "raised-center-13x13-duel",
+  "profile": "unarmored_diamond_sword",
+  "bounds": { "min": [-7, 0, -7], "size": [15, 4, 15] },
+  "blocks": [
+    { "from": [-7, 0, -7], "to": [7, 0, 7], "block": "minecraft:stone" },
+    { "from": [-7, 1, -7], "to": [-7, 3, 7], "block": "minecraft:stone" },
+    { "from": [7, 1, -7], "to": [7, 3, 7], "block": "minecraft:stone" },
+    { "from": [-6, 1, -7], "to": [6, 3, -7], "block": "minecraft:stone" },
+    { "from": [-6, 1, 7], "to": [6, 3, 7], "block": "minecraft:stone" },
+    { "from": [-2, 1, -2], "to": [2, 1, 2], "block": "minecraft:stone" }
+  ],
+  "players": [
+    {
+      "position": [-5.5, 1.0, -5.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": -45.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20
+    },
+    {
+      "position": [5.5, 1.0, 5.5],
+      "velocity": [0.0, -0.078400001525878907, 0.0],
+      "yaw": 135.0,
+      "pitch": 0.0,
+      "on_ground": true,
+      "health": 20.0,
+      "absorption": 0.0,
+      "attack_strength_ticks": 20
+    }
+  ]
+}

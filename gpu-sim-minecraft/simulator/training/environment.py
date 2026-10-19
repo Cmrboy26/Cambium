@@ -1,0 +1,319 @@
+"""Host-staged two-player training adapter over the shared C++/CUDA simulator."""
+
+import ctypes
+import json
+import os
+from pathlib import Path
+import sys
+
+import numpy as np
+from simulator.training.contract import CATALOGUE_HASH, from_legacy, validate_contract
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MAX_TICKS = 300
+MAX_MAX_TICKS = 1_000_000
+ACTION_NAMES = ("movement", "jump", "sprint", "attack", "yaw", "pitch")
+ACTION_SIZES = (9, 2, 2, 2, 9, 5)
+BASE_REWARD_NAMES = ("doing_damage", "taking_damage", "won_duel", "death",
+                     "episode_timeout", "no_damage_penalty")
+SHAPING_REWARD_NAMES = ("good_aim", "proximity", "pitch_control", "aim_hold", "extreme_pitch_penalty")
+REWARD_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield", *SHAPING_REWARD_NAMES)
+REWARD_TYPE_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield")
+DEFAULT_REWARD_WEIGHTS = json.loads(Path(__file__).with_name("reward_weights.json").read_text(encoding="utf-8"))
+REWARD_SEMANTICS = "health_fraction_damage_episode_shaping_budgets_v2"
+SCHEMA = {
+    "id": "minecraft_sim_duel_22_v1",
+    "minecraft": "26.3",
+    "observation_dim": 22,
+    "observations": ["health/20", "yaw_wrapped/180", "pitch/90", "opponent_alive",
+                     "opponent_health/20", "relative_x/10", "relative_y/10", "relative_z/10",
+                     "opponent_yaw_wrapped/180", "opponent_pitch/90",
+                     *[f"eye_wall_ray_world_yaw_{angle}/50" for angle in range(0, 360, 45)],
+                     "min(distance/10,1)", "feet_relative_aim_dot", "yaw_error/180", "pitch_error/90"],
+    "action_names": list(ACTION_NAMES),
+    "action_sizes": list(ACTION_SIZES),
+    "movement": ["neutral", "forward", "forward_right", "right", "backward_right",
+                 "backward", "backward_left", "left", "forward_left"],
+    "yaw_bins": [-20, -10, -5, -2, 0, 2, 5, 10, 20],
+    "pitch_bins": [-5, -2, 0, 2, 5],
+    "ticks_per_action": 1,
+    "reward_profile": "accepted_hits_win_loss_timeout_v1",
+    "termination": "death_or_exit_xz_bounds_or_y_below_min_minus_4",
+    "timeout": "truncated_bootstrap_final_observation",
+}
+SCHEMA_V2 = {
+    **SCHEMA,
+    "id": "minecraft_sim_duel_31_v2",
+    "observation_dim": 31,
+    "observations": [*SCHEMA["observations"], "weapon_is_axe", "opponent_weapon_is_axe",
+                     "using_shield", "opponent_using_shield", "shield_disabled",
+                     "opponent_shield_disabled_observed", "min(shield_cooldown/100,1)",
+                     "attack_charge", "using_shield*min(shield_use_ticks/5,1)"],
+    "action_names": [*ACTION_NAMES, "weapon", "shield"],
+    "action_sizes": [*ACTION_SIZES, 2, 2],
+    "weapon": ["diamond_sword", "diamond_axe"],
+    "shield": ["release", "hold_use"],
+    "loadout": "unarmored_sword_axe_shield",
+    "opponent_disabled": "own_observed_axe_disable_event_then_100_tick_countdown",
+}
+SCHEMAS = {"v1": SCHEMA, "v2": SCHEMA_V2}
+
+
+def resolve_max_ticks(environment=None, override=None):
+    if override is not None:
+        max_ticks = override
+    else:
+        path = Path(environment) if environment else ROOT / "simulator" / "environments" / "duel.json"
+        definition = json.loads(path.read_text(encoding="utf-8"))
+        max_ticks = definition.get("max_ticks", DEFAULT_MAX_TICKS)
+    if type(max_ticks) is not int or not 1 <= max_ticks <= MAX_MAX_TICKS:
+        raise ValueError(f"max_ticks must be an integer from 1 to {MAX_MAX_TICKS}")
+    return max_ticks
+
+
+def resolve_reward_weights(definition, overrides=None):
+    resolved = DEFAULT_REWARD_WEIGHTS.copy()
+    for source in (definition.get("reward_weights", {}), {} if overrides is None else overrides):
+        if not isinstance(source, dict):
+            raise ValueError("reward_weights must be an object")
+        unknown = set(source) - set(REWARD_NAMES)
+        if unknown:
+            raise ValueError(f"Unknown reward weights: {', '.join(sorted(unknown))}")
+        for name, value in source.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"Reward weight {name} must be a finite number")
+            resolved[name] = float(value)
+    return resolved
+
+
+def load_library(library=None, device="cpu"):
+    suffix = ".dll" if sys.platform == "win32" else (".dylib" if sys.platform == "darwin" else ".so")
+    if library is not None:
+        candidates = [Path(library).resolve()]
+    else:
+        builds = sorted((ROOT / "simulator").glob("build*"),
+                        key=lambda path: ("cuda" not in path.name if device == "cuda" else path.name != "build", str(path)))
+        candidates = [build / configuration / ("minecraft_sim_training" + suffix)
+                      for build in builds for configuration in ("Release", "", "Debug")]
+    errors = []
+    os.environ.setdefault("OMP_NUM_THREADS", "4")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        directory = os.add_dll_directory(str(path.parent)) if sys.platform == "win32" else None
+        try:
+            native = ctypes.CDLL(str(path))
+            native.mcsim_api_version.restype = ctypes.c_int
+            if native.mcsim_api_version() != 2:
+                raise RuntimeError("Unsupported training library ABI; rebuild for health-normalized rewards")
+            native.mcsim_build_info.restype = ctypes.c_char_p
+            build_info = json.loads(native.mcsim_build_info())
+            if build_info.get("catalogue_hash") != CATALOGUE_HASH:
+                raise RuntimeError("Native policy catalogue differs from Python; rebuild the selected library")
+            expected_layout = {"scalar_bytes": {"observation": 4, "action": 4, "reward_total": 8, "done": 1},
+                               "reward_inputs": {"base": len(BASE_REWARD_NAMES), "shaping": len(SHAPING_REWARD_NAMES)},
+                               "reward_totals": {"base": len(REWARD_TYPE_NAMES), "shaping": len(SHAPING_REWARD_NAMES)},
+                               "players_per_environment": 2}
+            if any(build_info.get(name) != value for name, value in expected_layout.items()):
+                raise RuntimeError("Native buffer layout differs from Python; rebuild the selected library")
+            if device == "cuda" and not native.mcsim_cuda_available():
+                raise RuntimeError("Library has no available CUDA backend")
+            native._dll_directory = directory
+            native._build_info = {**build_info, "library_path": str(path), "device": device}
+            return native
+        except (OSError, AttributeError, RuntimeError, ValueError, TypeError) as error:
+            errors.append(f"{path}: {error}")
+            if directory is not None:
+                directory.close()
+    detail = "\n".join(errors) or "No built training library found."
+    raise RuntimeError(f"{detail}\nBuild target minecraft_sim_training; use --library to select it explicitly.")
+
+
+class Environment:
+    """Explicit-reset batch; step returns final observations, never auto-reset states."""
+
+    def __init__(self, environments=16, device="cpu", environment=None, library=None,
+                 max_ticks=None, seed=1, weights=None, schema="v1", contract=None):
+        if device not in ("cpu", "cuda"):
+            raise ValueError("device must be cpu or cuda")
+        if not 1 <= environments <= 65536 or not 0 <= seed < 2**64:
+            raise ValueError("Invalid environment count, episode length or seed")
+        max_ticks = resolve_max_ticks(environment, max_ticks)
+        path = Path(environment) if environment else ROOT / "simulator" / "environments" / "duel.json"
+        definition = json.loads(path.read_text(encoding="utf-8"))
+        if schema not in SCHEMAS:
+            raise ValueError("schema must be v1 or v2")
+        if contract is None and environment:
+            contract = definition.get("policy")
+        self.schema = validate_contract(contract) if contract is not None else SCHEMAS[schema]
+        self.contract = validate_contract(contract) if contract is not None else from_legacy(self.schema)
+        self.observation_dim = self.schema["observation_dim"]
+        self.action_names = tuple(self.schema["action_names"])
+        self.action_sizes = tuple(self.schema["action_sizes"])
+        self.action_count = len(self.action_names)
+        self.count = environments
+        self.device = device
+        self.max_ticks = max_ticks
+        self.weights = resolve_reward_weights(definition, weights)
+        self.effective_weights = {name: value / max_ticks if name in SHAPING_REWARD_NAMES else value
+                      for name, value in self.weights.items()}
+        reward_weights = np.array([self.effective_weights[name] for name in REWARD_NAMES], dtype=np.float32)
+        if not np.isfinite(reward_weights).all():
+            raise ValueError("Reward weights must be finite")
+        self.native = load_library(library, device)
+        self.build_info = self.native._build_info.copy()
+        pointer = ctypes.c_void_p
+        self.native.mcsim_last_error.restype = ctypes.c_char_p
+        set_block_reward = self.native.mcsim_set_block_reward
+        set_block_reward.argtypes = [pointer, ctypes.c_float]
+        set_block_reward.restype = ctypes.c_int
+        set_shaping_rewards = getattr(self.native, "mcsim_set_shaping_rewards", None)
+        if set_shaping_rewards is None:
+            raise RuntimeError("Rebuild minecraft_sim_training to enable shaping rewards")
+        set_shaping_rewards.argtypes = [pointer, pointer]
+        set_shaping_rewards.restype = ctypes.c_int
+        self.native.mcsim_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p,
+                                            ctypes.c_int, ctypes.c_uint64, pointer]
+        self.native.mcsim_create.restype = pointer
+        self.native.mcsim_destroy.argtypes = [pointer]
+        self.native.mcsim_destroy.restype = None
+        self.native.mcsim_environment.argtypes = [pointer]
+        self.native.mcsim_environment.restype = ctypes.c_char_p
+        for name, arguments in (("mcsim_observe", 2), ("mcsim_reset", 3), ("mcsim_step", 6)):
+            function = getattr(self.native, name)
+            function.argtypes = [pointer] * arguments
+            function.restype = ctypes.c_int
+        create = self.native.mcsim_create
+        arguments = (environments, int(device == "cuda"), os.fsencode(environment) if environment else None,
+                     max_ticks, seed, reward_weights.ctypes.data)
+        if contract is not None:
+            create = getattr(self.native, "mcsim_create_contract", None)
+            if create is None:
+                raise RuntimeError("Rebuild minecraft_sim_training to enable configured policy contracts")
+            create.argtypes = [*self.native.mcsim_create.argtypes, ctypes.c_char_p]
+            create.restype = pointer
+            arguments += (json.dumps(self.contract, allow_nan=False).encode("utf-8"),)
+        elif schema == "v2":
+            create = getattr(self.native, "mcsim_create_schema", None)
+            if create is None:
+                directory = getattr(self.native, "_dll_directory", None)
+                if directory is not None:
+                    directory.close()
+                raise RuntimeError("Rebuild minecraft_sim_training to enable the v2 sword/axe/shield schema")
+            create.argtypes = [*self.native.mcsim_create.argtypes, ctypes.c_int]
+            create.restype = pointer
+            arguments += (2,)
+        self._handle = create(*arguments)
+        if not self._handle:
+            raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
+        self.native.mcsim_batch_info.argtypes = [pointer]
+        self.native.mcsim_batch_info.restype = ctypes.c_char_p
+        native_layout = json.loads(self.native.mcsim_batch_info(self._handle))
+        expected_layout = {"environments": environments, "players_per_environment": 2,
+                           "observation_dim": self.observation_dim, "action_sizes": list(self.action_sizes)}
+        if native_layout != expected_layout:
+            self.close()
+            raise RuntimeError(f"Native batch layout differs from policy: {native_layout} != {expected_layout}")
+        shaping_weights = reward_weights[-len(SHAPING_REWARD_NAMES):]
+        for setter, value in ((set_block_reward, self.weights["blocked_with_shield"]),
+                              (set_shaping_rewards, shaping_weights.ctypes.data)):
+            if setter(self._handle, value) != 0:
+                error = self.native.mcsim_last_error().decode("utf-8", errors="replace")
+                self.close()
+                raise RuntimeError(error)
+        self.definition = json.loads(self.native.mcsim_environment(self._handle))
+        self.definition["reward_weights"] = self.weights.copy()
+        describe = getattr(self.native, "mcsim_scenario", None)
+        if describe is None:
+            self.close()
+            raise RuntimeError("Rebuild minecraft_sim_training to enable self-contained scenarios")
+        describe.argtypes = [pointer]
+        describe.restype = ctypes.c_char_p
+        self.scenario = json.loads(describe(self._handle))
+        self.scenario["reward_weights"] = self.weights.copy()
+        self._observations = np.empty((environments, 2, self.observation_dim), dtype=np.float32)
+        self._rewards = np.empty((environments, 2), dtype=np.float32)
+        self._terminated = np.empty(environments, dtype=np.uint8)
+        self._truncated = np.empty(environments, dtype=np.uint8)
+
+    def _check(self, result):
+        if result != 0:
+            raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
+
+    def _require_open(self):
+        if not self._handle:
+            raise RuntimeError("Environment is closed")
+
+    def observe(self):
+        self._require_open()
+        self._check(self.native.mcsim_observe(self._handle, self._observations.ctypes.data))
+        return self._observations.copy()
+
+    def reward_totals(self):
+        self._require_open()
+        function = getattr(self.native, "mcsim_reward_totals", None)
+        if function is None:
+            return None
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        totals = np.empty(len(REWARD_TYPE_NAMES), dtype=np.float64)
+        self._check(function(self._handle, totals.ctypes.data))
+        result = dict(zip(REWARD_TYPE_NAMES, totals.tolist()))
+        shaping = self.native.mcsim_shaping_reward_totals
+        shaping.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        shaping.restype = ctypes.c_int
+        shaping_totals = np.empty(len(SHAPING_REWARD_NAMES), dtype=np.float64)
+        self._check(shaping(self._handle, shaping_totals.ctypes.data))
+        result.update(zip(SHAPING_REWARD_NAMES, shaping_totals.tolist()))
+        return result
+
+    def replay_frame(self, environment=0):
+        self._require_open()
+        if not isinstance(environment, int) or not 0 <= environment < self.count:
+            raise ValueError("Replay environment index outside batch")
+        function = getattr(self.native, "mcsim_replay_frame", None)
+        if function is None:
+            raise RuntimeError("Rebuild minecraft_sim_training to enable replay snapshots")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        function.restype = ctypes.c_char_p
+        frame = function(self._handle, environment)
+        if frame is None:
+            raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
+        return json.loads(frame)
+
+    def reset(self, mask=None):
+        self._require_open()
+        raw = np.ones(self.count, dtype=np.uint8) if mask is None else np.asarray(mask)
+        if raw.shape != (self.count,) or raw.dtype.kind not in "bui" or not np.isin(raw, [0, 1]).all():
+            raise ValueError("Reset mask must contain one boolean per environment")
+        selected = np.ascontiguousarray(raw, dtype=np.uint8)
+        self._check(self.native.mcsim_reset(self._handle, selected.ctypes.data, self._observations.ctypes.data))
+        return self._observations.copy()
+
+    def step(self, actions):
+        self._require_open()
+        raw = np.asarray(actions)
+        if raw.shape != (self.count, 2, self.action_count) or raw.dtype.kind not in "iu":
+            raise ValueError(f"Actions must be an integer array [environments, 2, {self.action_count}]")
+        if np.any(raw < 0) or np.any(raw >= np.array(self.action_sizes)):
+            raise ValueError("Action index outside declared policy head")
+        packed = np.ascontiguousarray(raw, dtype=np.int32)
+        self._check(self.native.mcsim_step(self._handle, packed.ctypes.data,
+            self._observations.ctypes.data, self._rewards.ctypes.data,
+            self._terminated.ctypes.data, self._truncated.ctypes.data))
+        return (self._observations.copy(), self._rewards.copy(),
+                self._terminated.astype(bool), self._truncated.astype(bool))
+
+    def close(self):
+        if self._handle:
+            self.native.mcsim_destroy(self._handle)
+            self._handle = None
+        directory = getattr(self.native, "_dll_directory", None)
+        if directory is not None:
+            directory.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()

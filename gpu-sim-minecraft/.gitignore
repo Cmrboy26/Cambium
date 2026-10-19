@@ -1,0 +1,5 @@
+/minecraft-26.3/
+/minecraft-26.3-src/
+/.venv/
+**/__pycache__/
+/simulator/training/runs/
