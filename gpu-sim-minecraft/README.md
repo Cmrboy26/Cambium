@@ -35,6 +35,8 @@ Runs, metrics, checkpoints and replay samples are saved under
 | [Minecraft mod](cambiummod/README.md) | Install the mod, record sessions and run live duels. |
 | [Backend](backend/README.md) | Shared policy model and PPO constants. |
 
+For Linux setup and the standalone simulator on Rosie, see the [Rosie guide](rosie/README.md).
+
 Experiment with terrain, loadouts and policy inputs using
 [research-duel.json](simulator/environments/research-duel.json) and the
 [scenario contract](docs/simulation_contract.md).

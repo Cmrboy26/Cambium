@@ -1,5 +1,8 @@
 /minecraft-26.3/
 /minecraft-26.3-src/
 /.venv/
+/.venv-rosie/
 **/__pycache__/
+/rosie/logs/
+/simulator/build-rosie-cuda*/
 /simulator/training/runs/
