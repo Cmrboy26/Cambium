@@ -18,7 +18,7 @@ from backend.fast_rl_model import ActorCritic
 from simulator.training.contract import fingerprint, from_legacy, validate_contract
 from simulator.training.controllers import (
     BasicMeleeController, CheckpointController, Controller, CONTROLLER_REGISTRY,
-    StationaryTargetController, checkpoint_sha256, create_controller, register_controller,
+    SelfPlayController, StationaryTargetController, checkpoint_sha256, create_controller, register_controller,
 )
 from simulator.training.environment import SCHEMA
 
@@ -264,6 +264,35 @@ class ScriptedChecks(unittest.TestCase):
             register_controller("not:a:name", factory)
         with self.assertRaises(ValueError):
             register_controller("not_callable", None)
+
+    def test_self_play_uses_learner_weights_constraints_and_isolated_rng(self):
+        contract = policy()
+        model = ActorCritic(contract["observation_dim"], 8,
+                            action_sizes=dict(zip(contract["action_names"], contract["action_sizes"])))
+        initial_rng = torch.get_rng_state().clone()
+        controller = create_controller({"type": "self_play"}, contract, 4, seed=7, learner=model)
+        assert isinstance(controller, SelfPlayController)
+        self.assertIsInstance(controller, Controller)
+        inputs = observations(contract, 4)
+        controller.act(inputs)
+        torch.testing.assert_close(torch.get_rng_state(), initial_rng)
+        state = controller.state_dict()
+        expected = controller.act(inputs)
+        controller.load_state_dict(state)
+        np.testing.assert_array_equal(controller.act(inputs), expected)
+        controller.set_controls({"fixed": {"attack": False}})
+        self.assertFalse(decoded(contract, controller.act(inputs), "attack").any())
+        deterministic = create_controller({"type": "self_play", "deterministic": True},
+                                          contract, 4, learner=model)
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.zero_()
+        np.testing.assert_array_equal(deterministic.act(inputs), np.zeros((4, 4), dtype=np.int64))
+        with torch.no_grad():
+            model.attack_head.bias[1] = 100
+        self.assertTrue(decoded(contract, deterministic.act(inputs), "attack").all())
+        self.assertTrue(model.training)
+        self.assertTrue(all(parameter.requires_grad for parameter in model.parameters()))
 
     def test_invalid_definitions(self):
         for definition in (None, [], {}, {"type": "bad"},

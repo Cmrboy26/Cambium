@@ -78,7 +78,7 @@ not a fully GPU-resident PPO pipeline.
 	policy layout and version-2 training plans. Paths resolve relative to the
 	file containing them. The compiler produces one self-contained resolved
 	experiment for training, checkpoints and the dashboard.
-- Training plans provide scripted/frozen checkpoint opponent pools, constrained
+- Training plans provide scripted/frozen checkpoint/self-play opponent pools, constrained
 	curricula and reset-time scenario sampling. The equipment policy uses a fixed set of
 	78 named features, including shield presence, own slot metadata and visible
 	opponent equipment (not hidden opponent inventory).

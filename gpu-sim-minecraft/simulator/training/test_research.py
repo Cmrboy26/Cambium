@@ -52,14 +52,15 @@ class PlanChecks(unittest.TestCase):
         self.assertEqual(stage["name"], "combat")
         self.assertEqual(stage["advance"], {"updates": 1500})
         self.assertEqual(stage["controls"], {"fixed": {}})
+        self.assertEqual(plan["opponents"]["policy"], {"type": "self_play"})
         self.assertTrue(all(opponent["type"] == "scripted" and opponent["controller"] == "basic_melee"
-                            for opponent in plan["opponents"].values()))
+                            for name, opponent in plan["opponents"].items() if name != "policy"))
         self.assertEqual(stage["opponents"], [
             {"id": "shield_fighter", "weight": 1}, {"id": "axe_fighter", "weight": 1},
-            {"id": "shield_axe_fighter", "weight": 2}])
+            {"id": "shield_axe_fighter", "weight": 2}, {"id": "policy", "weight": 4}])
         evaluation = plan["evaluations"]["axe_shield_combat"]
         self.assertEqual((evaluation["every_updates"], evaluation["episodes"]), (50, 64))
-        self.assertEqual(evaluation["opponents"], stage["opponents"])
+        self.assertEqual(evaluation["opponents"], stage["opponents"][:-1])
         for condition in (stage, evaluation):
             scenario = condition["scenario"]
             self.assertNotIn("equipment", scenario)
@@ -84,8 +85,15 @@ class PlanChecks(unittest.TestCase):
 
     def test_shield_axe_curriculum_budgets_and_spawn_equipment(self):
         plan = resolve_plan(preset(SHIELD_AXE_PRESET))
-        self.assertEqual([stage["advance"]["updates"] for stage in plan["stages"]], [150, 250, 350, 750])
+        self.assertEqual([stage["advance"]["updates"] for stage in plan["stages"]], [100, 200, 200, 1000])
         self.assertEqual(sum(stage["advance"]["updates"] for stage in plan["stages"]), 1500)
+        self.assertEqual(plan["opponents"]["policy"], {"type": "self_play"})
+        mixture = plan["stages"][-1]["opponents"]
+        self.assertEqual(mixture[-1], {"id": "policy", "weight": 10})
+        self.assertEqual(sum(entry["weight"] for entry in mixture[:-1]), 10)
+        self.assertEqual(plan["evaluations"]["shield_axe_combat"]["opponents"], mixture[:-1])
+        for stage in plan["stages"][:-1]:
+            self.assertNotIn("policy", [entry["id"] for entry in stage["opponents"]])
         scenario = plan["stages"][1]["scenario"]
         sampler = EpisodeSampler(scenario, 16, 42)
         for world in range(16):
@@ -213,6 +221,41 @@ class ResearchChecks(unittest.TestCase):
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4",
                       "--hidden-dim", "8", "--rollout-steps", "3", "--epochs", "1",
                       "--minibatch-size", "8", "--max-ticks", "2", "--save-every", "1"]
+
+    def test_self_play_training_resume_evaluation_and_replay(self):
+        plan = short_plan()
+        plan["opponents"]["policy"] = {"type": "self_play"}
+        plan["mixtures"]["self_play"] = [{"id": "policy", "weight": 1}]
+        for stage in plan["stages"]:
+            stage["opponents"] = "self_play"
+        plan["evaluations"] = {"self_play": {
+            "environment": plan["environment"], "every_updates": 1, "episodes": 4,
+            "seed": 1729, "opponents": "self_play"}}
+        self.path.write_text(json.dumps(plan))
+        output = self.directory / "self-play"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(output), "--replay-every", "4"])
+        checkpoint = torch.load(output / "latest.pt", weights_only=True)
+        controller = checkpoint["research"]["pool"]["controllers"]["policy"]
+        self.assertEqual(controller["provenance"]["type"], "self_play")
+        self.assertIn("rng_state", controller)
+        self.assertNotIn("model", controller)
+        replay = next((output / "replays").glob("*.jsonl"))
+        with replay.open() as source:
+            header = json.loads(source.readline())
+        self.assertEqual(header["training"]["opponent"]["controller"]["type"], "self_play")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library,
+                  "--updates", "1", "--output", str(output)])
+        resumed = torch.load(output / "latest.pt", weights_only=True)
+        self.assertEqual(resumed["update"], 2)
+        self.assertEqual(resumed["samples"], 24)
+        rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertTrue(all(row["evaluations"]["self_play"]["episodes"] == 4 for row in rows))
+        self.assertTrue(all(np.isfinite(row["loss"]) for row in rows))
+        for row in rows:
+            np.testing.assert_allclose(sum(row["reward_types"].values()), row["reward_total"],
+                                       rtol=1e-6, atol=2e-5)
 
     def test_axe_shield_fighting_training_evaluation_and_replay(self):
         plan = preset(AXE_SHIELD_FIGHTING_PRESET)

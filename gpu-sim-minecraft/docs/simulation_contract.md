@@ -124,7 +124,7 @@ a changed training task/layout; restart the service when switching checkpoints.
 Active sessions do not hot-swap contracts, equipment or weights.
 The live service exposes experiment/stage provenance in `/info`; the mod shows
 that deployment context. Both live actors use the same served learner and fixed
-checkpoint conditions. Scripted/checkpoint opponent pools, curriculum advancement
+checkpoint conditions. Scripted/checkpoint/self-play opponent pools, curriculum advancement
 and reset-time distribution sampling are trainer functionality, not live-duel
 features. The dashboard reads resolved experiments and metrics; it does not edit
 plans or launch training.

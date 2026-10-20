@@ -14,7 +14,7 @@ import torch
 
 from backend.fast_rl_model import ActorCritic, FastRLAgent
 from simulator.training.contract import fingerprint
-from simulator.training.controllers import create_controller
+from simulator.training.controllers import SelfPlayController, create_controller
 from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions
@@ -129,21 +129,24 @@ class SampledWorlds:
 
 
 class OpponentPool:
-    def __init__(self, definitions, contract, count, device, seed):
+    def __init__(self, definitions, contract, count, device, seed, learner=None):
         self.count = count
         self.names = list(definitions)
         streams = np.random.SeedSequence(seed).spawn(2)
         self.rng, self.side_rng = [np.random.default_rng(stream) for stream in streams]
         self.controllers = {name: create_controller(definition, contract, count, device,
-            int(np.random.SeedSequence([seed, index + 1]).generate_state(1)[0]))
+            int(np.random.SeedSequence([seed, index + 1]).generate_state(1)[0]), learner=learner)
             for index, (name, definition) in enumerate(definitions.items())}
         self.assignments = np.zeros(count, dtype=int)
         self.learner_slots = np.zeros(count, dtype=int)
         self.mixture: list[dict] = []
 
-    def configure(self, mixture):
+    def configure(self, mixture, controls=None):
         weights(mixture)
         self.mixture = mixture
+        for controller in self.controllers.values():
+            if isinstance(controller, SelfPlayController):
+                controller.set_controls({"fixed": {}} if controls is None else controls)
 
     def reset(self, mask):
         if not self.mixture:
@@ -251,8 +254,8 @@ def evaluate(model, plan, suite, options, device, fixed):
     was_training = model.training
     model.eval()
     try:
-        pool = OpponentPool(plan["opponents"], plan["policy"], count, options.device, suite["seed"])
-        pool.configure(suite["opponents"])
+        pool = OpponentPool(plan["opponents"], plan["policy"], count, options.device, suite["seed"], learner=model)
+        pool.configure(suite["opponents"], suite["controls"])
         total = wins = finished = 0
         episode_rewards = np.zeros(count)
         observations = worlds.observe()
@@ -299,8 +302,8 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
             with Environment(1, options.device, path, options.library, options.max_ticks,
                              plan["seed"], contract=plan["policy"]) as environment:
                 pool = OpponentPool({provenance["id"]: plan["opponents"][provenance["id"]]},
-                                    plan["policy"], 1, options.device, plan["seed"])
-                pool.configure([{"id": provenance["id"], "weight": 1}])
+                                    plan["policy"], 1, options.device, plan["seed"], learner=model)
+                pool.configure([{"id": provenance["id"], "weight": 1}], stage["controls"])
                 pool.reset(np.ones(1, dtype=bool))
                 pool.learner_slots[:] = provenance["learner_slot"]
                 fixed = fixed_indices(plan["policy"], stage["controls"])
@@ -394,11 +397,11 @@ def run(options, checkpoint=None):
     worlds = SampledWorlds(stage["scenario"], plan["policy"], options.envs, options.device, options.library,
                           options.max_ticks, plan["seed"], saved.get("sampler"))
     try:
-        pool = OpponentPool(plan["opponents"], plan["policy"], options.envs, options.device, plan["seed"])
-        pool.configure(stage["opponents"])
         model = ActorCritic(worlds.observation_dim, options.hidden_dim, movement_bins=9,
                             action_sizes=dict(zip(worlds.action_names, plan["policy"]["action_sizes"]))).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=options.lr, eps=1e-5)
+        pool = OpponentPool(plan["opponents"], plan["policy"], options.envs, options.device, plan["seed"], learner=model)
+        pool.configure(stage["opponents"], stage["controls"])
         if checkpoint is not None:
             if (checkpoint.get("format") != "minecraft_sim_ppo" or checkpoint.get("version") != 1
                     or checkpoint["metadata"].get("reward_semantics") != REWARD_SEMANTICS
@@ -493,7 +496,7 @@ def run(options, checkpoint=None):
                         worlds.reset()
                     stage = next_stage
                     observations = worlds.observe()
-                    pool.configure(stage["opponents"])
+                    pool.configure(stage["opponents"], stage["controls"])
                     pool.reset(np.ones(options.envs, dtype=bool))
                     progress = {"updates": 0, "episodes": 0, "transitions": 0}
                     evaluations = {}

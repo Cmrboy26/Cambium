@@ -7,7 +7,7 @@ Keep human-facing startup commands in [README.md](README.md).
 
 Standalone training reuses backend `ActorCritic`/PPO loss without FastAPI,
 Minecraft, RCON or legacy timers. Each world has one learner and one independently
-selected scripted/checkpoint opponent; worlds are independent. Both decisions
+selected scripted/checkpoint/self-play opponent; worlds are independent. Both decisions
 use the same pre-tick observation before ordered
 physics updates. Hold weights fixed through a rollout, then synchronously update
 PPO minibatches. Only learner decisions enter PPO. Distributed/multi-GPU
@@ -86,13 +86,14 @@ that pretend to enable them or allocate mutable terrain for unchanged worlds.
 
 ### Controllers And Constraints
 
-`opponents` maps IDs to either:
+`opponents` maps IDs to supported controller definitions:
 
 ```json
 {
   "target": {"type":"scripted","controller":"stationary_target"},
   "fighter": {"type":"scripted","controller":"basic_melee","options":{"strafe":true}},
-  "frozen": {"type":"checkpoint","path":"simulator/training/runs/baseline/latest.pt"}
+  "frozen": {"type":"checkpoint","path":"simulator/training/runs/baseline/latest.pt"},
+  "policy": {"type":"self_play"}
 }
 ```
 
@@ -101,6 +102,15 @@ semantic contracts and finite parameters are required. Their SHA256 identities
 are embedded in the plan; changed opponents reject resume. Different legacy or
 custom layouts require explicit adapters and are not implicitly remapped.
 Checkpoints do not import their optimizer or curriculum into the opponent.
+
+Self-play binds to the current learner model, with weights fixed during each
+rollout and following subsequent PPO updates, including episodes spanning updates.
+It acts from the opposing player's own observations and honors the current
+stage/evaluation fixed controls. Only the designated learner's transitions enter
+PPO. Sampling uses a separate, checkpointed RNG; the learner weights are saved
+once, not duplicated in controller state. Optional `deterministic: true` selects
+argmax actions; default inference samples actions. Evaluation and replay pools
+bind to the same learner without changing training-pool RNG state.
 
 Use [controllers.py](controllers.py)'s `register_controller`, or an explicit
 trusted `package.module:factory` controller name. Factories receive `contract`,
@@ -182,7 +192,7 @@ branches.
 ## Shield/Axe Curriculum Preset
 
 [shield-axe-curriculum.json](../setups/curricula/shield-axe-curriculum.json) is a 1,500-update
-experiment: aiming 150, attack timing 250, pursuit 350, equipment combat 750.
+experiment: aiming 100, attack timing 200, pursuit 200, equipment combat 1,000.
 Budgets are fixed updates, not evaluation thresholds. The run needs an invocation
 cap of at least 1,500 updates to finish in one invocation.
 The preset owns its H100-oriented learner settings: hidden width 512, two PPO
@@ -199,14 +209,25 @@ knockback cannot permanently put the target out of reach. It fixes sprint,
 jump, shield and weapon selection. The pursuit stage introduces moving/attacking
 sword opponents; the final stage releases all constraints.
 
-Final opponent probabilities are 10% sword fighter, 30% shield fighter,
-30% axe-switching fighter, 30% shield-and-axe fighter. These describe controller
+Final training opponent probabilities are 50% current learner policy, 5% sword
+fighter, 15% shield fighter, 15% axe-switching fighter and 15% shield-and-axe
+fighter. The first three stages remain scripted-only. These describe controller
 behaviors, not guaranteed gear: absent-axe fighters fall back to their sword;
 absent-shield fighters do not request shield use. Optional gear observations
 gate builtin equipment choices; older contracts without those features retain
 their existing behavior. Fixed-seed held-out combat evaluation runs 64 episodes
-every 50 global updates with unrestricted learner controls. It monitors progress
-without advancing stages early.
+every 50 global updates with unrestricted learner controls and the original
+scripted-only 10%/30%/30%/30% mix. It monitors progress without advancing stages
+early, so its win rate does not include self-play wins.
+
+[axe-shield-fighting.json](../setups/curricula/axe-shield-fighting.json) trains
+one unrestricted 1,500-update combat stage, also with 50% current-policy
+opponents. Its remaining episodes preserve the scripted shield/axe/combined
+fighter ratio of 1:1:2, and its held-out evaluation remains scripted-only.
+Opponent selection is sampled per episode, so these are probabilities rather
+than exact per-rollout quotas. Resuming an older checkpoint preserves its
+embedded mixtures; use a new run or `--initialize` with the edited plan to adopt
+self-play instead of changing a resumed experiment.
 
 This is a starting research budget, not a convergence claim or measured H100
 runtime. No block edits, procedural terrain or checkpoint opponents are used.

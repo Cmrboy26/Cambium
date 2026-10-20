@@ -216,8 +216,12 @@ def _opponents(value, base_dir):
             if type(opponent.get("deterministic", False)) is not bool:
                 raise ValueError("Opponent deterministic must be boolean")
             opponent.update(path=str(path), sha256=digest)
+        elif opponent.get("type") == "self_play":
+            fields(opponent, ("type", "deterministic"), "self-play opponent")
+            if type(opponent.get("deterministic", False)) is not bool:
+                raise ValueError("Opponent deterministic must be boolean")
         else:
-            raise ValueError("Opponent type must be scripted or checkpoint")
+            raise ValueError("Opponent type must be scripted, checkpoint or self_play")
     return result
 
 

@@ -55,6 +55,10 @@ const config = {options:{device:'cpu',updates:1000,seed:0},metadata:{environment
 context.fixture=config;
 vm.runInContext('records=[]; renderConfig(fixture); renderCurriculum();',context);
 assert.match(text('curriculum-status'),/Initial stage: aim/);
+assert.equal(text('run-title'),experiment.name,'Run identity must be literal text');
+assert.match(text('run-identity'),/Seed 17.*Compute cpu.*Learning rate 0.01.*PPO epochs 3.*Minibatch 16/);
+assert.match(text('run-context'),/Aim environment.*target.*100%.*attack=false/);
+assert.equal(text('run-stage-status'),text('curriculum-status'));
 assert.match(text('stage-context'),/Aim environment.*Flat.*target.*100%.*attack=false/);
 assert.match(text('config'),/Seed 17.*Learning rate 0.01/);
 assert.equal(hidden('experiment-details'),false);
@@ -68,6 +72,8 @@ vm.runInContext(`records=[{update:2,stage:'aim',stage_index:0,next_stage_index:1
     curriculum_boundary:{reset_worlds:2,next_stage:'fight'},
     evaluations:{'<held>':{win_rate:0.75,reward_mean:-1.5,episodes:4}}}]; renderCurriculum();`,context);
 assert.match(text('curriculum-status'),/Upcoming stage: fight.*latest rollout is from aim/);
+assert.match(text('run-context'),/Aim environment.*target.*100%/,'Boundary summary must describe the latest rollout, not the upcoming stage');
+assert.match(text('run-budget'),/updates: 2 \/ 2/);
 assert.match(text('stage-summary'),/Latest rollout stage aim.*updates: 2 \/ 2.*Not complete.*Upcoming stage fight/);
 assert.match(text('stage-context-title'),/Latest rollout conditions — aim/);
 assert.equal(hidden('upcoming-stage'),false);
@@ -77,18 +83,24 @@ assert.match(text('evaluations'),/<held> 2 aim 75% -1.5 4/);
 vm.runInContext(`records.push({update:3,stage:'fight',stage_index:1,next_stage_index:1,stage_progress:{updates:1,episodes:4,transitions:32},
     completed_curriculum:false,evaluations:{}}); renderCurriculum();`,context);
 assert.match(text('curriculum-status'),/Active stage.*fight/);
+assert.match(text('run-context'),/Fight environment.*sword \(25%\).*axe \(75%\)/);
 assert.equal(hidden('upcoming-stage'),true);
 assert.match(text('stage-summary'),/ALL \(episodes: 4 \/ 10; ANY \(updates: 1 \/ 4; transitions: 32 \/ 128\)\)/);
 assert.match(text('evaluations'),/<held> 2 aim 75% -1.5 4/,'Periodic results must retain their original update/stage');
 vm.runInContext(`records.push({update:4,stage:'fight',stage_index:1,next_stage_index:1,
     stage_progress:{updates:2,episodes:10,transitions:128},completed_curriculum:true}); renderCurriculum();`,context);
 assert.equal(text('curriculum-status'),'Curriculum complete','Completion is explicit, not inferred from final stage');
+assert.equal(text('run-stage-status'),'Curriculum complete');
 assert.equal(hidden('upcoming-stage'),true,'Complete wins over stale next stage');
 assert.match(text('stage-timeline'),/3–4 fight.*Curriculum complete/);
 vm.runInContext(`records=[{update:1}]; renderConfig({options:{seed:5},metadata:{environment:{name:'Historical'}}}); renderCurriculum();`,context);
 assert.equal(hidden('curriculum'),true);
 assert.equal(hidden('experiment-details'),true);
 assert.equal(text('environment-name'),'Historical');
+assert.equal(text('run-title'),'Historical');
+assert.match(text('run-identity'),/Seed 5/);
+assert.match(text('run-context'),/Historical/);
+assert.doesNotMatch(text('run-context'),/sword|axe|Fight environment/,'Switching to historical runs must clear stage context');
 vm.runInContext(`records=[]; renderConfig({plan:{name:'Old plan',scenario:{base:'missing.json'},controls:{fixed:{attack:true}},
     stages:[{name:'old'}]}}); renderCurriculum();`,context);
 assert.match(text('curriculum-status'),/Initial stage: old/);

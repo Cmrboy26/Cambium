@@ -7,6 +7,7 @@
   "environment": "../environments/shield-axe-duel.json",
   "learner": {"hidden_dim": 512, "lr": 0.0003, "epochs": 2, "minibatch_size": 16384},
   "opponents": {
+    "policy": {"type": "self_play"},
     "stationary": {"type": "scripted", "controller": "stationary_target"},
     "sword_fighter": {"type": "scripted", "controller": "basic_melee",
                        "options": {"strafe": true, "sprint": true}},
@@ -24,7 +25,12 @@
     "shield_axe": [{"id": "sword_fighter", "weight": 1},
                    {"id": "shield_fighter", "weight": 3},
                    {"id": "axe_fighter", "weight": 3},
-                   {"id": "shield_axe_fighter", "weight": 3}]
+                   {"id": "shield_axe_fighter", "weight": 3}],
+    "shield_axe_training": [{"id": "sword_fighter", "weight": 1},
+                            {"id": "shield_fighter", "weight": 3},
+                            {"id": "axe_fighter", "weight": 3},
+                            {"id": "shield_axe_fighter", "weight": 3},
+                            {"id": "policy", "weight": 10}]
   },
   "evaluations": {
     "shield_axe_combat": {
@@ -40,7 +46,7 @@
       "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false,
                              "attack": false, "weapon": 0, "shield": false}},
       "task_override": {"rewards": {"good_aim": 5, "aim_hold": 2}},
-      "advance": {"updates": 150}
+      "advance": {"updates": 100}
     },
     {
       "name": "attack_timing",
@@ -51,19 +57,19 @@
       "opponents": "target",
       "controls": {"fixed": {"jump": false, "sprint": false, "weapon": 0, "shield": false}},
       "task_override": {"rewards": {"doing_damage": 10, "won_duel": 20, "good_aim": 1, "aim_hold": 1}},
-      "advance": {"updates": 250}
+      "advance": {"updates": 200}
     },
     {
       "name": "pursuit",
       "opponents": "pursuit",
       "controls": {"fixed": {"jump": false, "weapon": 0, "shield": false}},
-      "advance": {"updates": 350}
+      "advance": {"updates": 200}
     },
     {
       "name": "shield_axe_combat",
-      "opponents": "shield_axe",
+      "opponents": "shield_axe_training",
       "controls": {"fixed": {}},
-      "advance": {"updates": 750}
+      "advance": {"updates": 1000}
     }
   ]
 }

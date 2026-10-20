@@ -11,6 +11,7 @@ axe_slot/sword_slot (explicit loadout slots, supplied together). Equipment
 behaviors require their relevant observations and controls, never guessed slots.
 Checkpoint files are trusted standalone PPO archives, loaded with weights_only.
 Both shared-policy and opponent-pool checkpoints retain saved fixed controls.
+Self-play uses the bound learner's rollout-frozen weights and its own sampling RNG.
 """
 
 from copy import deepcopy
@@ -19,11 +20,14 @@ import importlib
 import io
 import math
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 import numpy as np
 
 from simulator.training.contract import fingerprint, from_legacy, validate_contract
+
+if TYPE_CHECKING:
+    import torch
 
 
 @runtime_checkable
@@ -301,7 +305,78 @@ class BasicMeleeController(StationaryTargetController):
         self._ticks[:] = ticks
 
 
-class CheckpointController(_BatchedController):
+class _PolicyController(_BatchedController):
+    model: "torch.nn.Module"
+    device: "torch.device"
+    deterministic: bool
+    _fixed: dict[str, int]
+    _generator: "torch.Generator"
+
+    def act(self, observations, indices=None):
+        import torch
+
+        observations, _ = self._batch(observations, indices)
+        if not len(observations):
+            return np.empty((0, len(self.contract["actions"])), dtype=np.int64)
+        with torch.inference_mode():
+            inputs = torch.as_tensor(np.array(observations, dtype=np.float32, copy=True), device=self.device)
+            if not torch.isfinite(inputs).all():
+                raise ValueError("Observations are not finite at model precision")
+            logits, _ = self.model(inputs)
+            if not all(torch.isfinite(value).all() for value in logits.values()):
+                raise ValueError("Policy inference produced non-finite logits")
+            actions = [
+                torch.full((len(observations),), self._fixed[name], dtype=torch.long, device=self.device)
+                if name in self._fixed else
+                logits[name].argmax(-1) if self.deterministic else
+                torch.multinomial(logits[name].softmax(-1), 1, generator=self._generator).squeeze(-1)
+                for name in self.contract["action_names"]
+            ]
+            return torch.stack(actions, dim=-1).cpu().numpy()
+
+    def state_dict(self):
+        return {**super().state_dict(), "rng_state": self._generator.get_state().clone()}
+
+    def load_state_dict(self, state):
+        import torch
+
+        self._state(state, ("rng_state",))
+        value = state["rng_state"]
+        if not isinstance(value, torch.Tensor) or value.dtype != torch.uint8 or value.ndim != 1:
+            raise ValueError("Invalid controller RNG state")
+        try:
+            self._generator.set_state(value.cpu())
+        except RuntimeError as error:
+            raise ValueError("Invalid controller RNG state") from error
+
+
+class SelfPlayController(_PolicyController):
+    def __init__(self, learner, contract, count, device="cpu", seed=1, deterministic=False):
+        import torch
+
+        super().__init__(contract, count, seed)
+        if learner is None:
+            raise ValueError("Self-play requires the learner policy model")
+        if type(deterministic) is not bool:
+            raise ValueError("deterministic must be boolean")
+        self.model = learner
+        self.device = next(learner.parameters()).device
+        requested = torch.device(device)
+        if (requested.type != self.device.type
+                or requested.index is not None and requested.index != self.device.index):
+            raise ValueError("Self-play and learner devices must match")
+        self.deterministic = deterministic
+        self._fixed = {}
+        self._generator = torch.Generator(device=self.device).manual_seed(self.seed)
+        self._description.update(type="self_play", device=str(self.device), deterministic=deterministic)
+
+    def set_controls(self, controls):
+        from simulator.training.policies import fixed_indices
+
+        self._fixed = fixed_indices(self.contract, controls)
+
+
+class CheckpointController(_PolicyController):
     def __init__(self, path, contract, count, device="cpu", seed=1, deterministic=False,
                  expected_sha256=None):
         import torch
@@ -366,46 +441,9 @@ class CheckpointController(_BatchedController):
         if expected != self.sha256 or checkpoint_sha256(self.path) != self.sha256:
             raise ValueError("Checkpoint SHA256 differs from the resolved plan")
 
-    def act(self, observations, indices=None):
-        import torch
 
-        observations, _ = self._batch(observations, indices)
-        if not len(observations):
-            return np.empty((0, len(self.contract["actions"])), dtype=np.int64)
-        with torch.inference_mode():
-            inputs = torch.as_tensor(np.array(observations, dtype=np.float32, copy=True), device=self.device)
-            if not torch.isfinite(inputs).all():
-                raise ValueError("Observations are not finite at model precision")
-            logits, _ = self.model(inputs)
-            if not all(torch.isfinite(value).all() for value in logits.values()):
-                raise ValueError("Checkpoint inference produced non-finite logits")
-            actions = [
-                torch.full((len(observations),), self._fixed[name], dtype=torch.long, device=self.device)
-                if name in self._fixed else
-                logits[name].argmax(-1) if self.deterministic else
-                torch.multinomial(logits[name].softmax(-1), 1, generator=self._generator).squeeze(-1)
-                for name in self.contract["action_names"]
-            ]
-            return torch.stack(actions, dim=-1).cpu().numpy()
-
-    def state_dict(self):
-        return {**super().state_dict(), "rng_state": self._generator.get_state().clone()}
-
-    def load_state_dict(self, state):
-        import torch
-
-        self._state(state, ("rng_state",))
-        value = state["rng_state"]
-        if not isinstance(value, torch.Tensor) or value.dtype != torch.uint8 or value.ndim != 1:
-            raise ValueError("Invalid controller RNG state")
-        try:
-            self._generator.set_state(value.cpu())
-        except RuntimeError as error:
-            raise ValueError("Invalid controller RNG state") from error
-
-
-def create_controller(definition, contract, count, device="cpu", seed=1) -> Controller:
-    """Instantiate an explicit builtin/registered/imported factory or checkpoint."""
+def create_controller(definition, contract, count, device="cpu", seed=1, *, learner=None) -> Controller:
+    """Instantiate a scripted/checkpoint opponent or learner-bound self-play."""
     if not isinstance(definition, dict):
         raise ValueError("Controller definition must be an object")
     kind = definition.get("type")
@@ -433,6 +471,10 @@ def create_controller(definition, contract, count, device="cpu", seed=1) -> Cont
         if not isinstance(controller, Controller):
             raise ValueError("Custom controller does not implement the Controller protocol")
         return controller
+    if kind == "self_play":
+        _options(definition, ("type", "deterministic"))
+        return SelfPlayController(learner, contract, count, device, seed,
+                                  definition.get("deterministic", False))
     if kind == "checkpoint":
         _options(definition, ("type", "path", "deterministic", "sha256"))
         path = definition.get("path")
