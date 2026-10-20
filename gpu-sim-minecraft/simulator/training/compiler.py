@@ -26,6 +26,7 @@ SCENE_FIELDS = ("format", "version", "minecraft", "name", "profile", "requires",
 CONDITION_FIELDS = ("environment", "spawns", "equipment", "task_override", "opponents", "controls")
 RESOLVED_CONDITION_FIELDS = ("scenario", "opponents", "controls", "rewards",
                              "environment_name", "arena_names")
+EVALUATION_FIELDS = ("every_updates", "episodes", "seed", "worlds")
 
 
 def _name(value, label):
@@ -255,6 +256,22 @@ def _resolved_condition(value, policy, opponents):
     return result
 
 
+def _resolved_evaluations(value, policy, opponents):
+    if not isinstance(value, dict):
+        raise ValueError("Evaluations must be named suites")
+    result = {}
+    for name, suite in value.items():
+        _name(name, "Evaluation name")
+        fields(suite, (*RESOLVED_CONDITION_FIELDS, *EVALUATION_FIELDS), "resolved evaluation")
+        positive(suite.get("every_updates"), "evaluation interval")
+        positive(suite.get("episodes"), "evaluation episodes")
+        _seed(suite.get("seed"), "Evaluation seed")
+        if "worlds" in suite:
+            positive(suite["worlds"], "evaluation worlds")
+        result[name] = _resolved_condition(suite, policy, opponents)
+    return result
+
+
 def _resolved(value, base_dir):
     fields(value, ("format", "version", "name", "seed", "policy", "learner", "opponents",
                    "stages", "evaluations", "scenario"), "resolved experiment")
@@ -265,28 +282,27 @@ def _resolved(value, base_dir):
     result["policy"] = _policy(result.get("policy"))
     result["learner"] = _learner(result.get("learner", {}))
     result["opponents"] = _opponents(result.get("opponents"), base_dir)
-    evaluations = result.setdefault("evaluations", {})
-    if not isinstance(evaluations, dict):
-        raise ValueError("Evaluations must be named suites")
+    evaluations = _resolved_evaluations(result.get("evaluations", {}), result["policy"], result["opponents"])
+    result["evaluations"] = evaluations
     stages = result.get("stages")
     if not isinstance(stages, list) or not stages:
         raise ValueError("Plan needs at least one stage")
     names = set()
+    suite_names = set(evaluations)
     for index, stage in enumerate(stages):
-        fields(stage, (*RESOLVED_CONDITION_FIELDS, "name", "advance"), "resolved stage")
+        fields(stage, (*RESOLVED_CONDITION_FIELDS, "name", "advance", "evaluations"), "resolved stage")
         name = _name(stage.get("name"), "Stage name")
         if name in names:
             raise ValueError("Stage names must be unique")
         names.add(name)
-        advance_rule(stage.get("advance"), evaluations)
+        local = _resolved_evaluations(stage.get("evaluations", {}), result["policy"], result["opponents"])
+        if suite_names.intersection(local):
+            raise ValueError("Evaluation names must be unique across the plan")
+        suite_names.update(local)
+        if "evaluations" in stage:
+            stage["evaluations"] = local
+        advance_rule(stage.get("advance"), {**evaluations, **local})
         stages[index] = _resolved_condition(stage, result["policy"], result["opponents"])
-    for name, suite in evaluations.items():
-        _name(name, "Evaluation name")
-        fields(suite, (*RESOLVED_CONDITION_FIELDS, "every_updates", "episodes", "seed"), "resolved evaluation")
-        positive(suite.get("every_updates"), "evaluation interval")
-        positive(suite.get("episodes"), "evaluation episodes")
-        _seed(suite.get("seed"), "Evaluation seed")
-        evaluations[name] = _resolved_condition(suite, result["policy"], result["opponents"])
     if "scenario" in result and result["scenario"] != stages[0]["scenario"]:
         raise ValueError("Experiment default scenario must equal its first stage")
     result["scenario"] = deepcopy(stages[0]["scenario"])
@@ -349,8 +365,15 @@ class _Authoring:
             }
         return deepcopy(self.environments[path])
 
-    def condition(self, value, default_environment, mixtures, policy, opponents):
-        result = self.environment(value.get("environment", default_environment))
+    def condition(self, value, default_environment, mixtures, policy, opponents, base=None):
+        if base is None or "environment" in value:
+            result = self.environment(value.get("environment", default_environment))
+            if base is not None:
+                source = base["scenario"]["arenas"][0]["environment"]
+                concrete = result["scenario"]["arenas"][0]["environment"]
+                concrete.update(max_ticks=source["max_ticks"], reward_weights=deepcopy(source["reward_weights"]))
+        else:
+            result = {key: deepcopy(base[key]) for key in RESOLVED_CONDITION_FIELDS if key in base}
         scenario = result["scenario"]
         for component in ("spawns", "equipment"):
             if component in value:
@@ -367,13 +390,55 @@ class _Authoring:
         task = _task(task)
         concrete.update(max_ticks=task["max_ticks"], reward_weights=task["rewards"])
         result["scenario"] = _scenario(scenario)
-        mixture = value.get("opponents")
-        if not isinstance(mixture, str) or mixture not in mixtures:
-            raise ValueError("Stage/evaluation opponents must reference a named mixture")
-        result["opponents"] = deepcopy(mixtures[mixture])
-        result["controls"] = deepcopy(value.get("controls", {"fixed": {}}))
+        if base is not None and "opponents" not in value:
+            result["opponents"] = deepcopy(base["opponents"])
+        else:
+            mixture = value.get("opponents")
+            if not isinstance(mixture, str) or mixture not in mixtures:
+                raise ValueError("Stage/evaluation opponents must reference a named mixture")
+            result["opponents"] = deepcopy(mixtures[mixture])
+        if base is not None:
+            controls = fields(value.get("controls", {}), ("fixed",), "evaluation controls")
+            fixed = deepcopy(base["controls"]["fixed"])
+            if controls.get("fixed", {}) is None:
+                fixed = {}
+            else:
+                fixed.update(fields(controls.get("fixed", {}), policy["action_names"], "evaluation fixed controls"))
+                fixed = {head: choice for head, choice in fixed.items() if choice is not None}
+            result["controls"] = {"fixed": fixed}
+        else:
+            result["controls"] = deepcopy(value.get("controls", {"fixed": {}}))
         result["rewards"] = {"mode": "replace", "weights": task["rewards"]}
         return _resolved_condition(result, policy, opponents)
+
+    def evaluations(self, value, default_environment, mixtures, policy, opponents, stages, base=None):
+        if not isinstance(value, dict):
+            raise ValueError("Evaluations must be named suites")
+        result = {}
+        for name, suite in value.items():
+            _name(name, "Evaluation name")
+            fields(suite, (*CONDITION_FIELDS, *EVALUATION_FIELDS, "stage", "overrides"), "evaluation suite")
+            inherited = base
+            if "stage" in suite:
+                if base is not None:
+                    raise ValueError("Stage-local evaluations cannot reference another stage")
+                reference = _name(suite["stage"], "Evaluation stage")
+                if reference not in stages:
+                    raise ValueError(f"Unknown evaluation stage: {reference}")
+                inherited = stages[reference]
+            if inherited is not None:
+                fields(suite, (*EVALUATION_FIELDS, "overrides", *(("stage",) if base is None else ())),
+                       "inherited evaluation suite")
+                changes = fields(suite.get("overrides", {}), CONDITION_FIELDS, "evaluation overrides")
+            else:
+                fields(suite, (*CONDITION_FIELDS, *EVALUATION_FIELDS), "evaluation suite")
+                if "environment" not in suite:
+                    raise ValueError("Evaluation suites must explicitly reference an environment or stage")
+                changes = suite
+            compiled = self.condition(changes, default_environment, mixtures, policy, opponents, base=inherited)
+            compiled.update({key: suite.get(key) for key in EVALUATION_FIELDS if key != "worlds" or key in suite})
+            result[name] = compiled
+        return result
 
 
 def resolve_experiment(value, base_dir):
@@ -405,19 +470,20 @@ def resolve_experiment(value, base_dir):
         "seed": value.get("seed", 1), "policy": policy, "learner": _learner(value.get("learner", {})),
         "opponents": opponents, "stages": [], "evaluations": {},
     }
+    named_stages = {}
     for stage in stages:
-        fields(stage, (*CONDITION_FIELDS, "name", "advance"), "stage")
+        fields(stage, (*CONDITION_FIELDS, "name", "advance", "evaluations"), "stage")
+        name = _name(stage.get("name"), "Stage name")
+        if name in named_stages:
+            raise ValueError("Stage names must be unique")
         compiled = authoring.condition(stage, default, mixtures, policy, opponents)
-        compiled.update(name=stage.get("name"), advance=deepcopy(stage.get("advance")))
+        compiled.update(name=name, advance=deepcopy(stage.get("advance")))
+        named_stages[name] = compiled
         result["stages"].append(compiled)
-    evaluations = value.get("evaluations", {})
-    if not isinstance(evaluations, dict):
-        raise ValueError("Evaluations must be named suites")
-    for name, suite in evaluations.items():
-        fields(suite, (*CONDITION_FIELDS, "every_updates", "episodes", "seed"), "evaluation suite")
-        if "environment" not in suite:
-            raise ValueError("Evaluation suites must explicitly reference an environment")
-        compiled = authoring.condition(suite, default, mixtures, policy, opponents)
-        compiled.update({key: suite.get(key) for key in ("every_updates", "episodes", "seed")})
-        result["evaluations"][name] = compiled
+    result["evaluations"] = authoring.evaluations(value.get("evaluations", {}), default, mixtures,
+                                                policy, opponents, named_stages)
+    for authored, compiled in zip(stages, result["stages"]):
+        if "evaluations" in authored:
+            compiled["evaluations"] = authoring.evaluations(authored["evaluations"], default, mixtures,
+                                                          policy, opponents, named_stages, base=compiled)
     return _resolved(result, base_dir)

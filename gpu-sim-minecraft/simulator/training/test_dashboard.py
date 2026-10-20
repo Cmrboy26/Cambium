@@ -77,6 +77,7 @@ const experiment = {format:'minecraft_sim_experiment',version:1,name:'<img src=x
     stages:[
         {name:'aim',environment_name:'Aim environment',arena_names:['Flat'],scenario:{arenas:[{environment:scene('flat'),weight:1}]},
             controls:{attack:false},opponents:[{id:'target',weight:1}],advance:{updates:2},
+            evaluations:{aim_accuracy:{}},
             rewards:{mode:'replace',weights:{good_aim:0.025,death:-10,won_duel:0}}},
         {name:'fight',environment_name:'Fight environment',arena_names:['Hill','Pit'],
             scenario:{arenas:[{environment:scene('hill'),weight:1},{environment:scene('pit'),weight:3}]},
@@ -142,6 +143,7 @@ assert.equal(text('curriculum-title'),experiment.name,'Labels must be literal te
 assert.deepEqual(JSON.parse(text('experiment-json')),experiment);
 assert.match(text('environment-name'),/Deployment snapshot/);
 assert.match(text('evaluations'),/<held>.*--.*unseen/);
+assert.match(text('evaluations'),/aim_accuracy/);
 vm.runInContext(`records=[{update:2,stage:'aim',stage_index:0,next_stage_index:1,
     stage_progress:{updates:2,episodes:3,transitions:64},completed_curriculum:false,
     curriculum_boundary:{reset_worlds:2,next_stage:'fight'},
@@ -173,6 +175,9 @@ assert.match(text('run-context'),/Fight environment.*sword \(25%\).*axe \(75%\)/
 assert.equal(hidden('upcoming-stage'),true);
 assert.match(text('stage-summary'),/ALL \(episodes: 4 \/ 10; ANY \(updates: 1 \/ 4; transitions: 32 \/ 128\)\)/);
 assert.match(text('evaluations'),/<held> 2 aim 75% -1.5 4/,'Periodic results must retain their original update/stage');
+vm.runInContext(`records.at(-1).evaluations={'<held>':{win_rate:0.75,reward_mean:-1.5,episodes:4,
+    worlds:4,seconds:0.125,snapshot_update:2,stage:'aim',stage_index:0}}; renderCurriculum();`,context);
+assert.match(text('evaluations'),/<held> 2 aim 75% -1.5 4 4 0.125/,'Repeated results must retain snapshot metadata');
 vm.runInContext(`records.push({update:4,stage:'fight',stage_index:1,next_stage_index:1,
     stage_progress:{updates:2,episodes:10,transitions:128},completed_curriculum:true}); renderCurriculum();`,context);
 assert.equal(text('curriculum-status'),'Curriculum complete','Completion is explicit, not inferred from final stage');
@@ -383,12 +388,16 @@ assert.deepEqual(evaluate(`smoothSeries(row=>row.reward_types?.death)`),
     [{x:1,y:-10},{x:2,y:-15},{x:3,y:-10}]);
 assert.equal(evaluate(`definitions.find(([id])=>id==='loss-chart')[1].some(([key])=>key==='policy_loss')`),false);
 assert.equal(evaluate(`definitions.find(([id])=>id==='policy-loss-chart')[1][0][0]`),'policy_loss');
+assert.equal(evaluate(`definitions.find(([id])=>id==='duration-chart')[1].some(([key])=>key==='evaluation_seconds')`),true);
 assert.deepEqual(evaluate(`trainingTime([{update:99,collection_seconds:900,update_seconds:100},
     {update:101,collection_seconds:6,update_seconds:4},{update:102,collection_seconds:8,update_seconds:2}],
     {training:{start_update:100,target_update:110}})`),
     {target:110,remaining:8,average:10,elapsed:20,eta:80});
 assert.deepEqual(evaluate(`trainingTime([{update:1,collection_seconds:3,update_seconds:2}],{options:{updates:5}})`),
     {target:5,remaining:4,average:5,elapsed:5,eta:20});
+assert.deepEqual(evaluate(`trainingTime([{update:1,collection_seconds:3,update_seconds:2,
+    evaluation_seconds:4,replay_seconds:1,iteration_seconds:10}],{options:{updates:5}})`),
+    {target:5,remaining:4,average:10,elapsed:10,eta:40});
 assert.deepEqual(evaluate(`trainingTime([{update:102,collection_seconds:3,update_seconds:2}],
     {options:{resume:'latest.pt',updates:10}})`),
     {target:null,remaining:null,average:5,elapsed:null,eta:null});
@@ -486,6 +495,9 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         self.assertEqual(data["config"], config)
         self.assertEqual(data["metrics"], [row])
         self.assertEqual(data["warnings"], [])
+        row.update(evaluation_seconds=0.125, evaluation_episodes=4, replay_seconds=0.25,
+               iteration_seconds=1.0, cuda_peak_allocated_bytes=1024, cuda_peak_reserved_bytes=2048)
+        row["evaluations"]["held"].update(worlds=4, seconds=0.125, snapshot_update=2, stage="aim", stage_index=0)
         row.update(update=3, next_stage_index=None, completed_curriculum=True)
         row["curriculum_boundary"]["next_stage"] = None
         with self.metrics.open("a", encoding="utf-8") as output:
@@ -507,11 +519,15 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
               for value in (float("nan"), float("inf"), -0.1, 1.1, True, None)),
             {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": float("inf"), "episodes": 2}}},
             {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 1, "episodes": 2.5}}},
+                        *({"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 1, "episodes": 2, **extra}}}
+                            for extra in ({"worlds": True}, {"seconds": -1}, {"seconds": float("inf")},
+                                                        {"snapshot_update": -1}, {"stage_index": "0"}, {"stage": ""})),
             {"evaluations": {"": {"win_rate": 0, "reward_mean": 0, "episodes": 0}}},
             {"curriculum_boundary": []}, {"curriculum_boundary": {"reset_worlds": 2}},
             {"curriculum_boundary": {"reset_worlds": True, "next_stage": "combat"}},
             {"curriculum_boundary": {"reset_worlds": 2, "next_stage": {}}},
             {"samples": 1.5}, {"timeouts": -1}, {"completed_rounds": False},
+            {"evaluation_episodes": True}, {"cuda_peak_allocated_bytes": -1},
         ]
         with self.metrics.open("a", encoding="utf-8") as output:
             for index, fields in enumerate(invalid, 2):

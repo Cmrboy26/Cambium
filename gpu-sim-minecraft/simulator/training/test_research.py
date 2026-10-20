@@ -22,17 +22,17 @@ from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
 
 
-PRESET = ROOT / "simulator/setups/curricula/gear-curriculum.json"
-SHIELD_AXE_PRESET = ROOT / "simulator/setups/curricula/shield-axe-curriculum.json"
-AXE_SHIELD_FIGHTING_PRESET = ROOT / "simulator/setups/curricula/axe-shield-fighting.json"
+PRESET = ROOT / "simulator/setups/curricula/v1/gear-curriculum.json"
+SHIELD_AXE_PRESET = ROOT / "simulator/setups/curricula/v1/shield-axe-curriculum.json"
+AXE_SHIELD_FIGHTING_PRESET = ROOT / "simulator/setups/curricula/v1/axe-shield-fighting.json"
 
 
 def preset(path=PRESET):
     value = json.loads(path.read_text(encoding="utf-8"))
     for key in ("policy", "environment"):
-        value[key] = str((path.parent / value[key]).resolve())
+        value[key] = str((path.parent.parent / value[key]).resolve())
     for suite in value["evaluations"].values():
-        suite["environment"] = str((path.parent / suite["environment"]).resolve())
+        suite["environment"] = str((path.parent.parent / suite["environment"]).resolve())
     return value
 
 
@@ -263,6 +263,46 @@ class ResearchChecks(unittest.TestCase):
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4",
                       "--hidden-dim", "8", "--rollout-steps", "3", "--epochs", "1",
                       "--minibatch-size", "8", "--max-ticks", "2", "--save-every", "1"]
+
+    def test_stage_local_evaluation_cadence_resume_advancement_and_timing(self):
+        plan = short_plan()
+        plan["stages"][0]["evaluations"] = {"aim_accuracy": {
+            "every_updates": 1, "worlds": 3, "episodes": 5, "seed": 1729,
+        }}
+        plan["stages"][0]["advance"] = {"evaluation": {
+            "suite": "aim_accuracy", "metric": "reward_mean", "at_least": 0,
+        }}
+        plan["stages"][1]["evaluations"] = {"combat_check": {
+            "every_updates": 2, "worlds": 3, "episodes": 5, "seed": 1730,
+        }}
+        self.path.write_text(json.dumps(plan))
+        output = self.directory / "local-evaluations"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(output)])
+        checkpoint = torch.load(output / "latest.pt", weights_only=True)
+        self.assertEqual(checkpoint["research"]["stage_index"], 1)
+        self.assertEqual(checkpoint["research"]["evaluations"], {})
+        self.path.unlink()
+        for _ in range(2):
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--resume", str(output / "latest.pt"), "--library", self.library,
+                      "--updates", "1", "--output", str(output)])
+        rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertEqual([set(row["evaluations"]) for row in rows],
+                         [{"aim_accuracy"}, set(), {"combat_check"}])
+        self.assertEqual([row["evaluation_episodes"] for row in rows], [5, 0, 5])
+        self.assertEqual(rows[0]["evaluations"]["aim_accuracy"]["worlds"], 3)
+        self.assertEqual(rows[2]["evaluations"]["combat_check"]["snapshot_update"], 3)
+        self.assertEqual(rows[2]["evaluations"]["combat_check"]["stage_index"], 1)
+        self.assertTrue(rows[-1]["completed_curriculum"])
+        self.assertEqual(rows[-1]["samples"], 36)
+        for row in rows:
+            for key in ("collection_seconds", "update_seconds", "evaluation_seconds", "replay_seconds"):
+                self.assertGreaterEqual(row[key], 0)
+            self.assertGreaterEqual(row["iteration_seconds"], sum(row[key] for key in (
+                "collection_seconds", "update_seconds", "evaluation_seconds", "replay_seconds")))
+            self.assertAlmostEqual(row["player_transitions_per_second"] * row["iteration_seconds"], 12)
+            self.assertNotIn("cuda_peak_allocated_bytes", row)
 
     def test_self_play_training_resume_evaluation_and_replay(self):
         plan = short_plan()
@@ -552,6 +592,9 @@ class ResearchChecks(unittest.TestCase):
         changed["evaluations"] = {
             "held": {"every_updates": 1, "episodes": 3, "seed": 101,
                      "environment": changed["environment"], "opponents": "target"}
+        }
+        changed["stages"][0]["evaluations"] = {
+            "local": {"every_updates": 1, "worlds": 5, "episodes": 5, "seed": 102}
         }
         self.path.write_text(json.dumps(changed))
         with contextlib.redirect_stdout(io.StringIO()):

@@ -20,7 +20,8 @@ const definitions = [
     ["entropy-chart", [["entropy", "Entropy", colors.blue]]],
     ["throughput-chart", [["player_transitions_per_second", "Transitions / second", colors.green]]],
     ["duels-chart", [["terminated_duels", "Terminated", colors.blue], ["timeouts", "Timeouts", colors.amber]]],
-    ["duration-chart", [["collection_seconds", "Collection", colors.gray], ["update_seconds", "Optimization", colors.red]]],
+    ["duration-chart", [["collection_seconds", "Collection", colors.gray], ["update_seconds", "Optimization", colors.red],
+        ["evaluation_seconds", "Evaluation", colors.amber], ["replay_seconds", "Replay", colors.green]]],
 ];
 const charts = new Map();
 let records = [];
@@ -53,9 +54,11 @@ function trainingTime(rows, config) {
     const target = session?.target_update ?? (start === 0 && Number.isFinite(options.updates) ? options.updates : null);
     const latest = rows.at(-1)?.update ?? start;
     const current = start === null ? rows : rows.filter((row) => row.update > start);
-    const durations = current.filter((row) => Number.isFinite(row.collection_seconds) && row.collection_seconds >= 0
-        && Number.isFinite(row.update_seconds) && row.update_seconds >= 0)
-        .map((row) => row.collection_seconds + row.update_seconds);
+    const durations = current.map((row) => Number.isFinite(row.iteration_seconds) ? row.iteration_seconds
+        : Number.isFinite(row.collection_seconds) && Number.isFinite(row.update_seconds)
+            && row.collection_seconds >= 0 && row.update_seconds >= 0
+            ? row.collection_seconds + row.update_seconds : null)
+        .filter((seconds) => Number.isFinite(seconds) && seconds >= 0);
     const recent = durations.slice(-20);
     const average = recent.length ? recent.reduce((sum, value) => sum + value, 0) / recent.length : null;
     const remaining = rows.at(-1)?.completed_curriculum === true ? 0
@@ -541,13 +544,16 @@ function renderCurriculum() {
         end.completed_curriculum ? "Curriculum complete" : end.curriculum_boundary
             ? `${format(end.curriculum_boundary.reset_worlds)} worlds reset → ${end.curriculum_boundary.next_stage ?? "not recorded"}` : "--",
     ]), 4, "No stage metrics recorded.");
-    const evaluations = new Map(Object.keys(experiment?.evaluations ?? {}).map((suite) => [suite, null]));
+    const suiteNames = [...Object.keys(experiment?.evaluations ?? {}),
+        ...(experiment?.stages ?? []).flatMap((stage) => Object.keys(stage.evaluations ?? {}))];
+    const evaluations = new Map(suiteNames.map((suite) => [suite, null]));
     for (const row of records) for (const [suite, result] of Object.entries(row.evaluations ?? {})) evaluations.set(suite, {row, result});
     renderTable("evaluations", [...evaluations].map(([suite, entry]) => [
-        suite, format(entry?.row.update), entry ? stageName(entry.row, experiment) : "--",
+        suite, format(entry?.result.snapshot_update ?? entry?.row.update),
+        entry ? stageName(entry.result.stage ? entry.result : entry.row, experiment) : "--",
         entry ? `${format(entry.result.win_rate * 100, 2)}%` : "--", format(entry?.result.reward_mean, 4),
-        format(entry?.result.episodes),
-    ]), 6, "No evaluation results recorded.");
+        format(entry?.result.episodes), format(entry?.result.worlds), format(entry?.result.seconds, 3),
+    ]), 8, "No evaluation results recorded.");
 }
 
 function renderFields(id, fields) {

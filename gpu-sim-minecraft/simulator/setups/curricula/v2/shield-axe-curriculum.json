@@ -3,8 +3,8 @@
   "version": 2,
   "name": "shield-axe-curriculum",
   "seed": 42,
-  "policy": "../policies/equipment-combat.json",
-  "environment": "../environments/shield-axe-duel.json",
+  "policy": "../../policies/equipment-combat.json",
+  "environment": "../../environments/shield-axe-duel.json",
   "learner": {"hidden_dim": 512, "lr": 0.0003, "epochs": 2, "minibatch_size": 16384},
   "opponents": {
     "policy": {"type": "self_play"},
@@ -34,29 +34,10 @@
   },
   "evaluations": {
     "shield_axe_combat": {
-      "environment": "../environments/shield-axe-duel.json",
+      "stage": "shield_axe_combat",
       "every_updates": 50, "episodes": 64, "seed": 1729,
-      "opponents": "shield_axe"
-    },
-    "aim_accuracy": {
-      "environment": "../environments/gear-duel.json",
-      "every_updates": 25,
-      "episodes": 64,
-      "seed": 1729,
-      "opponents": "target",
-      "controls": {
-        "fixed": {
-          "movement": "neutral",
-          "jump": false,
-          "sprint": false,
-          "attack": false,
-          "weapon": 0,
-          "shield": false
-        }
-      },
-      "task_override": {
-        "rewards": {"good_aim": 5, "aim_hold": 2}
-      }
+      "worlds": 64,
+      "overrides": {"opponents": "shield_axe"}
     }
   },
   "stages": [
@@ -66,6 +47,11 @@
       "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false,
                              "attack": false, "weapon": 0, "shield": false}},
       "task_override": {"max_ticks": 100, "rewards": {"good_aim": 5, "aim_hold": 2}},
+      "evaluations": {
+        "aim_accuracy": {
+          "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1729
+        }
+      },
       "advance": {
         "evaluation": {
           "suite": "aim_accuracy",

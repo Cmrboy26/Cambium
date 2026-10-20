@@ -26,7 +26,7 @@ class ExperimentChecks(unittest.TestCase):
         self.arena = json.loads((ROOT / "simulator/setups/arenas/flat-duel.json").read_text())
         self.environment = json.loads((ROOT / "simulator/setups/environments/gear-duel.json").read_text())
         self.policy = json.loads((ROOT / "simulator/setups/policies/equipment-combat.json").read_text())
-        self.raw = json.loads((ROOT / "simulator/setups/curricula/gear-curriculum.json").read_text())
+        self.raw = json.loads((ROOT / "simulator/setups/curricula/v1/gear-curriculum.json").read_text())
         self.environment["arena"] = "../arenas/flat.json"
         self.raw["environment"] = "../environments/duel.json"
         self.raw["policy"] = "../policies/combat.json"
@@ -83,6 +83,126 @@ class ExperimentChecks(unittest.TestCase):
         self.assertEqual(calls.count(self.policy_path), 1)
         with self.assertRaises(FileNotFoundError):
             resolve_plan(self.raw)
+
+    def test_local_evaluation_inherits_resolved_stage_and_roundtrips(self):
+        stage = self.raw["stages"][0]
+        stage["task_override"]["max_ticks"] = 100
+        stage["evaluations"] = {"aim_accuracy": {
+            "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1729,
+        }}
+        stage["advance"] = {"evaluation": {"suite": "aim_accuracy", "metric": "reward_mean", "at_least": 6}}
+        resolved = self.resolve()
+        aim = resolved["stages"][0]
+        suite = aim["evaluations"]["aim_accuracy"]
+        for key in ("scenario", "controls", "opponents", "rewards", "environment_name", "arena_names"):
+            self.assertEqual(suite[key], aim[key])
+        self.assertEqual(suite["worlds"], 64)
+        self.assertEqual(resolve_plan(resolved), resolved)
+        self.assertNotIn("evaluations", resolved["stages"][1])
+
+    def test_evaluation_overrides_merge_controls_but_replace_rewards(self):
+        stage = self.raw["stages"][0]
+        stage["task_override"]["max_ticks"] = 100
+        stage["evaluations"] = {"aim_accuracy": {
+            "every_updates": 25, "episodes": 64, "seed": 1729,
+            "overrides": {"controls": {"fixed": {"attack": True}},
+                          "spawns": {"yaw": 0}, "equipment": None,
+                          "task_override": {"rewards": {"aim_hold": 1}}},
+        }}
+        resolved = self.resolve()
+        aim = resolved["stages"][0]
+        suite = aim["evaluations"]["aim_accuracy"]
+        self.assertTrue(suite["controls"]["fixed"]["attack"])
+        self.assertFalse(aim["controls"]["fixed"]["attack"])
+        self.assertEqual(suite["controls"]["fixed"]["movement"], "neutral")
+        self.assertEqual(suite["scenario"]["spawns"]["yaw"], 0)
+        self.assertNotIn("equipment", suite["scenario"])
+        self.assertEqual(suite["scenario"]["arenas"][0]["environment"]["max_ticks"], 100)
+        self.assertEqual(suite["rewards"]["weights"]["aim_hold"], 1)
+        self.assertEqual(suite["rewards"]["weights"]["good_aim"], 0)
+        self.assertEqual(aim["rewards"]["weights"]["good_aim"], 5)
+
+    def test_global_evaluation_can_reference_fixed_stage_with_overrides(self):
+        self.raw["evaluations"] = {"benchmark": {
+            "stage": "aim", "every_updates": 50, "episodes": 64, "seed": 1729,
+            "overrides": {"opponents": "held_out", "environment": "../environments/duel.json"},
+        }}
+        self.raw["stages"][0]["task_override"]["max_ticks"] = 100
+        self.raw["stages"][1]["advance"] = {"updates": 1500}
+        resolved = self.resolve()
+        suite = resolved["evaluations"]["benchmark"]
+        self.assertEqual(suite["controls"], resolved["stages"][0]["controls"])
+        self.assertEqual(suite["rewards"], resolved["stages"][0]["rewards"])
+        self.assertEqual(suite["scenario"]["arenas"][0]["environment"]["max_ticks"], 100)
+        self.assertEqual(suite["opponents"], [{"id": "fighter", "weight": 1}])
+
+    def test_environment_override_preserves_stage_task_and_controls(self):
+        alternate = deepcopy(self.environment)
+        alternate["name"] = "alternate"
+        alternate["task"] = {"max_ticks": 800, "rewards": {"death": -99}}
+        alternate["spawns"]["yaw"] = 0
+        (self.environment_path.parent / "alternate.json").write_text(json.dumps(alternate))
+        self.raw["stages"][0]["evaluations"] = {"alternate_aim": {
+            "every_updates": 25, "episodes": 64, "seed": 1729,
+            "overrides": {"environment": "../environments/alternate.json"},
+        }}
+        resolved = self.resolve()
+        aim = resolved["stages"][0]
+        suite = aim["evaluations"]["alternate_aim"]
+        self.assertEqual(suite["environment_name"], "alternate")
+        self.assertEqual(suite["scenario"]["spawns"]["yaw"], 0)
+        self.assertEqual(suite["rewards"], aim["rewards"])
+        self.assertEqual(suite["controls"], aim["controls"])
+        self.assertEqual(suite["scenario"]["arenas"][0]["environment"]["max_ticks"],
+                         aim["scenario"]["arenas"][0]["environment"]["max_ticks"])
+
+    def test_evaluation_controls_can_release_one_or_all_fixed_heads(self):
+        stage = self.raw["stages"][0]
+        stage["evaluations"] = {"aim_accuracy": {
+            "every_updates": 25, "episodes": 64, "seed": 1729,
+            "overrides": {"controls": {"fixed": {"attack": None}}},
+        }}
+        suite = self.resolve()["stages"][0]["evaluations"]["aim_accuracy"]
+        self.assertNotIn("attack", suite["controls"]["fixed"])
+        self.assertEqual(suite["controls"]["fixed"]["movement"], "neutral")
+        stage["evaluations"]["aim_accuracy"]["overrides"]["controls"]["fixed"] = None
+        suite = self.resolve()["stages"][0]["evaluations"]["aim_accuracy"]
+        self.assertEqual(suite["controls"], {"fixed": {}})
+        self.assertFalse(stage["controls"]["fixed"]["attack"])
+
+    def test_active_shield_axe_curriculum_uses_inherited_evaluations(self):
+        plan = load_plan(ROOT / "simulator/setups/curricula/v2/shield-axe-curriculum.json")
+        aim, _, _, combat = plan["stages"]
+        local = aim["evaluations"]["aim_accuracy"]
+        benchmark = plan["evaluations"]["shield_axe_combat"]
+        self.assertEqual(local["scenario"], aim["scenario"])
+        self.assertEqual(local["scenario"]["arenas"][0]["environment"]["max_ticks"], 100)
+        self.assertEqual(local["controls"], aim["controls"])
+        self.assertEqual(local["worlds"], 64)
+        self.assertEqual(benchmark["scenario"], combat["scenario"])
+        self.assertEqual(benchmark["opponents"], combat["opponents"][:-1])
+        self.assertEqual(benchmark["worlds"], 64)
+        self.assertEqual(resolve_plan(plan), plan)
+
+    def test_evaluation_references_scopes_and_world_counts_are_validated(self):
+        suite = {"every_updates": 25, "episodes": 64, "seed": 1729}
+        mutations = [
+            lambda plan: plan["evaluations"].update(broken={**suite, "stage": "missing"}),
+            lambda plan: plan["stages"][0].update(evaluations={"local": {**suite, "worlds": 0}}),
+            lambda plan: plan["stages"][0].update(evaluations={"local": {**suite, "worlds": True}}),
+            lambda plan: plan["stages"][0].update(evaluations={"local": {**suite, "stage": "combat"}}),
+            lambda plan: plan["stages"][0].update(evaluations={"local": {**suite, "controls": {"fixed": {}}}}),
+            lambda plan: plan["stages"][0].update(evaluations={"held_out_combat": suite}),
+            lambda plan: plan["stages"][1].update(advance={"evaluation": {
+                "suite": "local", "metric": "reward_mean", "at_least": 1}}),
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                original = deepcopy(self.raw)
+                mutation(self.raw)
+                with self.assertRaises(ValueError):
+                    self.resolve()
+                self.raw = original
 
     def test_resolved_roundtrip_has_no_source_file_dependency(self):
         resolved = self.resolve()

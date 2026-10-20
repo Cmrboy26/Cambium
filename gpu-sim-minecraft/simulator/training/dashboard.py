@@ -13,8 +13,11 @@ RUNS = Path(__file__).resolve().parent / "runs"
 ASSETS = Path(__file__).resolve().parent / "dashboard"
 METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "timeouts",
            "replays_exported", "reward_mean", "reward_total", "loss", "policy_loss", "value_loss", "entropy",
-           "collection_seconds", "update_seconds", "player_transitions_per_second")
-COUNTS = {"update", "samples", "completed_rounds", "terminated_duels", "timeouts", "replays_exported"}
+           "collection_seconds", "update_seconds", "evaluation_seconds", "evaluation_episodes",
+           "replay_seconds", "iteration_seconds", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",
+           "player_transitions_per_second")
+COUNTS = {"update", "samples", "completed_rounds", "terminated_duels", "timeouts", "replays_exported",
+          "evaluation_episodes", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes"}
 MAX_REPLAY_BYTES = 64 * 1024 * 1024
 MAX_REPLAY_FRAMES = 100001
 
@@ -62,6 +65,18 @@ def metric_metadata(record):
                 raise ValueError("Expected win rate between zero and one")
             evaluations[label] = {"win_rate": win_rate, "reward_mean": finite(evaluation.get("reward_mean")),
                                   "episodes": count(evaluation.get("episodes"))}
+            for name in ("worlds", "snapshot_update", "stage_index"):
+                if name in evaluation:
+                    evaluations[label][name] = count(evaluation[name])
+            if "seconds" in evaluation:
+                seconds = finite(evaluation["seconds"])
+                if seconds < 0:
+                    raise ValueError("Expected nonnegative evaluation seconds")
+                evaluations[label]["seconds"] = seconds
+            if "stage" in evaluation:
+                if not isinstance(evaluation["stage"], str) or not evaluation["stage"]:
+                    raise ValueError("Expected an evaluation stage name")
+                evaluations[label]["stage"] = evaluation["stage"]
         result["evaluations"] = evaluations
     if "curriculum_boundary" in record:
         boundary = record["curriculum_boundary"]

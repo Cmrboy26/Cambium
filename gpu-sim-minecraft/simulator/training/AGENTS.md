@@ -167,15 +167,76 @@ budgets can overshoot by one rollout. Transitions reset active episodes without
 combat losses and record `curriculum_boundary` in metrics. Completed plans stop;
 extending them is a new experiment, not an incompatible resume.
 
-Named `evaluations` define `every_updates`, `episodes`, `seed`, an environment
-and a named opponent mixture, plus optional typed patches and controls
-(default unrestricted).
-Intervals use global completed updates. Suites run separate seeded worlds,
-model eval mode and isolated RNG, never contribute training transitions, and
-report exact episode count, mean episode return and wins/episodes. Wins require
-opponent death/exit with the learner still alive/in bounds; timeouts count as
-non-wins. Up to 16 evaluation worlds provide stable scene/gear combinations.
-Metrics retain stage, budget progress and suite results in JSONL.
+Evaluations remain synchronous: after scheduled PPO updates, run separate seeded
+worlds in model eval mode and isolated RNG. They never contribute training
+transitions. Each suite requires `every_updates`, `episodes` and `seed`;
+optional `worlds` selects parallel worlds, capped at its episode count. Omission
+preserves the historical maximum of 16 worlds. No native rebuild is needed.
+
+Stage-local `evaluations` run only while their stage is active. Intervals count
+completed updates within that stage, including updates restored on resume.
+Suites inherit the stage's fully resolved environment, opponents, controls,
+sampling, rewards and episode limit. For example, inside an aim stage:
+
+```json
+"evaluations": {
+  "aim_accuracy": {
+    "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1729
+  }
+},
+"advance": {
+  "evaluation": {"suite": "aim_accuracy", "metric": "reward_mean", "at_least": 6}
+}
+```
+
+Top-level suites use global update intervals. A `stage` reference pins their
+conditions to that named stage, regardless of which stage is currently training:
+
+```json
+"evaluations": {
+  "shield_axe_combat": {
+    "stage": "shield_axe_combat",
+    "every_updates": 50, "worlds": 64, "episodes": 64, "seed": 1729,
+    "overrides": {"opponents": "shield_axe"}
+  }
+}
+```
+
+Inherited suites accept condition changes only inside `overrides`: `environment`,
+`opponents`, `controls`, `task_override`, `spawns` and `equipment`. Controls merge
+by head; `{"controls":{"fixed":{"attack":null}}}` releases one inherited
+head, and `{"controls":{"fixed":null}}` releases all. A supplied task reward
+map replaces all inherited weights; omitted terms are zero. Task fields and
+sampling patches otherwise retain unspecified values; arrays replace and null
+disables optional sampling. An environment override replaces scene/player and
+sampling defaults with the new environment, but retains the inherited task,
+controls and opponents unless separately overridden. Paths remain relative to
+the training-plan file. Policy layout is never overridden by a suite.
+
+Existing top-level suites with an explicit `environment`, opponent mixture and
+direct condition fields remain supported, with default unrestricted controls;
+they do not inherit a stage. Do not mix those direct fields with inherited
+`stage`/`overrides` syntax. Suite names must be unique across the plan. Advancement
+may reference a global suite or one belonging to the current stage, never a
+different stage's local suite. Conditions are compiled into portable experiments;
+resuming needs no authoring files. Existing resolved plans retain their hashes.
+
+Suites report exact episode count, mean episode return and wins/episodes. Wins
+require opponent death/exit with the learner still alive/in bounds; timeouts count
+as non-wins. Evaluation `reward_mean` is per-episode return, unlike training's
+per-decision `reward_mean`. Results retain `worlds`, `seconds`, `snapshot_update`
+and training `stage`/`stage_index`, including when reused on later metric rows.
+Advancement is checked after evaluation and before collecting the next rollout;
+stage changes clear prior advancement results.
+
+Metrics separate `collection_seconds`, optimization-only `update_seconds`,
+`evaluation_seconds`, `evaluation_episodes` completed this update, and
+`replay_seconds`. `iteration_seconds` includes all these phases and bookkeeping,
+but excludes stage-boundary resets, logging and checkpoint writes. Training-only
+`player_transitions_per_second` uses this inclusive duration; evaluation samples
+never inflate the numerator. CUDA runs additionally report per-update PyTorch
+allocator peaks, `cuda_peak_allocated_bytes` and `cuda_peak_reserved_bytes`;
+these do not include the native simulator's allocations or total device memory.
 
 Replay cadence counts completed training episodes.
 Samples are separate complete duels using a concrete sampled scene, real pool
@@ -461,16 +522,17 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   The timeline and resolved JSON are read-only, not a configuration editor.
 - Charts: mean reward/player step, total/update, stacked reward types, separate
   policy loss, value/total losses, entropy, player-transition throughput,
-  terminated/timeouts and collection/optimization duration. Each chart has a
+  terminated/timeouts and collection/optimization/evaluation/replay duration. Each chart has a
   value/derivative mode. Derivatives are differences of EMA-smoothed values
   divided by update-number differences, computed before windowing; missing
   values break the series. Reward derivatives retain signed stacking.
   Window/EMA/pause controls are local. Counts use all updates, not chart window.
   Connected means readable, not training.
-- Time estimates use the last 20 timed updates' mean collection + optimization
-  duration multiplied by remaining updates, independent of chart window/EMA.
-  Recorded training time sums these durations for the current session, not wall
-  time/checkpoint overhead. New `config.json` records `training.start_update`
+- Time estimates use the last 20 timed updates' mean `iteration_seconds`, falling
+  back to collection + optimization for historical rows, multiplied by remaining
+  updates, independent of chart window/EMA. Evaluation and replay time are included
+  for new rows. Recorded training time sums these durations for the current session,
+  not wall time/checkpoint overhead. New `config.json` records `training.start_update`
   and `training.target_update`; these do not change checkpoint metadata.
   Legacy fresh runs use `options.updates`; legacy resumed runs with unknown
   session boundaries leave remaining time and session duration unavailable.

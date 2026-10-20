@@ -107,7 +107,7 @@
                 <h3 id="runtime-title">Runtime &amp; throughput</h3>
                 <div class="charts">
                     <article class="chart"><h2>Throughput <span>Player transitions / second</span></h2><div class="plot"><canvas id="throughput-chart" role="img" aria-label="Player transitions per second by PPO update"></canvas></div></article>
-                    <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Rollout collection and optimization seconds by PPO update"></canvas></div></article>
+                    <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Collection, optimization, evaluation and replay seconds by PPO update"></canvas></div></article>
                 </div>
             </section>
         </section>
@@ -115,9 +115,9 @@
             <div class="section-title"><h2 id="curriculum-section-title">Curriculum &amp; evaluation</h2></div>
             <h3 id="curriculum-title">Experiment stages</h3>
             <p id="curriculum-status" role="status"></p>
-            <h3>Held-out evaluations</h3>
+            <h3>Evaluations</h3>
             <p class="section-note">Latest recorded result per suite; mean return is per evaluation episode.</p>
-            <div class="table-scroll"><table><thead><tr><th>Suite</th><th>Update</th><th>Rollout stage</th><th>Win rate</th><th>Mean return</th><th>Episodes</th></tr></thead><tbody id="evaluations"></tbody></table></div>
+            <div class="table-scroll"><table><thead><tr><th>Suite</th><th>Update</th><th>Training stage</th><th>Win rate</th><th>Mean return</th><th>Episodes</th><th>Worlds</th><th>Seconds</th></tr></thead><tbody id="evaluations"></tbody></table></div>
             <details><summary>Stage progress &amp; conditions</summary>
             <dl id="stage-summary"></dl>
             <h3 id="stage-context-title">Stage conditions</h3><dl id="stage-context"></dl>

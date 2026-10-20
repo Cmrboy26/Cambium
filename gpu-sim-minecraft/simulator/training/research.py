@@ -250,7 +250,7 @@ def _lost(actor, scenario):
 
 @torch.no_grad()
 def evaluate(model, plan, suite, options, device, fixed):
-    count = min(16, suite["episodes"])
+    count = min(suite.get("worlds", 16), suite["episodes"])
     fixed = fixed_indices(plan["policy"], suite["controls"])
     worlds = SampledWorlds(suite["scenario"], plan["policy"], count, options.device,
                           options.library, options.max_ticks, suite["seed"])
@@ -284,7 +284,7 @@ def evaluate(model, plan, suite, options, device, fixed):
                 pool.reset(done)
                 episode_rewards[done] = 0
         return {"win_rate": wins / suite["episodes"], "reward_mean": total / suite["episodes"],
-                "episodes": suite["episodes"]}
+            "episodes": suite["episodes"], "worlds": count}
     finally:
         model.train(was_training)
         worlds.close()
@@ -451,11 +451,15 @@ def run(options, checkpoint=None):
             print("Resumed schedule, samplers and weights; starting fresh episodes (not mid-episode continuation).")
         for update in range(base_update + 1, base_update + options.updates + 1):
             start = time.perf_counter()
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
             fixed = fixed_indices(plan["policy"], stage["controls"])
             rollout, observations, endings, timeouts = collect(
                 model, worlds, pool, observations, options.rollout_steps, device, fixed)
             collection_seconds = time.perf_counter() - start
+            optimization_start = time.perf_counter()
             statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs, options.minibatch_size))
+            optimization_seconds = time.perf_counter() - optimization_start
             if "reward_types" in rollout:
                 statistics["reward_types"] = rollout["reward_types"]
             transitions = options.envs * options.rollout_steps
@@ -464,23 +468,43 @@ def run(options, checkpoint=None):
             rounds += endings + timeouts
             progress = {"updates": progress["updates"] + 1, "episodes": progress["episodes"] + endings + timeouts,
                         "transitions": progress["transitions"] + transitions}
+            evaluation_seconds = 0.0
+            evaluation_episodes = 0
+            replay_seconds = 0.0
             devices = [torch.cuda.current_device()] if device.type == "cuda" else []
             with torch.random.fork_rng(devices=devices):
-                for name, suite in plan["evaluations"].items():
-                    if update % suite["every_updates"] == 0:
-                        torch.manual_seed(suite["seed"])
-                        evaluations[name] = evaluate(model, plan, suite, options, device, fixed)
+                for suites, counter in ((plan["evaluations"], update),
+                                        (stage.get("evaluations", {}), progress["updates"])):
+                    for name, suite in suites.items():
+                        if counter % suite["every_updates"] == 0:
+                            evaluation_start = time.perf_counter()
+                            torch.manual_seed(suite["seed"])
+                            result = evaluate(model, plan, suite, options, device, fixed)
+                            elapsed = time.perf_counter() - evaluation_start
+                            result.update(seconds=elapsed, snapshot_update=update,
+                                          stage=stage["name"], stage_index=stage_index)
+                            evaluations[name] = result
+                            evaluation_seconds += elapsed
+                            evaluation_episodes += result["episodes"]
                 if options.replay_every:
+                    replay_start = time.perf_counter()
                     for multiple in range(previous_rounds // options.replay_every + 1, rounds // options.replay_every + 1):
                         scenario, _ = worlds.episode(0)
                         torch.manual_seed(plan["seed"] + multiple)
                         export_replay(model, plan, stage, options, scenario, pool.provenance(0), device,
                             multiple * options.replay_every, update, options.replay_dir or output / "replays")
+                    replay_seconds = time.perf_counter() - replay_start
+            iteration_seconds = time.perf_counter() - start
             statistics.update(update=update, samples=samples, stage=stage["name"], stage_index=stage_index,
                 stage_progress=progress.copy(), completed_rounds=rounds, terminated_duels=endings, timeouts=timeouts,
                 reward_mean=rollout["rewards"].mean().item(), reward_total=rollout["rewards"].sum(dtype=torch.float64).item(),
-                collection_seconds=collection_seconds, update_seconds=time.perf_counter() - start - collection_seconds,
-                evaluations=deepcopy(evaluations), player_transitions_per_second=transitions / (time.perf_counter() - start))
+                collection_seconds=collection_seconds, update_seconds=optimization_seconds,
+                evaluation_seconds=evaluation_seconds, evaluation_episodes=evaluation_episodes,
+                replay_seconds=replay_seconds, iteration_seconds=iteration_seconds,
+                evaluations=deepcopy(evaluations), player_transitions_per_second=transitions / iteration_seconds)
+            if device.type == "cuda":
+                statistics["cuda_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
+                statistics["cuda_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
             if reached(stage["advance"], progress, evaluations):
                 if stage_index + 1 == len(plan["stages"]):
                     completed = True
