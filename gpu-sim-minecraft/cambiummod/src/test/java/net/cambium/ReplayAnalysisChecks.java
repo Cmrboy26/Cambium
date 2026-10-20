@@ -330,8 +330,9 @@ public final class ReplayAnalysisChecks {
 			 "actions":[{"name":"weapon","values":[2,1,0]},{"name":"yaw","values":[-15,0,15]},{"name":"shield","values":[false,true]}]}
 			""").getAsJsonObject();
 		SimulationContract contract = new SimulationContract(descriptor);
-		float[] catalogue = new float[33];
-		catalogue[0] = 1; catalogue[29] = 0.75F;
+		float[] catalogue = new float[SimulationContract.FEATURES.size()];
+		catalogue[SimulationContract.FEATURES.indexOf("self.health_fraction")] = 1;
+		catalogue[SimulationContract.FEATURES.indexOf("self.attack_charge")] = 0.75F;
 		float[] projected = contract.project(catalogue);
 		require(projected.length == 2 && projected[0] == 0.75F && projected[1] == 2, "Feature order and scales come from descriptors");
 		JsonObject spawn = JsonParser.parseString("""

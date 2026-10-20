@@ -1,6 +1,8 @@
 package net.cambium;
 
 import net.minecraft.SharedConstants;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -14,6 +16,9 @@ public final class EquipmentObservationChecks {
 		EquipmentEncoderChecks.check();
 		SharedConstants.tryDetectVersion();
 		Bootstrap.bootStrap();
+		for (var components : BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(VanillaRegistries.createWorldLookup())) {
+			components.apply();
+		}
 		checkWeapon(new ItemStack(Items.WOODEN_SWORD), true, false, 4, 4.0 + (double) -2.4F);
 		checkWeapon(new ItemStack(Items.IRON_AXE), true, true, 9, 4.0 + (double) -3.1F);
 		checkWeapon(new ItemStack(Items.NETHERITE_AXE), true, true, 10, 1);
