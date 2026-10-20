@@ -167,6 +167,122 @@ class TrainingJobTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
+class SubmitTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "project with spaces"
+        (self.root / "rosie").mkdir(parents=True)
+        source = Path(__file__).resolve().parents[2] / "rosie/submit.sh"
+        self.script = self.root / "rosie/submit.sh"
+        shutil.copyfile(source, self.script)
+        plans = self.root / "simulator/setups/curricula"
+        plans.mkdir(parents=True)
+        for name, budgets in (("axe-shield-fighting", [1500]),
+                              ("shield-axe-curriculum", [100, 200, 200, 1500])):
+            (plans / f"{name}.json").write_text(json.dumps({
+                "format": "minecraft_sim_training_plan", "version": 2,
+                "stages": [{"advance": {"updates": budget}} for budget in budgets],
+                "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
+            }))
+        python = self.root / ".venv-rosie/bin/python"
+        python.parent.mkdir(parents=True)
+        python.write_text(f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} \"$@\"\n")
+        python.chmod(0o700)
+        self.tools = self.root / "tools"
+        self.tools.mkdir()
+        self.log = self.root / "submission.json"
+        sbatch = self.tools / "sbatch"
+        sbatch.write_text(f"#!{sys.executable}\n" + '''import json
+import os
+from pathlib import Path
+import sys
+
+Path(os.environ["SUBMIT_TEST_LOG"]).write_text(json.dumps({
+    "arguments": sys.argv[1:], "cwd": os.getcwd(),
+    "inherited": [name for name in os.environ if name.startswith(("SIM_", "SBATCH_"))],
+}))
+if os.environ.get("SUBMIT_TEST_FAIL") == "1":
+    raise SystemExit(9)
+print("12345;test-cluster")
+''')
+        sbatch.chmod(0o700)
+
+    def launch(self, answers=None, dry_run=True, **settings):
+        environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
+                       "SUBMIT_TEST_LOG": str(self.log), **settings}
+        arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
+        return subprocess.run(arguments, input="\n".join(answers or [""] * 17) + "\n",
+                              cwd=self.temporary.name, env=environment,
+                              capture_output=True, text=True, timeout=10)
+
+    def test_enter_defaults_use_h100_and_current_plan_budget(self):
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for expected in ("--partition=dgxh100", "--gres=gpu:h100:1", "MCSIM_CUDA_ARCHITECTURES=90",
+                         "SIM_ENVS=8192", "SIM_UPDATES=2000", "SIM_ROLLOUT_STEPS=128",
+                         "SIM_HIDDEN_DIM=512", "SIM_EPOCHS=2", "SIM_MINIBATCH_SIZE=16384",
+                         "SIM_LR=0.0003", "Dry run: nothing submitted"):
+            self.assertIn(expected, result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_other_gpu_presets_and_fighting_plan(self):
+        for gpu, partition, arch, worlds, rollout in (("v100", "dgx", 70, 2048, 128),
+                                                      ("teaching", "teaching", 75, 256, 64)):
+            with self.subTest(gpu=gpu):
+                result = self.launch([gpu, "1"] + [""] * 14)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for expected in (f"--partition={partition}", f"MCSIM_CUDA_ARCHITECTURES={arch}",
+                                 f"SIM_ENVS={worlds}", f"SIM_ROLLOUT_STEPS={rollout}",
+                                 "SIM_UPDATES=1500", "axe-shield-fighting.json"):
+                    self.assertIn(expected, result.stdout)
+                self.assertFalse(self.log.exists())
+
+    def test_invalid_choices_reprompt_and_overrides_are_applied(self):
+        answers = ["bad-gpu", "v100", "99", "1", "custom", "2-00:00:00", "0", "1024",
+                   "50", "32", "256", "3", "4096", "0", "1e-4", "2", "32G", "3", "2", "0", "77:78"]
+        result = self.launch(answers)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Invalid value", result.stderr)
+        self.assertIn("listed plans", result.stderr)
+        self.assertIn("must not exceed", result.stderr)
+        for expected in ("--job-name=custom", "SIM_ENVS=1024", "SIM_UPDATES=50", "SIM_THREADS=2",
+                         "SIM_LR=1e-4", "SIM_REPLAY_EVERY=0", "--dependency=afterany:77:78"):
+            self.assertIn(expected, result.stdout)
+
+    def test_confirmation_submits_once_and_clears_stale_settings(self):
+        result = self.launch([""] * 16 + ["y"], dry_run=False,
+                             SIM_RESUME="old.pt", SIM_OUTPUT="old-run", SIM_BUILD_DIR="old-build",
+                             SIM_ENVIRONMENT="old.json", SBATCH_PARTITION="wrong")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submission = json.loads(self.log.read_text())
+        self.assertEqual(submission["cwd"], str(self.root))
+        self.assertEqual(submission["inherited"], [])
+        self.assertEqual(submission["arguments"][-1], "rosie/train.sbatch")
+        self.assertIn("--partition=dgxh100", submission["arguments"])
+        self.assertTrue((self.root / "rosie/logs").is_dir())
+        self.assertIn("Submitted job 12345", result.stdout)
+        self.assertIn("runs/rosie-12345", result.stdout)
+
+    def test_enter_at_confirmation_cancels(self):
+        result = self.launch(dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Cancelled", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_closed_input_does_not_submit(self):
+        result = self.launch(["h100"], dry_run=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Input closed", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_submission_failure_is_not_reported_as_success(self):
+        result = self.launch([""] * 16 + ["y"], dry_run=False, SUBMIT_TEST_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Submitted job", result.stdout)
+
+
+@unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
 class DashboardDiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

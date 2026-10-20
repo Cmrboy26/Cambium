@@ -50,6 +50,36 @@ does not enable multi-GPU training. Builds are isolated by architecture:
 reconfiguring a shared CMake tree. Do not run concurrent jobs against the same
 architecture/build directory.
 
+### Interactive Submission
+
+Run `bash rosie/submit.sh` from any working directory using the script's path.
+The wizard changes to the project root. Enter accepts each displayed default;
+submission requires an explicit `y` after the escaped command preview.
+`--dry-run` walks through the same prompts without calling `sbatch`.
+
+| Preset | Partition | GPU / CUDA architecture | Worlds | Rollout | Wall-Time |
+| --- | --- | --- | --- | --- | --- |
+| `h100` (default) | `dgxh100` | H100 / 90 | 8,192 | 128 | 1 day |
+| `v100` | `dgx` | V100 / 70 | 2,048 | 128 | 1 day |
+| `teaching` | `teaching` | T4 / 75 | 256 | 64 | 2 hours |
+
+World counts are starting points, not benchmarked optima. Each job requests one
+GPU, eight CPUs and 24 GB host RAM by default. Other prompts cover plan selection,
+job name, update cap, learner settings, CPU threads and replay cadence. Learner
+defaults come from the selected plan; the default update cap sums plain update
+budgets, or falls back to 1,500 for other advancement rules. All values are editable.
+The wizard requires only Bash and Python 3 to preview a submission.
+
+The wizard starts fresh runs and clears inherited `SIM_*` and `SBATCH_*` variables
+before invoking `sbatch`; use the batch interface below for resumes/initialization.
+Run paths remain job-specific. The optional dependency prompt accepts colon-separated
+job IDs and adds `afterany` so a job can wait for others sharing its architecture's
+build directory. Independent submission does not isolate concurrent builds; do not
+overlap jobs sharing a build directory. No jobs are submitted by the mocked checks:
+`python -B -m unittest simulator.training.test_rosie.SubmitTests -v`.
+
+### Batch Environment
+
 Supported training environment variables:
 
 - `SIM_ENVS`: parallel worlds; default 256 for new runs, restored on resume.

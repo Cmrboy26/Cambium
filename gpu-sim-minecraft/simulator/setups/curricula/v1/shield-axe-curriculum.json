@@ -45,7 +45,7 @@
       "opponents": "target",
       "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false,
                              "attack": false, "weapon": 0, "shield": false}},
-      "task_override": {"rewards": {"good_aim": 5, "aim_hold": 2}},
+      "task_override": {"max_ticks": 100, "rewards": {"good_aim": 5, "aim_hold": 2}},
       "advance": {"updates": 100}
     },
     {
@@ -56,20 +56,22 @@
       },
       "opponents": "target",
       "controls": {"fixed": {"jump": false, "sprint": false, "weapon": 0, "shield": false}},
-      "task_override": {"rewards": {"doing_damage": 10, "won_duel": 20, "good_aim": 1, "aim_hold": 1}},
+      "task_override": {"max_ticks": 300, "rewards": {"doing_damage": 10, "won_duel": 20, "good_aim": 1, "aim_hold": 1}},
       "advance": {"updates": 200}
     },
     {
       "name": "pursuit",
       "opponents": "pursuit",
       "controls": {"fixed": {"jump": false, "weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 600},
       "advance": {"updates": 200}
     },
     {
       "name": "shield_axe_combat",
       "opponents": "shield_axe_training",
       "controls": {"fixed": {}},
-      "advance": {"updates": 1000}
+      "task_override": {"max_ticks": 1200},
+      "advance": {"updates": 1500}
     }
   ]
 }

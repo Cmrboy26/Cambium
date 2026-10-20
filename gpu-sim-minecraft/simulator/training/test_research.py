@@ -83,6 +83,13 @@ class PlanChecks(unittest.TestCase):
                         self.assertTrue(all(item == "minecraft:air" for item in player["loadout"]["armor"].values()))
             self.assertNotEqual(initial_positions, next_positions)
 
+    def test_shield_axe_curriculum_episode_limits(self):
+        plan = resolve_plan(preset(SHIELD_AXE_PRESET))
+        self.assertEqual([stage["scenario"]["arenas"][0]["environment"]["max_ticks"]
+                  for stage in plan["stages"]], [100, 300, 600, 1200])
+        self.assertEqual(plan["evaluations"]["shield_axe_combat"]["scenario"]["arenas"][0]
+                 ["environment"]["max_ticks"], 1200)
+
     def test_shield_axe_curriculum_budgets_and_spawn_equipment(self):
         plan = resolve_plan(preset(SHIELD_AXE_PRESET))
         self.assertEqual([stage["advance"]["updates"] for stage in plan["stages"]], [100, 200, 200, 1000])

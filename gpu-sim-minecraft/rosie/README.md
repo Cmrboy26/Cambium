@@ -14,13 +14,16 @@ bash rosie/setup.sh
 
 ## Train
 
-Submit a short CUDA smoke test from `gpu-sim-minecraft`:
+Walk through GPU, plan and training settings; press Enter to accept defaults:
 
 ```sh
-sbatch rosie/train.sbatch
+bash rosie/submit.sh
 squeue -u "$USER"
 tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 ```
+
+Use `bash rosie/submit.sh --dry-run` to preview without submitting.
+For a one-update CUDA smoke test, use `sbatch rosie/train.sbatch` instead.
 
 ## Local Replays And Duels
 

@@ -33,7 +33,7 @@
     "pitch": {"uniform": [-15, 15]}
   },
   "task": {
-    "max_ticks": 300,
+    "max_ticks": 1200,
     "rewards": {
       "doing_damage": 10, "taking_damage": -2, "won_duel": 90, "death": -20,
       "episode_timeout": -10, "no_damage_penalty": -10, "blocked_with_shield": 5,

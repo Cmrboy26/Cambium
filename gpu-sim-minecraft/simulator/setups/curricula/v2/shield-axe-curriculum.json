@@ -1,0 +1,103 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "shield-axe-curriculum",
+  "seed": 42,
+  "policy": "../policies/equipment-combat.json",
+  "environment": "../environments/shield-axe-duel.json",
+  "learner": {"hidden_dim": 512, "lr": 0.0003, "epochs": 2, "minibatch_size": 16384},
+  "opponents": {
+    "policy": {"type": "self_play"},
+    "stationary": {"type": "scripted", "controller": "stationary_target"},
+    "sword_fighter": {"type": "scripted", "controller": "basic_melee",
+                       "options": {"strafe": true, "sprint": true}},
+    "shield_fighter": {"type": "scripted", "controller": "basic_melee",
+                        "options": {"strafe": true, "sprint": true, "shield": true}},
+    "axe_fighter": {"type": "scripted", "controller": "basic_melee",
+                     "options": {"strafe": true, "sprint": true, "axe_slot": 1, "sword_slot": 0}},
+    "shield_axe_fighter": {"type": "scripted", "controller": "basic_melee",
+                            "options": {"strafe": true, "sprint": true, "shield": true,
+                                        "axe_slot": 1, "sword_slot": 0}}
+  },
+  "mixtures": {
+    "target": [{"id": "stationary", "weight": 1}],
+    "pursuit": [{"id": "stationary", "weight": 1}, {"id": "sword_fighter", "weight": 3}],
+    "shield_axe": [{"id": "sword_fighter", "weight": 1},
+                   {"id": "shield_fighter", "weight": 3},
+                   {"id": "axe_fighter", "weight": 3},
+                   {"id": "shield_axe_fighter", "weight": 3}],
+    "shield_axe_training": [{"id": "sword_fighter", "weight": 1},
+                            {"id": "shield_fighter", "weight": 3},
+                            {"id": "axe_fighter", "weight": 3},
+                            {"id": "shield_axe_fighter", "weight": 3},
+                            {"id": "policy", "weight": 10}]
+  },
+  "evaluations": {
+    "shield_axe_combat": {
+      "environment": "../environments/shield-axe-duel.json",
+      "every_updates": 50, "episodes": 64, "seed": 1729,
+      "opponents": "shield_axe"
+    },
+    "aim_accuracy": {
+      "environment": "../environments/gear-duel.json",
+      "every_updates": 25,
+      "episodes": 64,
+      "seed": 1729,
+      "opponents": "target",
+      "controls": {
+        "fixed": {
+          "movement": "neutral",
+          "jump": false,
+          "sprint": false,
+          "attack": false,
+          "weapon": 0,
+          "shield": false
+        }
+      },
+      "task_override": {
+        "rewards": {"good_aim": 5, "aim_hold": 2}
+      }
+    }
+  },
+  "stages": [
+    {
+      "name": "aim",
+      "opponents": "target",
+      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false,
+                             "attack": false, "weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 100, "rewards": {"good_aim": 5, "aim_hold": 2}},
+      "advance": {
+        "evaluation": {
+          "suite": "aim_accuracy",
+          "metric": "reward_mean",
+          "at_least": 6.0
+        }
+      }
+    },
+    {
+      "name": "attack_timing",
+      "spawns": {
+        "region": {"min": [-0.1, 1, -1.3], "max": [0.1, 1, 1.3]},
+        "pitch": {"uniform": [-10, 10]}
+      },
+      "opponents": "target",
+      "controls": {"fixed": {"jump": false, "sprint": false, "weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 300, "rewards": {"doing_damage": 10, "won_duel": 20, "good_aim": 1, "aim_hold": 1}},
+      "advance": {"updates": 200}
+    },
+    {
+      "name": "pursuit",
+      "opponents": "pursuit",
+      "controls": {"fixed": {"jump": false, "weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 600},
+      "advance": {"updates": 200}
+    },
+    {
+      "name": "shield_axe_combat",
+      "opponents": "shield_axe_training",
+      "controls": {"fixed": {}},
+      "task_override": {"max_ticks": 1200},
+      "advance": {"updates": 1500}
+    }
+  ]
+}

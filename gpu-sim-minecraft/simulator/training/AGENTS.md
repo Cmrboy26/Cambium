@@ -205,6 +205,9 @@ branches.
 experiment: aiming 100, attack timing 200, pursuit 200, equipment combat 1,000.
 Budgets are fixed updates, not evaluation thresholds. The run needs an invocation
 cap of at least 1,500 updates to finish in one invocation.
+Each stage sets `task_override.max_ticks` to cap individual episodes: aiming 100,
+attack timing 300, pursuit 600, equipment combat 1,200 ticks. Evaluation retains
+the environment's 1,200-tick cap. An explicit CLI `--max-ticks` overrides stage caps.
 The preset owns its H100-oriented learner settings: hidden width 512, two PPO
 epochs and minibatches of 16,384. General compiler defaults are 256/4/1,024;
 explicit CLI overrides are saved into the resolved experiment.
