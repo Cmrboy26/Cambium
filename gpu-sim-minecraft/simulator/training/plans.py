@@ -298,20 +298,20 @@ class EpisodeSampler:
 
     def players(self, world):
         base = self.scenario["arenas"][self.arenas[world]]["environment"]
-        players = deepcopy(base["players"])
+        players = [{**player, "loadout": {**player["loadout"], "armor": dict(player["loadout"]["armor"])}}
+                   for player in base["players"]]
         cache = self.cache[world]
         gear = self.scenario.get("equipment")
         if gear:
             if gear["sample"] == "episode" or cache["equipment"] is None:
                 cache["equipment"] = [draw(gear["loadout"], self.gear_rng) for _ in range(2)]
             for player, loadout in zip(players, cache["equipment"]):
-                override = deepcopy(loadout)
-                armor = override.pop("armor", {})
-                player["loadout"].update(override)
-                player["loadout"]["armor"].update(armor)
+                player["loadout"].update({name: value for name, value in loadout.items() if name != "armor"})
+                player["loadout"]["armor"].update(loadout.get("armor", {}))
         for player in players:
-            slots = player["loadout"]["weapons"]
+            slots = list(player["loadout"]["weapons"])
             slots.extend(["minecraft:air"] * (9 - len(slots)))
+            player["loadout"]["weapons"] = slots
         spawn = self.scenario.get("spawns")
         if spawn:
             if spawn["sample"] == "episode" or cache["spawns"] is None:
@@ -320,8 +320,10 @@ class EpisodeSampler:
                 if "region" in spawn:
                     minimum = spawn.get("minimum_separation", 0.6)
                     for _ in range(256):
-                        for pose in poses:
-                            pose["position"] = self.spawn_rng.uniform(spawn["region"]["min"], spawn["region"]["max"]).tolist()
+                        positions = self.spawn_rng.uniform(spawn["region"]["min"], spawn["region"]["max"],
+                                                           size=(2, 3)).tolist()
+                        for pose, position in zip(poses, positions):
+                            pose["position"] = position
                         if (self._separated([pose["position"] for pose in poses], minimum)
                                 and all(self._valid_position(pose["position"], base) for pose in poses)):
                             break
@@ -350,8 +352,11 @@ class EpisodeSampler:
 
     @staticmethod
     def _separated(positions, minimum):
-        delta = np.abs(np.subtract(positions[0], positions[1]))
-        return (delta[0] >= 0.6 or delta[2] >= 0.6 or delta[1] >= 1.8) and np.linalg.norm(delta) >= minimum
+        delta_x = abs(positions[0][0] - positions[1][0])
+        delta_y = abs(positions[0][1] - positions[1][1])
+        delta_z = abs(positions[0][2] - positions[1][2])
+        return ((delta_x >= 0.6 or delta_z >= 0.6 or delta_y >= 1.8)
+            and math.sqrt(delta_x * delta_x + delta_y * delta_y + delta_z * delta_z) >= minimum)
 
     @staticmethod
     def _valid_position(position, base):

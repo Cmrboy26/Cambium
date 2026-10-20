@@ -44,6 +44,17 @@ training flags have no implicit migration aliases.
   The compiler produces one `minecraft_sim_experiment`, version 1, with no
   unresolved authoring references. Config uses `experiment`, not an authored plan
   copied alongside repeated environment defaults.
+- Curricula are optional, editable experiment data, not test fixtures. Do not add
+  per-preset assertions or read installed curriculum files in automated tests.
+  Use test-owned plans for compiler, sampler, training and submission behavior;
+  changing or emptying the curricula directory must not break those tests.
+  For an explicit one-time check, run
+  `python -m simulator.training.validate_plans [file-or-folder ...]` from the
+  project root. With no paths, it recursively checks the curricula directory;
+  an empty selection succeeds. It uses the compiler to validate JSON, references
+  and semantics, reports each file and exits nonzero if any fail. It does not
+  train, load a native library, submit jobs or enforce preset-specific settings,
+  and is deliberately separate from the automated suite.
 - All stages share one immutable policy layout. The equipment policy fixes 78 named catalogue
   features and eight heads with a stable weapon-slot count across all stages
   and evaluation scenes; later catalogue additions do not change it. Explicit
@@ -86,6 +97,16 @@ actual initial scenario, not a sampling distribution. Ordinary native reset
 restores the world's most recently assigned players. Initial scene templates
 are validated when the sampler is constructed or reconfigured, not per episode;
 sampled players still undergo loadout normalization and finite-value checks.
+The reset hot path draws both candidate positions in one NumPy call and uses
+scalar separation checks, retaining six uniform draws per rejection attempt,
+the 256-attempt limit and the existing corner fallback. Player assembly copies
+only mutable loadout containers before the final validating deep copy; returned
+players cannot alias scene templates or cached equipment/spawns. Regression
+checks compare seeded samples and checkpoint RNG state with the previous draw
+pattern, including fallback and selective-reset behavior. Reset optimizations
+do not require a native rebuild; already-running trainers must restart/resume
+to load updated Python code. CPU reset microbenchmarks are not CUDA throughput
+measurements.
 Sampled resets reuse the observations returned by `mcsim_reset_players` rather
 than immediately recomputing them; untouched arena groups are observed normally.
 Initial scene templates
@@ -306,6 +327,34 @@ self-play instead of changing a resumed experiment.
 This is a starting research budget, not a convergence claim or measured H100
 runtime. No block edits, procedural terrain or checkpoint opponents are used.
 
+## Pursuit/Melee Learning-Rate Comparison
+
+[pursuit-melee-lr-comparison.json](../setups/curricula/v2/pursuit-melee-lr-comparison.json)
+is a longer, scripted-only comparison with seed 42. Pursuit trains for 300
+updates against stationary targets with at least four blocks of spawn
+separation and a 600-tick episode cap. Melee then trains for 1,200 updates
+against the sprinting/strafe-enabled sword fighter with a 1,200-tick cap.
+Both stages keep movement, sprint, attack and look learned; jump is disabled,
+weapon slot 0 is fixed, shields are disabled, and equipment sampling is removed.
+Both players use the environment's fixed iron sword and no armor/offhand shield.
+Reward weights inherit the environment unchanged; this is not a sparse-reward
+or self-play experiment.
+
+`melee_benchmark` pins the final stage's conditions across the whole run and
+executes every 10 global updates (seed 1729). `pursuit_benchmark` executes every
+10 pursuit updates (seed 2718). Each uses 128 episodes across 64 worlds and
+reports win rate and mean episode return. Fixed update budgets never advance
+early based on score; the global benchmark remains comparable across the stage
+boundary even though training opponent/spawn/episode conditions change.
+
+Select `v2/pursuit-melee-lr-comparison.json` in `bash rosie/submit.sh`, use a fresh
+name such as `pursuit-lr`, and enter `multiple` for learning rate with `.0001`,
+`.0003`, `.0006`, then an empty line. Keep world count, rollout length and other
+settings identical. The wizard derives a 1,500-update invocation cap. Defaults
+are hidden width 512, two PPO epochs and minibatches of 16,384. Runtime and
+convergence are unmeasured; this first seed comparison does not establish a
+statistically reliable best rate. Do not submit jobs from automated checks.
+
 ## Setup
 
 From the repository root, with Python 3.10+ and a configured
@@ -497,7 +546,7 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   Use `--port` if occupied; Ctrl+C stops server.
 - The overview leads with experiment identity and a centered curriculum-stage
   browser, then seed/compute/policy/PPO settings, headline metrics and timing.
-  Arrows or stage buttons browse conditions without changing training/charts;
+  Arrows or stage buttons browse conditions without changing training/global charts;
   left/right and Home/End keys also navigate. Current and selected stages are
   separate. Browsing survives refresh; changing runs resets to the current stage.
   Stage details group advancement/progress, environment, opponents and controls.
@@ -511,6 +560,18 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   Saved experiments, not current authoring files, describe a run. Boundaries
   select the next stage but retain the just-finished rollout's progress only
   under its own stage. Runs without stages retain the historical summary.
+- Selected milestones graph each advancement condition, including nested ANY/ALL,
+  over that stage's complete recorded history with a dashed threshold line.
+  Each condition has its own scale; evaluation `reward_mean` is episode return,
+  not training's per-step mean, and win rates use percentages. Missing samples
+  remain pending, not zero. Stage-local updates label the horizontal axis;
+  historical rows missing stage counters use explicitly labeled PPO updates.
+  Snapshot updates deduplicate carried evaluation results and exclude other
+  stages. Historical results without snapshot metadata use saved suite cadence,
+  or consecutive-result changes when cadence is unavailable (identical later
+  measurements cannot then be distinguished). Budget metrics use recorded
+  stage progress. These raw charts are independent of global window/EMA controls;
+  browsing/refresh preserves selection, reuses live charts and releases old ones.
 - Section links lead to training results, curriculum/evaluation, world/replays,
   run configuration and recent updates. Charts group outcomes, optimization
   and runtime. Stage details/timeline and full configuration start collapsed;

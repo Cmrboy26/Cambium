@@ -1,4 +1,6 @@
 from copy import deepcopy
+import contextlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -8,8 +10,10 @@ from uuid import uuid4
 
 import numpy as np
 
+from simulator.training._test_plans import example_plan
 from simulator.training.environment import REWARD_NAMES, ROOT
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
+from simulator.training.validate_plans import main as validate_plans
 
 
 class ExperimentChecks(unittest.TestCase):
@@ -26,11 +30,10 @@ class ExperimentChecks(unittest.TestCase):
         self.arena = json.loads((ROOT / "simulator/setups/arenas/flat-duel.json").read_text())
         self.environment = json.loads((ROOT / "simulator/setups/environments/gear-duel.json").read_text())
         self.policy = json.loads((ROOT / "simulator/setups/policies/equipment-combat.json").read_text())
-        self.raw = json.loads((ROOT / "simulator/setups/curricula/v1/gear-curriculum.json").read_text())
+        self.raw = example_plan()
         self.environment["arena"] = "../arenas/flat.json"
         self.raw["environment"] = "../environments/duel.json"
         self.raw["policy"] = "../policies/combat.json"
-        self.raw.pop("learner")
         for suite in self.raw["evaluations"].values():
             suite["environment"] = "../environments/duel.json"
         self.write()
@@ -47,7 +50,7 @@ class ExperimentChecks(unittest.TestCase):
         resolved = self.resolve()
         self.assertEqual(resolved["format"], "minecraft_sim_experiment")
         self.assertEqual(resolved["version"], 1)
-        self.assertEqual(resolved["name"], "gear-curriculum")
+        self.assertEqual(resolved["name"], "test-curriculum")
         self.assertEqual(resolved["learner"],
                          {"hidden_dim": 256, "lr": 0.0003, "epochs": 4, "minibatch_size": 1024})
         self.assertEqual(resolved["policy"]["observation_dim"], 78)
@@ -68,6 +71,33 @@ class ExperimentChecks(unittest.TestCase):
             self.assertEqual(len(condition["scenario"]["equipment"]["loadout"]["weapons"]), 9)
         self.assertEqual(resolved["evaluations"]["held_out_combat"]["seed"], 1729)
         self.assertEqual(self.policy["actions"][-2]["values"], list(range(9)))
+
+    def test_opt_in_validator_reports_invalid_files_without_stopping(self):
+        invalid_json = self.directory / "curricula/broken.json"
+        invalid_json.write_text("{", encoding="utf-8")
+        invalid_plan = self.directory / "curricula/invalid.json"
+        invalid_plan.write_text(json.dumps({**self.raw, "policy": "missing.json"}), encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            status = validate_plans([str(self.plan_path), str(invalid_json), str(invalid_plan)])
+        self.assertEqual(status, 1)
+        self.assertIn(f"OK {self.plan_path}", output.getvalue())
+        self.assertIn("Validated 3 plan(s); 2 failed.", output.getvalue())
+        self.assertIn(str(invalid_json), errors.getvalue())
+        self.assertIn(str(invalid_plan), errors.getvalue())
+
+    def test_opt_in_validator_accepts_directories_and_empty_selections(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = validate_plans([str(self.plan_path.parent), str(self.plan_path)])
+        self.assertEqual(status, 0)
+        self.assertIn("Validated 1 plan(s); 0 failed.", output.getvalue())
+        self.plan_path.unlink()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = validate_plans([str(self.plan_path.parent)])
+        self.assertEqual(status, 0)
+        self.assertIn("Validated 0 plan(s); 0 failed.", output.getvalue())
 
     def test_reference_directories_and_once_only_source_reads(self):
         original = Path.read_text
@@ -169,20 +199,6 @@ class ExperimentChecks(unittest.TestCase):
         suite = self.resolve()["stages"][0]["evaluations"]["aim_accuracy"]
         self.assertEqual(suite["controls"], {"fixed": {}})
         self.assertFalse(stage["controls"]["fixed"]["attack"])
-
-    def test_active_shield_axe_curriculum_uses_inherited_evaluations(self):
-        plan = load_plan(ROOT / "simulator/setups/curricula/v2/shield-axe-curriculum.json")
-        aim, _, _, combat = plan["stages"]
-        local = aim["evaluations"]["aim_accuracy"]
-        benchmark = plan["evaluations"]["shield_axe_combat"]
-        self.assertEqual(local["scenario"], aim["scenario"])
-        self.assertEqual(local["scenario"]["arenas"][0]["environment"]["max_ticks"], 100)
-        self.assertEqual(local["controls"], aim["controls"])
-        self.assertEqual(local["worlds"], 64)
-        self.assertEqual(benchmark["scenario"], combat["scenario"])
-        self.assertEqual(benchmark["opponents"], combat["opponents"][:-1])
-        self.assertEqual(benchmark["worlds"], 64)
-        self.assertEqual(resolve_plan(plan), plan)
 
     def test_evaluation_references_scopes_and_world_counts_are_validated(self):
         suite = {"every_updates": 25, "episodes": 64, "seed": 1729}
@@ -287,6 +303,29 @@ class ExperimentChecks(unittest.TestCase):
         self.assertTrue(all(cache["equipment"] is None for cache in sampler.cache))
         self.assertEqual(sampler.players(0)[0]["loadout"]["armor"]["helmet"], "minecraft:turtle_helmet")
 
+    def test_sampled_players_do_not_alias_templates_or_component_caches(self):
+        for sample in ("world", "episode"):
+            with self.subTest(sample=sample):
+                self.environment["equipment"]["sample"] = sample
+                self.environment["equipment"]["loadout"]["armor"] = {"helmet": "minecraft:turtle_helmet"}
+                self.write()
+                sampler = EpisodeSampler(self.resolve()["scenario"], 2, 42)
+                players = sampler.players(0)
+                expected_scenario = deepcopy(sampler.scenario)
+                expected_state = sampler.state_dict()
+                for player in players:
+                    player["position"][0] += 100
+                    player["velocity"][0] = 100
+                    player["loadout"]["weapons"][0] = "minecraft:air"
+                    player["loadout"]["armor"]["helmet"] = "minecraft:air"
+                self.assertEqual(sampler.scenario, expected_scenario)
+                self.assertEqual(sampler.state_dict(), expected_state)
+                following = sampler.players(0)
+                self.assertTrue(all(player["loadout"]["armor"]["helmet"] == "minecraft:turtle_helmet"
+                                    for player in following))
+                self.assertTrue(all(player["loadout"]["weapons"][0] == "minecraft:iron_sword"
+                                    for player in following))
+
     def test_literal_sampling_consumes_no_rng(self):
         self.environment["equipment"]["loadout"] = {
             "weapons": ["minecraft:iron_sword", "minecraft:air"],
@@ -321,6 +360,41 @@ class ExperimentChecks(unittest.TestCase):
         clone.load_state_dict(sampler.state_dict())
         self.assertEqual(sampler.players(0), clone.players(0))
         self.assertEqual(sampler.state_dict(), clone.state_dict())
+
+    def test_spawn_sampling_matches_previous_positions_and_rng_state(self):
+        class PreviousDraws:
+            def __init__(self, generator):
+                self.generator = generator
+
+            def uniform(self, low, high, size=None):
+                if size == (2, 3):
+                    return np.array([self.generator.uniform(low, high), self.generator.uniform(low, high)])
+                return self.generator.uniform(low, high, size=size)
+
+            def __getattr__(self, name):
+                return getattr(self.generator, name)
+
+        def previous_separated(positions, minimum):
+            delta = np.abs(np.subtract(positions[0], positions[1]))
+            return ((delta[0] >= 0.6 or delta[2] >= 0.6 or delta[1] >= 1.8)
+                    and np.linalg.norm(delta) >= minimum)
+
+        for minimum in (2, 2.6):
+            with self.subTest(minimum=minimum):
+                self.environment["spawns"] = {
+                    "sample": "episode", "region": {"min": [-0.1, 1, -1.3], "max": [0.1, 1, 1.3]},
+                    "minimum_separation": minimum, "yaw": {"uniform": [-180, 180]},
+                    "pitch": {"uniform": [-20, 20]},
+                }
+                self.write()
+                scenario = self.resolve()["scenario"]
+                optimized = EpisodeSampler(scenario, 4, 42)
+                previous = EpisodeSampler(scenario, 4, 42)
+                previous.spawn_rng = PreviousDraws(previous.spawn_rng)
+                with patch.object(previous, "_separated", side_effect=previous_separated):
+                    for world in (0, 1, 2, 3, 0, 2):
+                        self.assertEqual(optimized.players(world), previous.players(world))
+                        self.assertEqual(optimized.state_dict(), previous.state_dict())
 
     def test_impossible_spawn_region_still_fails(self):
         self.environment["spawns"] = {

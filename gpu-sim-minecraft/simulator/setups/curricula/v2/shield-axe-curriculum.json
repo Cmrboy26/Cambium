@@ -49,7 +49,7 @@
       "task_override": {"max_ticks": 100, "rewards": {"good_aim": 5, "aim_hold": 2}},
       "evaluations": {
         "aim_accuracy": {
-          "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1729
+          "every_updates": 5, "worlds": 64, "episodes": 64, "seed": 1729
         }
       },
       "advance": {
@@ -69,14 +69,14 @@
       "opponents": "target",
       "controls": {"fixed": {"jump": false, "sprint": false, "weapon": 0, "shield": false}},
       "task_override": {"max_ticks": 300, "rewards": {"doing_damage": 10, "won_duel": 20, "good_aim": 1, "aim_hold": 1}},
-      "advance": {"updates": 200}
+      "advance": {"updates": 100}
     },
     {
       "name": "pursuit",
       "opponents": "pursuit",
       "controls": {"fixed": {"jump": false, "weapon": 0, "shield": false}},
       "task_override": {"max_ticks": 600},
-      "advance": {"updates": 200}
+      "advance": {"updates": 100}
     },
     {
       "name": "shield_axe_combat",

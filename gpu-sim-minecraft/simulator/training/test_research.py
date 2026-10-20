@@ -12,32 +12,19 @@ import numpy as np
 import torch
 
 from backend.fast_rl_model import ActorCritic
+from simulator.training._test_plans import example_plan
 from simulator.training.contract import from_legacy, resolve_scenario
 from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
-from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, reached, resolve_plan
+from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.research import OpponentPool, SampledWorlds, collect, evaluate
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
 
 
-PRESET = ROOT / "simulator/setups/curricula/v1/gear-curriculum.json"
-SHIELD_AXE_PRESET = ROOT / "simulator/setups/curricula/v1/shield-axe-curriculum.json"
-AXE_SHIELD_FIGHTING_PRESET = ROOT / "simulator/setups/curricula/v1/axe-shield-fighting.json"
-
-
-def preset(path=PRESET):
-    value = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("policy", "environment"):
-        value[key] = str((path.parent.parent / value[key]).resolve())
-    for suite in value["evaluations"].values():
-        suite["environment"] = str((path.parent.parent / suite["environment"]).resolve())
-    return value
-
-
 def short_plan():
-    value = preset()
+    value = example_plan()
     value["evaluations"] = {}
     for stage in value["stages"]:
         stage["advance"] = {"updates": 2}
@@ -45,87 +32,12 @@ def short_plan():
 
 
 class PlanChecks(unittest.TestCase):
-    def test_axe_shield_fighting_has_fixed_gear_and_direct_combat(self):
-        plan = load_plan(AXE_SHIELD_FIGHTING_PRESET)
-        self.assertEqual(len(plan["stages"]), 1)
-        stage = plan["stages"][0]
-        self.assertEqual(stage["name"], "combat")
-        self.assertEqual(stage["advance"], {"updates": 1500})
-        self.assertEqual(stage["controls"], {"fixed": {}})
-        self.assertEqual(plan["opponents"]["policy"], {"type": "self_play"})
-        self.assertTrue(all(opponent["type"] == "scripted" and opponent["controller"] == "basic_melee"
-                            for name, opponent in plan["opponents"].items() if name != "policy"))
-        self.assertEqual(stage["opponents"], [
-            {"id": "shield_fighter", "weight": 1}, {"id": "axe_fighter", "weight": 1},
-            {"id": "shield_axe_fighter", "weight": 2}, {"id": "policy", "weight": 4}])
-        evaluation = plan["evaluations"]["axe_shield_combat"]
-        self.assertEqual((evaluation["every_updates"], evaluation["episodes"]), (50, 64))
-        self.assertEqual(evaluation["opponents"], stage["opponents"][:-1])
-        for condition in (stage, evaluation):
-            scenario = condition["scenario"]
-            self.assertNotIn("equipment", scenario)
-            self.assertEqual(scenario["spawns"]["sample"], "episode")
-            self.assertEqual(scenario["arenas"][0]["environment"]["max_ticks"], 300)
-            sampler = EpisodeSampler(scenario, 8, plan["seed"])
-            initial_positions = []
-            next_positions = []
-            for world in range(8):
-                for positions in (initial_positions, next_positions):
-                    players = sampler.players(world)
-                    positions.append([player["position"] for player in players])
-                    self.assertGreaterEqual(np.linalg.norm(np.subtract(
-                        players[0]["position"], players[1]["position"])), 2)
-                    for player in players:
-                        self.assertEqual(player["loadout"]["weapons"],
-                                         ["minecraft:iron_sword", "minecraft:iron_axe"] + ["minecraft:air"] * 7)
-                        self.assertEqual(player["loadout"]["selected"], 0)
-                        self.assertEqual(player["loadout"]["offhand"], "minecraft:shield")
-                        self.assertTrue(all(item == "minecraft:air" for item in player["loadout"]["armor"].values()))
-            self.assertNotEqual(initial_positions, next_positions)
-
-    def test_shield_axe_curriculum_episode_limits(self):
-        plan = resolve_plan(preset(SHIELD_AXE_PRESET))
-        self.assertEqual([stage["scenario"]["arenas"][0]["environment"]["max_ticks"]
-                  for stage in plan["stages"]], [100, 300, 600, 1200])
-        self.assertEqual(plan["evaluations"]["shield_axe_combat"]["scenario"]["arenas"][0]
-                 ["environment"]["max_ticks"], 1200)
-
-    def test_shield_axe_curriculum_budgets_and_spawn_equipment(self):
-        plan = resolve_plan(preset(SHIELD_AXE_PRESET))
-        self.assertEqual([stage["advance"]["updates"] for stage in plan["stages"]], [100, 200, 200, 1000])
-        self.assertEqual(sum(stage["advance"]["updates"] for stage in plan["stages"]), 1500)
-        self.assertEqual(plan["opponents"]["policy"], {"type": "self_play"})
-        mixture = plan["stages"][-1]["opponents"]
-        self.assertEqual(mixture[-1], {"id": "policy", "weight": 10})
-        self.assertEqual(sum(entry["weight"] for entry in mixture[:-1]), 10)
-        self.assertEqual(plan["evaluations"]["shield_axe_combat"]["opponents"], mixture[:-1])
-        for stage in plan["stages"][:-1]:
-            self.assertNotIn("policy", [entry["id"] for entry in stage["opponents"]])
-        scenario = plan["stages"][1]["scenario"]
-        sampler = EpisodeSampler(scenario, 16, 42)
-        for world in range(16):
-            players = sampler.players(world)
-            distance = np.linalg.norm(np.subtract(players[0]["position"], players[1]["position"]))
-            self.assertGreaterEqual(distance, 2.0)
-            self.assertLess(distance, 2.7)
-            for player in players:
-                self.assertEqual(player["loadout"]["weapons"][0], "minecraft:iron_sword")
-                self.assertIn(player["loadout"]["weapons"][1], ("minecraft:air", "minecraft:iron_axe"))
-                self.assertTrue(all(item == "minecraft:air" for item in player["loadout"]["armor"].values()))
-        model_slots = plan["policy"]["action_sizes"][plan["policy"]["action_names"].index("weapon")]
-        self.assertEqual(model_slots, 9)
-        for stage in plan["stages"]:
-            self.assertEqual(stage["scenario"]["arenas"][0]["environment"]["blocks"],
-                             plan["scenario"]["arenas"][0]["environment"]["blocks"])
-            self.assertEqual(stage["scenario"]["equipment"], plan["scenario"]["equipment"])
-        self.assertNotIn("movement", plan["stages"][1]["controls"]["fixed"])
-
     def test_legacy_exports_and_roundtrip(self):
         self.assertIs(SCHEMA, LEGACY_SCHEMA)
         self.assertIs(SCHEMA_V2, LEGACY_V2)
         self.assertEqual(from_legacy(SCHEMA)["observation_dim"], 22)
         self.assertEqual(from_legacy(SCHEMA_V2)["observation_dim"], 31)
-        plan = resolve_plan(preset())
+        plan = resolve_plan(example_plan())
         self.assertEqual(plan_hash(plan), plan_hash(resolve_plan(plan)))
         self.assertLessEqual(plan["policy"]["observation_dim"], 128)
         self.assertEqual(plan["policy"]["observation_dim"], 78)
@@ -339,23 +251,31 @@ class ResearchChecks(unittest.TestCase):
             np.testing.assert_allclose(sum(row["reward_types"].values()), row["reward_total"],
                                        rtol=1e-6, atol=2e-5)
 
-    def test_axe_shield_fighting_training_evaluation_and_replay(self):
-        plan = preset(AXE_SHIELD_FIGHTING_PRESET)
+    def test_fixed_loadout_training_evaluation_and_replay(self):
+        plan = example_plan()
+        plan["stages"] = [plan["stages"][1]]
         plan["stages"][0]["advance"] = {"updates": 1}
-        plan["evaluations"]["axe_shield_combat"].update(every_updates=1, episodes=4)
+        plan["stages"][0]["equipment"] = {
+            "sample": "episode", "players": "independent",
+            "loadout": {"weapons": ["minecraft:iron_sword", "minecraft:iron_axe"],
+                        "selected": 0, "offhand": "minecraft:shield"},
+        }
+        plan["evaluations"] = {"combat_check": {
+            "stage": "combat", "every_updates": 1, "episodes": 4, "seed": 1729,
+        }}
         self.path.write_text(json.dumps(plan))
-        output = self.directory / "axe-shield-fighting-smoke"
+        output = self.directory / "fixed-loadout-smoke"
         with contextlib.redirect_stdout(io.StringIO()):
             main([*self.flags, "--updates", "1", "--output", str(output), "--replay-every", "4",
                   "--max-ticks", "32", "--rollout-steps", "32"])
         checkpoint = torch.load(output / "latest.pt", weights_only=True)
         self.assertTrue(checkpoint["research"]["completed"])
         self.assertEqual(checkpoint["metadata"]["controls"], {"fixed": {}})
-        self.assertEqual(checkpoint["metadata"]["experiment"]["name"], "axe-shield-fighting")
+        self.assertEqual(checkpoint["metadata"]["experiment"]["name"], plan["name"])
         metrics = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
         self.assertEqual(len(metrics), 1)
         self.assertEqual(metrics[0]["stage"], "combat")
-        self.assertEqual(metrics[0]["evaluations"]["axe_shield_combat"]["episodes"], 4)
+        self.assertEqual(metrics[0]["evaluations"]["combat_check"]["episodes"], 4)
         self.assertTrue(np.isfinite(metrics[0]["loss"]))
         np.testing.assert_allclose(sum(metrics[0]["reward_types"].values()),
                                    metrics[0]["reward_total"], rtol=1e-6, atol=2e-5)
@@ -478,13 +398,19 @@ class ResearchChecks(unittest.TestCase):
         worlds.configure(plan["stages"][1])
         self.assertEqual(addresses, [environment._handle for _, environment in worlds.groups])
 
-    def test_shield_axe_preset_all_stages_smoke(self):
-        plan = preset(SHIELD_AXE_PRESET)
+    def test_four_stage_training_evaluation_and_replay(self):
+        plan = example_plan()
+        aim, combat = plan["stages"]
+        attack = {**deepcopy(combat), "name": "attack",
+                  "controls": {"fixed": {"jump": False, "sprint": False, "weapon": 0, "shield": False}}}
+        pursuit = {**deepcopy(combat), "name": "pursuit",
+                   "controls": {"fixed": {"jump": False, "weapon": 0, "shield": False}}}
+        plan["stages"] = [aim, attack, pursuit, combat]
         for stage in plan["stages"]:
             stage["advance"] = {"updates": 1}
-        plan["evaluations"]["shield_axe_combat"].update(every_updates=1, episodes=4)
+        plan["evaluations"]["held_out_combat"].update(every_updates=1, episodes=4)
         self.path.write_text(json.dumps(plan))
-        output = self.directory / "shield-axe-smoke"
+        output = self.directory / "four-stage-smoke"
         with contextlib.redirect_stdout(io.StringIO()):
             main([*self.flags, "--updates", "4", "--output", str(output), "--replay-every", "4",
                   "--max-ticks", "32", "--rollout-steps", "32"])
@@ -492,8 +418,8 @@ class ResearchChecks(unittest.TestCase):
         self.assertTrue(checkpoint["research"]["completed"])
         self.assertEqual(checkpoint["update"], 4)
         metrics = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
-        self.assertEqual([row["stage"] for row in metrics], ["aim", "attack_timing", "pursuit", "shield_axe_combat"])
-        self.assertEqual(metrics[-1]["evaluations"]["shield_axe_combat"]["episodes"], 4)
+        self.assertEqual([row["stage"] for row in metrics], [stage["name"] for stage in plan["stages"]])
+        self.assertEqual(metrics[-1]["evaluations"]["held_out_combat"]["episodes"], 4)
         replay_stages = set()
         for path in (output / "replays").glob("*.jsonl"):
             with path.open() as replay:

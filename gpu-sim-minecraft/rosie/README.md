@@ -23,6 +23,9 @@ tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 ```
 
 Use `bash rosie/submit.sh --dry-run` to preview without submitting.
+The job/run name appears in the dashboard. Sweep one setting with `multiple`, then
+values one per line and an empty line. Jobs get `-<value>` suffixes and train
+concurrently with locked builds and private libraries. [Options](AGENTS.md#interactive-submission).
 For a one-update CUDA smoke test, use `sbatch rosie/train.sbatch` instead.
 
 ## Local Replays And Duels

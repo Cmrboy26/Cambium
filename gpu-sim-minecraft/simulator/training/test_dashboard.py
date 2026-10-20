@@ -34,7 +34,7 @@ class DashboardChecks(unittest.TestCase):
         page = PageStructure()
         page.feed(Path(__file__).with_name("dashboard").joinpath("index.html").read_text(encoding="utf-8"))
         self.assertEqual(len(page.ids), len(set(page.ids)), "Dashboard IDs must remain unique")
-        ordered = ["run-title", "milestone-browser", "milestone-strip", "milestone-details",
+        ordered = ["run-title", "milestone-browser", "milestone-strip", "milestone-details", "milestone-metrics",
                  "run-identity", "run-context", "stat-update", "stat-remaining",
                    "results", "outcomes-title", "optimization-title", "runtime-title", "curriculum",
                    "world", "run-settings", "recent-updates"]
@@ -69,6 +69,12 @@ const document = {getElementById(id) {if (!nodes.has(id)) nodes.set(id,new Node(
     addEventListener() {}, dispatchEvent() {}};
 const context = vm.createContext({document, Intl, CustomEvent:class {}, setInterval() {}, cancelAnimationFrame() {}});
 vm.runInContext(fs.readFileSync(path.join(process.argv[1],'dashboard.js'),'utf8'), context);
+const conditionCharts=[];
+context.Chart=class {
+    constructor(canvas,config) {this.canvas=canvas; this.data=config.data; this.options=config.options; this.destroyed=false; conditionCharts.push(this);}
+    update() {}
+    destroy() {this.destroyed=true;}
+};
 const text = id=>document.getElementById(id).textContent;
 const hidden = id=>document.getElementById(id).hidden;
 const scene = name=>({name,max_ticks:50,players:[],bounds:{min:[0,0,0],size:[8,4,8]}});
@@ -95,6 +101,8 @@ assert.match(text('run-context'),/Aim environment.*target.*100%.*attack=false/);
 assert.equal(text('run-stage-status'),text('curriculum-status'));
 assert.equal(hidden('milestone-browser'),false);
 assert.equal(text('milestone-name'),'aim');
+assert.equal(hidden('milestone-metrics'),true,'Update progress must not get a redundant graph');
+assert.equal(conditionCharts.length,0);
 assert.equal(text('milestone-position'),'Stage 1 of 2');
 assert.match(text('milestone-current'),/Initial stage: aim/);
 assert.equal(document.getElementById('milestone-previous').disabled,true);
@@ -114,6 +122,8 @@ assert.equal(document.getElementById('milestone-controls').dataset.mode,'fixed')
 assert.match(text('milestone-rewards-inactive'),/Win.*0/);
 assert.doesNotMatch(text('milestone-rewards'),/Damage dealt/,'Never use deployment rewards for a stage');
 document.getElementById('milestone-next').onclick();
+assert.equal(conditionCharts.length,2,'Nested conditions omit updates but retain episode and transition charts');
+assert.doesNotMatch(text('milestone-metric-charts'),/Completed updates/);
 assert.equal(text('milestone-name'),'fight');
 assert.equal(text('milestone-position'),'Stage 2 of 2');
 assert.equal(milestoneSlots()[1].attributes['aria-pressed'],'true');
@@ -135,6 +145,7 @@ vm.runInContext('renderCurriculum();',context);
 assert.equal(text('milestone-name'),'fight','Live refresh must preserve the browsed stage');
 document.getElementById('milestone-return').onclick();
 assert.equal(text('milestone-name'),'aim');
+assert.equal(conditionCharts.every(chart=>chart.destroyed),true,'Returning to an update-only stage must release charts');
 assert.match(text('stage-context'),/Aim environment.*Flat.*target.*100%.*attack=false/);
 assert.match(text('config'),/Seed 17.*Learning rate 0.01/);
 assert.equal(hidden('experiment-details'),false);
@@ -159,6 +170,8 @@ assert.match(text('milestone-progress'),/2.*updates.*3.*episodes.*64.*transition
 assert.equal(document.getElementById('milestone-progress-bar').hidden,false);
 assert.equal(document.getElementById('milestone-progress-bar').max,2);
 assert.equal(document.getElementById('milestone-progress-bar').value,2);
+assert.equal(hidden('milestone-metrics'),true);
+assert.equal(text('milestone-metric-charts'),'','Update-only stages must clear the metric section');
 document.getElementById('milestone-return').onclick();
 assert.match(text('run-context'),/Aim environment.*target.*100%/,'Boundary summary must describe the latest rollout, not the upcoming stage');
 assert.match(text('run-budget'),/updates: 2 \/ 2/);
@@ -189,6 +202,8 @@ assert.match(text('stage-timeline'),/3–4 fight.*Curriculum complete/);
 vm.runInContext(`records=[{update:1}]; renderConfig({options:{seed:5},metadata:{environment:{name:'Historical'}}}); renderCurriculum();`,context);
 assert.equal(hidden('curriculum'),true);
 assert.equal(hidden('milestone-browser'),true);
+assert.equal(hidden('milestone-metrics'),true);
+assert.equal(conditionCharts.at(-1).destroyed,true,'Changing to a legacy run must release charts');
 assert.equal(hidden('experiment-details'),true);
 assert.equal(text('environment-name'),'Historical');
 assert.equal(text('run-title'),'Historical');
@@ -243,6 +258,40 @@ vm.runInContext(`records=[{update:5,stage:'unknown'}]; renderCurriculum();`,cont
 assert.equal(text('milestone-current'),'Current stage not recorded');
 assert.equal(text('milestone-state'),'Status not recorded');
 assert.equal(document.getElementById('milestone-progress-bar').hidden,true);
+vm.runInContext(`const monitored=JSON.parse(JSON.stringify(fixture));
+    monitored.experiment.stages[0].advance={evaluation:{suite:'aim_accuracy',metric:'reward_mean',at_least:6}};
+    records=[{update:25,stage_index:0,stage_progress:{updates:25},evaluations:{aim_accuracy:{
+        reward_mean:5.5,snapshot_update:25,stage_index:0}}},
+        {update:26,stage_index:0,stage_progress:{updates:26},evaluations:{aim_accuracy:{
+        reward_mean:5.5,snapshot_update:25,stage_index:0}}}];
+    renderConfig(monitored); renderCurriculum();`,context);
+const accuracyChart=conditionCharts.at(-1);
+assert.equal(accuracyChart.data.datasets[0].data.length,1,'Carried evaluation results are not new points');
+assert.equal(accuracyChart.data.datasets[0].data[0].x,25);
+assert.equal(accuracyChart.data.datasets[0].pointRadius,3,'Single evaluations must remain visible');
+assert.deepEqual(Array.from(accuracyChart.data.datasets[1].borderDash),[6,4]);
+assert.equal(accuracyChart.data.datasets[1].data[0].y,6);
+assert.match(text('milestone-metric-charts'),/Mean episode return.*5.5 \/ 6.*aim_accuracy/);
+const chartCount=conditionCharts.length;
+vm.runInContext('renderCurriculum();',context);
+assert.equal(conditionCharts.length,chartCount,'Live refresh must reuse charts');
+vm.runInContext(`records.push({update:50,stage_index:0,stage_progress:{updates:50},
+    evaluations:{aim_accuracy:{reward_mean:6.2,win_rate:0.8,snapshot_update:50,stage_index:0}}});
+    renderCurriculum();`,context);
+assert.equal(conditionCharts.length,chartCount,'New measurements must update the existing chart');
+assert.equal(accuracyChart.data.datasets[0].data.length,2);
+assert.equal(accuracyChart.options.scales.x.max,50,'History must grow with stage progress');
+assert.match(text('milestone-metric-charts'),/6.2 \/ 6/);
+vm.runInContext(`monitored.experiment.stages[0].advance.evaluation.metric='win_rate';
+    monitored.experiment.stages[0].advance.evaluation.at_least=0.75; renderCurriculum();`,context);
+assert.match(text('milestone-metric-charts'),/Win rate.*80% \/ 75%/);
+assert.equal(conditionCharts.at(-1).options.scales.y.suggestedMax,1);
+vm.runInContext('records=[]; renderCurriculum();',context);
+assert.match(text('milestone-metric-charts'),/Awaiting evaluation/);
+assert.equal(conditionCharts.at(-1).data.datasets[0].data.length,0);
+assert.equal(conditionCharts.at(-1).data.datasets[1].data[0].y,0.75,'The threshold remains visible before any evaluation');
+document.getElementById('milestone-next').onclick();
+assert.equal(accuracyChart.destroyed,true);
 // Replay metadata is independent of self-play, and equipment remains concrete.
 const arenaSource=fs.readFileSync(path.join(process.argv[1],'arena.js'),'utf8');
 vm.runInContext(arenaSource.slice(arenaSource.indexOf('function renderReplayTraining'),arenaSource.indexOf('\nclass ArenaViewer')),context);
@@ -358,6 +407,56 @@ assert.equal(player.loadout.selected, 1);
 assert.equal(player.loadout.offhand, 'minecraft:air');
 assert.equal(player.loadout.armor.helmet, 'minecraft:diamond_helmet');
 assert.equal(replayPlayers(scenario,[frames[0].actors[0]])[0].loadout.selected,0);
+""", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for milestone history checks")
+    def test_milestone_condition_history(self):
+        script = Path(__file__).with_name("dashboard") / "dashboard.js"
+        result = subprocess.run(["node", "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const context = vm.createContext({document:{getElementById:()=>({dataset:{}})},Intl});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);
+const evaluate = code=>JSON.parse(JSON.stringify(vm.runInContext(code,context)));
+vm.runInContext(`const experiment={evaluations:{combat:{every_updates:2}},stages:[
+    {name:'aim',evaluations:{accuracy:{every_updates:2}},advance:{all:[{updates:4},{any:[
+        {evaluation:{suite:'accuracy',metric:'reward_mean',at_least:6}},
+        {evaluation:{suite:'combat',metric:'win_rate',at_least:0.75}}]}]}},
+    {name:'fight',advance:{episodes:100}}]};
+const result=(snapshot,value)=>({snapshot_update:snapshot,stage:'aim',stage_index:0,reward_mean:value,episodes:64});
+records=[
+    {update:10,stage_index:0,stage_progress:{updates:1},evaluations:{}},
+    {update:11,stage_index:0,stage_progress:{updates:2},evaluations:{accuracy:result(11,4)}},
+    {update:12,stage_index:0,stage_progress:{updates:3},evaluations:{accuracy:result(11,4)}},
+    {update:13,stage_index:0,stage_progress:{updates:4},evaluations:{accuracy:result(13,6.2)}},
+    {update:14,stage_index:1,stage_progress:{updates:1,episodes:2},evaluations:{accuracy:result(13,6.2)}}];`,context);
+assert.equal(evaluate('milestoneMetricHistory(experiment.stages[0],experiment).length'),3);
+assert.deepEqual(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[1].data'),
+    [{x:2,y:4,update:11},{x:4,y:6.2,update:13}]);
+assert.deepEqual(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[1].thresholdData'),
+    [{x:0,y:6},{x:4,y:6}]);
+assert.equal(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[1].xLabel'),'Stage update');
+assert.deepEqual(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[0].data.map(point=>point.y)'),[1,2,3,4]);
+assert.deepEqual(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[2].data'),[]);
+assert.deepEqual(evaluate('milestoneMetricHistory(experiment.stages[1],experiment)[0].data'),[{x:1,y:2,update:14}]);
+vm.runInContext(`records.push({update:15,stage_index:0,stage_progress:{updates:5},
+    evaluations:{accuracy:{...result(15,99),stage:'fight',stage_index:1}}});`,context);
+assert.equal(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[1].data.length'),2);
+vm.runInContext(`records=records.slice(0,4); for(const row of records) {
+    if(row.evaluations.accuracy) delete row.evaluations.accuracy.snapshot_update;
+}`,context);
+assert.deepEqual(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[1].data'),
+    [{x:2,y:4,update:11},{x:4,y:6.2,update:13}]);
+vm.runInContext(`delete experiment.stages[0].evaluations.accuracy.every_updates;
+    for(const row of records) delete row.stage_progress;`,context);
+assert.deepEqual(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[1].data'),
+    [{x:11,y:4,update:11},{x:13,y:6.2,update:13}]);
+assert.equal(evaluate('milestoneMetricHistory(experiment.stages[0],experiment)[1].xLabel'),'PPO update');
+assert.equal(evaluate('milestoneMetricHistory(experiment.stages[0],experiment,[])[1].data.length'),0);
+assert.deepEqual(evaluate('advancementMetrics({all:[{updates:2},{any:[{episodes:10},{transitions:100}]}]})')
+    .map(condition=>condition.metric),['updates','episodes','transitions']);
 """, str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 

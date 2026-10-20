@@ -34,6 +34,8 @@ let displayedRun = "";
 let configuration = null;
 let milestoneIndex = null;
 let milestoneRun = "";
+const milestoneCharts = new Map();
+let milestoneChartSignature = "";
 
 function sortRuns(runs) {
     return [...runs].sort((left, right) => right.name.localeCompare(left.name, undefined, { numeric: true, sensitivity: "base" }) || left.id.localeCompare(right.id));
@@ -274,6 +276,148 @@ function advancementText(advance) {
         : `${format(value)} ${key}`).join("; ") || "Not recorded";
 }
 
+function advancementMetrics(advance) {
+    if (!advance || typeof advance !== "object") return [];
+    for (const combination of ["any", "all"]) {
+        if (Array.isArray(advance[combination])) return advance[combination].flatMap(advancementMetrics);
+    }
+    const evaluation = advance.evaluation;
+    if (evaluation && Number.isFinite(evaluation.at_least)) {
+        return [{suite: evaluation.suite, metric: evaluation.metric, threshold: evaluation.at_least}];
+    }
+    return ["updates", "episodes", "transitions"].filter((metric) => Number.isFinite(advance[metric]))
+        .map((metric) => ({metric, threshold: advance[metric]}));
+}
+
+function milestoneMetricHistory(stage, experiment, rows = records) {
+    const stageRows = rows.filter((row) => stageFor(row, experiment) === stage);
+    const snapshots = new Map(stageRows.map((row) => [row.update, row]));
+    const localUpdates = stageRows.every((row) => Number.isFinite(row.stage_progress?.updates));
+    const coordinate = (row) => localUpdates ? row.stage_progress.updates : row.update;
+    const end = stageRows.reduce((maximum, row) => Math.max(maximum, coordinate(row)), 1);
+    const start = localUpdates ? 0 : stageRows[0]?.update ?? 0;
+    const conditions = new Map(advancementMetrics(stage?.advance).map((condition) => [JSON.stringify(condition), condition]));
+    return [...conditions].map(([key, condition]) => {
+        const data = new Map();
+        const suite = stage.evaluations?.[condition.suite] ?? experiment?.evaluations?.[condition.suite];
+        let previousLegacy = null;
+        for (const row of stageRows) {
+            if (!condition.suite) {
+                const value = row.stage_progress?.[condition.metric];
+                if (Number.isFinite(value)) data.set(row.update, {x: coordinate(row), y: value, update: row.update});
+                continue;
+            }
+            const result = row.evaluations?.[condition.suite];
+            if (!result || !Number.isFinite(result[condition.metric])) continue;
+            if ((result.stage !== undefined || result.stage_index !== undefined) && stageFor(result, experiment) !== stage) continue;
+            let snapshot = result.snapshot_update;
+            if (!Number.isInteger(snapshot)) {
+                const counter = stage.evaluations?.[condition.suite] ? row.stage_progress?.updates : row.update;
+                if (Number.isInteger(suite?.every_updates) && Number.isFinite(counter)) {
+                    if (counter % suite.every_updates !== 0) continue;
+                } else {
+                    const signature = JSON.stringify(result);
+                    if (signature === previousLegacy) continue;
+                    previousLegacy = signature;
+                }
+                snapshot = row.update;
+            }
+            const measured = snapshots.get(snapshot);
+            if (measured) data.set(snapshot, {x: coordinate(measured), y: result[condition.metric], update: snapshot});
+        }
+        return {...condition, key, data: [...data.values()].sort((left, right) => left.x - right.x),
+            thresholdData: [{x: start, y: condition.threshold}, {x: Math.max(start + 1, end), y: condition.threshold}],
+            xLabel: localUpdates ? "Stage update" : "PPO update"};
+    });
+}
+
+function renderMilestoneMetricCharts(stage, experiment) {
+    const histories = stage ? milestoneMetricHistory(stage, experiment).filter((history) => history.metric !== "updates") : [];
+    element("milestone-metrics").hidden = !histories.length;
+    const signature = JSON.stringify([element("run").value, experiment?.name, stage?.name, histories.map((history) => history.key)]);
+    if (signature !== milestoneChartSignature) {
+        for (const entry of milestoneCharts.values()) entry.chart?.destroy();
+        milestoneCharts.clear();
+        milestoneChartSignature = signature;
+        const fragment = document.createDocumentFragment();
+        for (const [index, history] of histories.entries()) {
+            const labels = {reward_mean: "Mean episode return", win_rate: "Win rate", updates: "Completed updates",
+                episodes: "Completed episodes", transitions: "Learner transitions"};
+            const label = labels[history.metric] ?? history.metric;
+            const metricFormat = (value) => history.metric === "win_rate" ? `${format(value * 100, 2)}%` : format(value, 4);
+            const section = document.createElement("section");
+            section.className = "milestone-condition";
+            const heading = document.createElement("div");
+            heading.className = "milestone-condition-heading";
+            const title = document.createElement("h5");
+            title.id = `milestone-condition-${index}-title`;
+            title.textContent = label;
+            section.setAttribute("aria-labelledby", title.id);
+            const value = document.createElement("strong");
+            value.className = "milestone-condition-value";
+            value.setAttribute("aria-live", "polite");
+            heading.append(title, value);
+            const source = document.createElement("p");
+            source.className = "milestone-condition-source";
+            source.textContent = history.suite ? `${history.suite} (${history.metric})` : "Stage progress";
+            const plot = document.createElement("div");
+            plot.className = "milestone-condition-plot";
+            const canvas = document.createElement("canvas");
+            canvas.setAttribute("role", "img");
+            canvas.setAttribute("aria-label", `${history.suite ? `${history.suite}: ` : ""}${label} by update, threshold ${metricFormat(history.threshold)}`);
+            plot.append(canvas);
+            section.append(heading, source, plot);
+            fragment.append(section);
+            milestoneCharts.set(history.key, {canvas, value, label, metricFormat, chart: null});
+        }
+        element("milestone-metric-charts").replaceChildren(fragment);
+    }
+    for (const history of histories) {
+        const entry = milestoneCharts.get(history.key);
+        const latest = history.data.at(-1);
+        entry.value.textContent = latest ? `${entry.metricFormat(latest.y)} / ${entry.metricFormat(history.threshold)}`
+            : history.suite ? "Awaiting evaluation" : "Awaiting rollout";
+        entry.value.dataset.met = latest ? String(latest.y >= history.threshold) : "unknown";
+        if (!entry.chart && typeof Chart !== "undefined") {
+            entry.chart = new Chart(entry.canvas, {
+                type: "line",
+                data: {datasets: [
+                    {label: entry.label, data: [], borderColor: colors.green, backgroundColor: colors.green,
+                        borderWidth: 2, pointRadius: history.suite ? 3 : 0, pointHoverRadius: 5,
+                        pointHitRadius: 8, tension: 0, spanGaps: false},
+                    {label: `Threshold ≥ ${entry.metricFormat(history.threshold)}`, data: [], borderColor: colors.amber,
+                        backgroundColor: colors.amber, borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0},
+                ]},
+                options: {
+                    responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+                    interaction: {mode: "nearest", intersect: false},
+                    plugins: {
+                        legend: {position: "bottom", labels: {boxWidth: 12, boxHeight: 3, font: {size: 10}}},
+                        tooltip: {callbacks: {label: (item) => `${item.dataset.label}: ${entry.metricFormat(item.parsed.y)}`}},
+                    },
+                    scales: {
+                        x: {type: "linear", grid: {display: false}, title: {display: true, text: history.xLabel},
+                            ticks: {maxTicksLimit: 7, precision: 0, font: {size: 10}}},
+                        y: {suggestedMin: history.metric === "win_rate" ? 0 : undefined,
+                            suggestedMax: history.metric === "win_rate" ? 1 : undefined,
+                            grid: {color: "#e3e9e5"}, border: {display: false},
+                            ticks: {maxTicksLimit: 5, font: {size: 10}, callback: entry.metricFormat}},
+                    },
+                },
+            });
+        }
+        if (entry.chart) {
+            entry.chart.data.datasets[0].data = history.data;
+            entry.chart.data.datasets[1].data = history.thresholdData;
+            entry.chart.options.scales.x.title.text = history.xLabel;
+            entry.chart.options.scales.x.min = history.thresholdData[0].x;
+            entry.chart.options.scales.x.max = history.thresholdData[1].x;
+            entry.chart.options.plugins.tooltip.callbacks.title = (items) => `${history.xLabel} ${format(items[0]?.parsed.x)}`;
+            entry.chart.update("none");
+        }
+    }
+}
+
 function rewardWeight(value) {
     const magnitude = Math.abs(value);
     const number = magnitude !== 0 && (magnitude < 0.0001 || magnitude >= 1e6)
@@ -380,7 +524,10 @@ function renderMilestones() {
     element("milestone-browser").hidden = !stages.length;
     element("legacy-stage-status").hidden = stages.length > 0;
     element("run-context").hidden = stages.length > 0;
-    if (!stages.length) return;
+    if (!stages.length) {
+        renderMilestoneMetricCharts(null, experiment);
+        return;
+    }
 
     const complete = latest?.completed_curriculum === true;
     const recordedIndex = stages.indexOf(stageFor(latest, experiment));
@@ -461,6 +608,7 @@ function renderMilestones() {
         progress.value = Math.min(limit, value);
         progress.setAttribute("aria-label", `${format(value)} of ${format(limit)} ${unit}`);
     }
+    renderMilestoneMetricCharts(selected, experiment);
     renderFields("milestone-environment", stageConditions(selected).filter(([label]) => ["Environment", "Arena mixture", "Episode limit"].includes(label)));
     renderMilestoneOpponents(selected.opponents ?? []);
     const controls = selected.controls?.fixed ?? selected.controls;

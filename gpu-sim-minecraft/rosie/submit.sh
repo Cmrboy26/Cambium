@@ -7,7 +7,7 @@ DRY_RUN=false
 case "${1:-}" in
     --dry-run) DRY_RUN=true ;;
     -h|--help)
-        printf 'Usage: bash rosie/submit.sh [--dry-run]\nInteractive training submission; Enter accepts each default.\n'
+        printf 'Usage: bash rosie/submit.sh [--dry-run]\nInteractive training submission; Enter accepts each default.\nType multiple at one training/resource setting to submit a single-variable sweep.\n'
         exit 0 ;;
     '') ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
@@ -17,20 +17,68 @@ if (( $# > 1 )); then
     exit 1
 fi
 
+SWEEP_VARIABLE=""
+SWEEP_LABEL=""
+SWEEP_VALUES=()
+
+valid_value() {
+    local value="$1" pattern="$2" maximum="$3"
+    if [[ ! "$value" =~ $pattern ]]; then
+        printf 'Invalid value; please try again.\n' >&2
+        return 1
+    fi
+    if [[ -n "$maximum" ]] && (( value > maximum )); then
+        printf 'Trainer threads must not exceed allocated cores (%s).\n' "$maximum" >&2
+        return 1
+    fi
+}
+
 prompt() {
     local variable="$1" label="$2" default="$3" pattern="$4" answer
+    local allow_multiple="${5:-false}" maximum="${6:-}" duplicate existing
     while true; do
         printf '%s [%s]: ' "$label" "$default" >&2
         if ! IFS= read -r answer; then
             printf '\nInput closed; nothing submitted.\n' >&2
             exit 1
         fi
+        if [[ "$answer" == multiple && "$allow_multiple" == true ]]; then
+            if [[ -n "$SWEEP_VARIABLE" ]]; then
+                printf 'Only one setting can use multiple; %s is already selected. Enter a single value.\n' "$SWEEP_LABEL" >&2
+                continue
+            fi
+            while true; do
+                printf '  %s value (Enter to finish): ' "$label" >&2
+                if ! IFS= read -r answer; then
+                    printf '\nInput closed; nothing submitted.\n' >&2
+                    exit 1
+                fi
+                if [[ -z "$answer" ]]; then
+                    if (( ${#SWEEP_VALUES[@]} )); then break; fi
+                    printf 'Enter at least one value before finishing.\n' >&2
+                    continue
+                fi
+                if ! valid_value "$answer" "$pattern" "$maximum"; then continue; fi
+                duplicate=false
+                for existing in "${SWEEP_VALUES[@]}"; do
+                    if [[ "$answer" == "$existing" ]]; then duplicate=true; break; fi
+                done
+                if "$duplicate"; then
+                    printf 'That value is already included.\n' >&2
+                    continue
+                fi
+                SWEEP_VALUES+=("$answer")
+            done
+            SWEEP_VARIABLE="$variable"
+            SWEEP_LABEL="$label"
+            printf -v "$variable" '%s' "${SWEEP_VALUES[0]}"
+            return
+        fi
         answer="${answer:-$default}"
-        if [[ "$answer" =~ $pattern ]]; then
+        if valid_value "$answer" "$pattern" "$maximum"; then
             printf -v "$variable" '%s' "$answer"
             return
         fi
-        printf 'Invalid value; please try again.\n' >&2
     done
 }
 
@@ -42,8 +90,8 @@ case "$GPU" in
     teaching) PARTITION=teaching; GRES=gpu:t4:1; ARCH=75; ENVS_DEFAULT=256; ROLLOUT_DEFAULT=64; TIME_DEFAULT=0-02:00:00 ;;
 esac
 
-shopt -s nullglob
-PLANS=(simulator/setups/curricula/*.json)
+shopt -s nullglob globstar
+PLANS=(simulator/setups/curricula/**/*.json)
 if (( ${#PLANS[@]} == 0 )); then
     printf 'No training plans found.\n' >&2
     exit 1
@@ -51,7 +99,7 @@ fi
 DEFAULT_PLAN=1
 printf '\nTraining plans:\n'
 for index in "${!PLANS[@]}"; do
-    printf '  %d) %s\n' "$((index + 1))" "${PLANS[index]##*/}"
+    printf '  %d) %s\n' "$((index + 1))" "${PLANS[index]#simulator/setups/curricula/}"
     if [[ "${PLANS[index]##*/}" == shield-axe-curriculum.json ]]; then
         DEFAULT_PLAN=$((index + 1))
     fi
@@ -92,45 +140,84 @@ fi
 read -r UPDATES_DEFAULT HIDDEN_DEFAULT EPOCHS_DEFAULT MINIBATCH_DEFAULT LR_DEFAULT <<< "$DEFAULTS"
 
 printf '\nTraining settings (world counts are starting points, not measured tuning):\n'
+printf 'Type multiple at one training/resource setting; enter values one per line, then an empty line.\n'
 NAME="${PLAN##*/}"
-prompt JOB_NAME 'Job name' "${NAME%.json}" '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$'
-prompt TIME 'Wall-time limit (days-HH:MM:SS or HH:MM:SS)' "$TIME_DEFAULT" '^([0-9]+-)?[0-9]+:[0-5][0-9]:[0-5][0-9]$'
-prompt ENVS 'Parallel worlds' "$ENVS_DEFAULT" '^[1-9][0-9]{0,5}$'
-prompt UPDATES 'Maximum optimizer updates' "$UPDATES_DEFAULT" '^[1-9][0-9]{0,8}$'
-prompt ROLLOUT 'Steps per rollout' "$ROLLOUT_DEFAULT" '^[1-9][0-9]{0,5}$'
-prompt HIDDEN 'Hidden width' "$HIDDEN_DEFAULT" '^[1-9][0-9]{0,4}$'
-prompt EPOCHS 'PPO epochs' "$EPOCHS_DEFAULT" '^[1-9][0-9]{0,3}$'
-prompt MINIBATCH 'Minibatch size' "$MINIBATCH_DEFAULT" '^[1-9][0-9]{0,7}$'
-prompt LR 'Learning rate' "$LR_DEFAULT" '^([0-9]*\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(\.[0-9]+)?)([eE][+-]?[0-9]+)?$'
-prompt CPUS 'Allocated CPU cores' 8 '^[1-9][0-9]{0,2}$'
-prompt MEMORY 'Host RAM (not GPU memory)' 24G '^[1-9][0-9]*[KMGT]$'
-while true; do
-    prompt THREADS 'Trainer CPU threads' "$(( CPUS < 4 ? CPUS : 4 ))" '^[1-9][0-9]{0,2}$'
-    if (( THREADS <= CPUS )); then break; fi
-    printf 'Trainer threads must not exceed allocated cores.\n' >&2
-done
-prompt REPLAY 'Replay interval in completed duels (0 disables)' 50000 '^(0|[1-9][0-9]{0,8})$'
+prompt JOB_NAME 'Job/run name' "${NAME%.json}" '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$'
+prompt TIME 'Wall-time limit (days-HH:MM:SS or HH:MM:SS)' "$TIME_DEFAULT" '^([0-9]+-)?[0-9]+:[0-5][0-9]:[0-5][0-9]$' true
+prompt ENVS 'Parallel worlds' "$ENVS_DEFAULT" '^[1-9][0-9]{0,5}$' true
+prompt UPDATES 'Maximum optimizer updates' "$UPDATES_DEFAULT" '^[1-9][0-9]{0,8}$' true
+prompt ROLLOUT 'Steps per rollout' "$ROLLOUT_DEFAULT" '^[1-9][0-9]{0,5}$' true
+prompt HIDDEN 'Hidden width' "$HIDDEN_DEFAULT" '^[1-9][0-9]{0,4}$' true
+prompt EPOCHS 'PPO epochs' "$EPOCHS_DEFAULT" '^[1-9][0-9]{0,3}$' true
+prompt MINIBATCH 'Minibatch size' "$MINIBATCH_DEFAULT" '^[1-9][0-9]{0,7}$' true
+prompt LR 'Learning rate' "$LR_DEFAULT" '^([0-9]*\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(\.[0-9]+)?)([eE][+-]?[0-9]+)?$' true
+prompt CPUS 'Allocated CPU cores' 8 '^[1-9][0-9]{0,2}$' true
+prompt MEMORY 'Host RAM (not GPU memory)' 24G '^[1-9][0-9]*[KMGT]$' true
+THREAD_LIMIT="$CPUS"
+if [[ "$SWEEP_VARIABLE" == CPUS ]]; then
+    for cores in "${SWEEP_VALUES[@]}"; do
+        if (( cores < THREAD_LIMIT )); then THREAD_LIMIT="$cores"; fi
+    done
+fi
+prompt THREADS 'Trainer CPU threads' "$(( THREAD_LIMIT < 4 ? THREAD_LIMIT : 4 ))" '^[1-9][0-9]{0,2}$' true "$THREAD_LIMIT"
+prompt REPLAY 'Replay interval in completed duels (0 disables)' 50000 '^(0|[1-9][0-9]{0,8})$' true
 printf '\nCUDA build directory: simulator/build-rosie-cuda-%s\n' "$ARCH"
-printf 'Do not overlap jobs using this build directory. Enter their job IDs below to queue after them.\n'
+printf 'Builds use a shared lock; each job trains from a private library copy.\n'
+printf 'For jobs submitted with the older launcher, enter their IDs to avoid overlapping an unlocked build.\n'
 prompt DEPENDENCY 'Wait for job IDs (colon-separated), or none' none '^(none|[1-9][0-9]*(:[1-9][0-9]*)*)$'
 
-EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY"
-COMMAND=(sbatch --parsable "--job-name=$JOB_NAME" "--partition=$PARTITION" "--gres=$GRES"
-    "--time=$TIME" "--cpus-per-gpu=$CPUS" "--mem=$MEMORY" "--export=$EXPORTS")
-if [[ "$DEPENDENCY" != none ]]; then
-    COMMAND+=("--dependency=afterany:$DEPENDENCY")
+RUN_NAMES=("$JOB_NAME")
+if [[ -n "$SWEEP_VARIABLE" ]]; then
+    RUN_NAMES=()
+    for value in "${SWEEP_VALUES[@]}"; do
+        suffix="${value//:/-}"
+        suffix="${suffix//+/}"
+        RUN_NAMES+=("$JOB_NAME-$suffix")
+    done
 fi
-COMMAND+=(rosie/train.sbatch)
+declare -A SEEN_RUNS=()
+for run_name in "${RUN_NAMES[@]}"; do
+    if [[ ! "$run_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$ ]]; then
+        printf 'Run name must be at most 120 filename-safe characters: %s\nNothing submitted.\n' "$run_name" >&2
+        exit 1
+    fi
+    if [[ -n "${SEEN_RUNS[$run_name]:-}" || -e "simulator/training/runs/$run_name" || -L "simulator/training/runs/$run_name" ]]; then
+        printf 'Run name already exists or is duplicated: %s\nChoose an unused name; nothing submitted.\n' "$run_name" >&2
+        exit 1
+    fi
+    SEEN_RUNS[$run_name]=1
+done
+
+prepare_command() {
+    local index="$1" dependency="$2"
+    if [[ -n "$SWEEP_VARIABLE" ]]; then
+        printf -v "$SWEEP_VARIABLE" '%s' "${SWEEP_VALUES[index]}"
+    fi
+    RUN_OUTPUT="simulator/training/runs/${RUN_NAMES[index]}"
+    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY"
+    COMMAND=(sbatch --parsable "--job-name=${RUN_NAMES[index]}" "--partition=$PARTITION" "--gres=$GRES"
+        "--time=$TIME" "--cpus-per-gpu=$CPUS" "--mem=$MEMORY" "--export=$EXPORTS")
+    if [[ "$dependency" != none ]]; then
+        COMMAND+=("--dependency=afterany:$dependency")
+    fi
+    COMMAND+=(rosie/train.sbatch)
+}
 
 printf '\nWorking directory: %s\nFresh run; existing SIM_* settings and SBATCH_* overrides will not be inherited.\n' "$ROOT"
-printf 'Submission command:\n  '
-printf '%q ' "${COMMAND[@]}"
-printf '\n\n'
+if [[ -n "$SWEEP_VARIABLE" ]]; then
+    printf 'Sweep: %s (%d jobs). Jobs can train concurrently; shared builds are locked.\n' "$SWEEP_LABEL" "${#RUN_NAMES[@]}"
+fi
+for index in "${!RUN_NAMES[@]}"; do
+    prepare_command "$index" "$DEPENDENCY"
+    printf 'Submission command (%s):\n  ' "${RUN_NAMES[index]}"
+    printf '%q ' "${COMMAND[@]}"
+    printf '\n\n'
+done
 if "$DRY_RUN"; then
     printf 'Dry run: nothing submitted.\n'
     exit 0
 fi
-prompt CONFIRM 'Submit this job? (y/n)' n '^[yYnN]$'
+prompt CONFIRM "Submit ${#RUN_NAMES[@]} job(s)? (y/n)" n '^[yYnN]$'
 if [[ "$CONFIRM" != [yY] ]]; then
     printf 'Cancelled; nothing submitted.\n'
     exit 0
@@ -144,6 +231,16 @@ while IFS= read -r variable; do
     case "$variable" in SIM_*|SBATCH_*) unset "$variable" ;; esac
 done < <(compgen -e)
 mkdir -p rosie/logs
-JOB_ID="$("${COMMAND[@]}")"
-JOB_ID="${JOB_ID%%;*}"
-printf 'Submitted job %s\nRun: simulator/training/runs/rosie-%s\nLog: rosie/logs/gpu-sim-%s.out\n' "$JOB_ID" "$JOB_ID" "$JOB_ID"
+for index in "${!RUN_NAMES[@]}"; do
+    prepare_command "$index" "$DEPENDENCY"
+    if ! JOB_ID="$("${COMMAND[@]}")"; then
+        printf 'Submission failed for %s; no further jobs submitted. Already submitted jobs were left unchanged.\n' "${RUN_NAMES[index]}" >&2
+        exit 1
+    fi
+    JOB_ID="${JOB_ID%%;*}"
+    if [[ ! "$JOB_ID" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'Unexpected sbatch job ID: %s; stopping submissions.\n' "$JOB_ID" >&2
+        exit 1
+    fi
+    printf 'Submitted job %s\nRun: %s\nLog: rosie/logs/gpu-sim-%s.out\n' "$JOB_ID" "$RUN_OUTPUT" "$JOB_ID"
+done

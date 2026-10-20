@@ -1,0 +1,48 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "pursuit-melee-lr-comparison",
+  "seed": 42,
+  "policy": "../../policies/equipment-combat.json",
+  "environment": "../../environments/shield-axe-duel.json",
+  "learner": {"hidden_dim": 512, "lr": 0.0003, "epochs": 2, "minibatch_size": 16384},
+  "opponents": {
+    "stationary": {"type": "scripted", "controller": "stationary_target"},
+    "sword_fighter": {"type": "scripted", "controller": "basic_melee",
+                      "options": {"strafe": true, "sprint": true}}
+  },
+  "mixtures": {
+    "target": [{"id": "stationary", "weight": 1}],
+    "melee": [{"id": "sword_fighter", "weight": 1}]
+  },
+  "evaluations": {
+    "melee_benchmark": {
+      "stage": "melee",
+      "every_updates": 10, "episodes": 128, "worlds": 64, "seed": 1729
+    }
+  },
+  "stages": [
+    {
+      "name": "pursuit",
+      "opponents": "target",
+      "controls": {"fixed": {"jump": false, "weapon": 0, "shield": false}},
+      "equipment": null,
+      "spawns": {"minimum_separation": 4},
+      "task_override": {"max_ticks": 600},
+      "evaluations": {
+        "pursuit_benchmark": {
+          "every_updates": 10, "episodes": 128, "worlds": 64, "seed": 2718
+        }
+      },
+      "advance": {"updates": 300}
+    },
+    {
+      "name": "melee",
+      "opponents": "melee",
+      "controls": {"fixed": {"jump": false, "weapon": 0, "shield": false}},
+      "equipment": null,
+      "task_override": {"max_ticks": 1200},
+      "advance": {"updates": 1200}
+    }
+  ]
+}

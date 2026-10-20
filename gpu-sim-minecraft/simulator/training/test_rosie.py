@@ -115,27 +115,60 @@ class TrainingJobTests(unittest.TestCase):
         (self.root / "simulator/setups/curricula").mkdir(parents=True)
         (self.root / "simulator/setups/curricula/shield-axe-curriculum.json").write_text("{}")
         (self.root / "simulator/build-rosie-cuda-75").mkdir()
-        (self.root / "simulator/build-rosie-cuda-75/minecraft_sim_training.so").touch()
+        (self.root / "simulator/build-rosie-cuda-75/minecraft_sim_training.so").write_bytes(b"compiled simulator")
         (self.root / ".venv-rosie/bin").mkdir(parents=True)
         self.log = self.root / "arguments"
+        self.snapshot = self.root / "library-snapshot"
+        self.scratch = self.root / "scratch"
+        self.scratch.mkdir()
         for name in ("module", "nvcc", "nvidia-smi"):
             self.executable(self.tools / name, "#!/usr/bin/env bash\nexit 0\n")
         self.executable(self.tools / "cmake",
-                        '#!/usr/bin/env bash\nif [[ "$1" == "--version" ]]; then echo "cmake version 3.25.0"; fi\n')
+                        '#!/usr/bin/env bash\n'
+                        'if [[ "$1" == "--version" ]]; then echo "cmake version 3.25.0"; exit 0; fi\n'
+                        'if [[ "${JOB_TEST_BUILD_FAIL:-0}" == "1" ]]; then exit 9; fi\n'
+                        'if flock --nonblock "$JOB_TEST_BUILD/.build.lock" true; then\n'
+                        '  echo "Build lock was not held" >&2; exit 10\n'
+                        'fi\n'
+                        'if [[ "${JOB_TEST_VERSIONED_BUILD:-0}" == "1" && "$1" == "--build" ]]; then\n'
+                        '  printf "%s" "$SLURM_JOB_ID" > "$JOB_TEST_BUILD/minecraft_sim_training.so"\n'
+                        'fi\n')
         self.executable(self.root / ".venv-rosie/bin/python",
-                        '#!/usr/bin/env bash\nif [[ "$1" == "-B" ]]; then printf "%s\\n" "$@" > "$JOB_TEST_LOG"; fi\n')
+                        '#!/usr/bin/env bash\n'
+                        'if [[ "$1" == "-B" ]]; then\n'
+                        '  printf "%s\\n" "$@" > "$JOB_TEST_LOG"\n'
+                        '  while (( $# )); do\n'
+                        '    if [[ "$1" == "--library" ]]; then cp -- "$2" "$JOB_TEST_SNAPSHOT"; break; fi\n'
+                        '    shift\n'
+                        '  done\n'
+                        '  if ! flock --nonblock "$JOB_TEST_BUILD/.build.lock" true; then\n'
+                        '    echo "Build lock was held during training" >&2; exit 11\n'
+                        '  fi\n'
+                        '  if [[ "${JOB_TEST_WAIT_FOR_INPUT:-0}" == "1" ]]; then\n'
+                        '    printf "TRAINING_READY\\n"\n'
+                        '    IFS= read -r answer\n'
+                        '    cp -- "$2" "$JOB_TEST_AFTER_SNAPSHOT"\n'
+                        '  fi\n'
+                        '  exit "${JOB_TEST_TRAIN_FAIL:-0}"\n'
+                        'fi\n')
         self.script = Path(__file__).resolve().parents[2] / "rosie/train.sbatch"
 
     def executable(self, path, text):
         path.write_text(text)
         path.chmod(0o700)
 
-    def launch(self, **settings):
+    def job_environment(self, **settings):
         environment = {key: value for key, value in os.environ.items() if not key.startswith("SIM_")}
         environment.update(PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
                            SLURM_SUBMIT_DIR=str(self.root), SLURM_JOB_ID="77", JOB_TEST_LOG=str(self.log),
-                           MCSIM_CUDA_ARCHITECTURES="75", **settings)
-        return subprocess.run(["bash", str(self.script)], env=environment, capture_output=True,
+                           SLURM_TMPDIR=str(self.scratch), JOB_TEST_SNAPSHOT=str(self.snapshot),
+                           JOB_TEST_BUILD=str(self.root / "simulator/build-rosie-cuda-75"),
+                           MCSIM_CUDA_ARCHITECTURES="75")
+        environment.update(settings)
+        return environment
+
+    def launch(self, **settings):
+        return subprocess.run(["bash", str(self.script)], env=self.job_environment(**settings), capture_output=True,
                               text=True, timeout=10)
 
     def test_defaults_use_plan_learner_without_legacy_flags(self):
@@ -165,6 +198,102 @@ class TrainingJobTests(unittest.TestCase):
         self.assertIn("were replaced", result.stdout)
         self.assertFalse(self.log.exists())
 
+    def test_named_output_directory_reaches_trainer(self):
+        output = "simulator/training/runs/lr-test-.0001"
+        result = self.launch(SIM_OUTPUT=output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertEqual(arguments[arguments.index("--output") + 1], output)
+
+    def test_private_library_is_copied_and_cleaned_after_training(self):
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        library = Path(arguments[arguments.index("--library") + 1])
+        self.assertEqual(library.parent.parent, self.scratch)
+        self.assertTrue(library.parent.name.startswith("cambium-77."))
+        self.assertEqual(self.snapshot.read_bytes(), b"compiled simulator")
+        self.assertFalse(library.parent.exists())
+        self.assertTrue((self.root / "simulator/build-rosie-cuda-75/minecraft_sim_training.so").is_file())
+        self.assertTrue((self.root / "simulator/build-rosie-cuda-75/.build.lock").is_file())
+
+    def test_build_failure_never_starts_training_and_cleans_scratch(self):
+        result = self.launch(JOB_TEST_BUILD_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_training_failure_still_cleans_private_library(self):
+        result = self.launch(JOB_TEST_TRAIN_FAIL="9")
+        self.assertEqual(result.returncode, 9, result.stderr)
+        self.assertTrue(self.snapshot.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_lock_failure_never_starts_build_or_training(self):
+        self.executable(self.tools / "flock", "#!/usr/bin/env bash\nexit 12\n")
+        result = self.launch()
+        self.assertEqual(result.returncode, 12, result.stderr)
+        self.assertNotIn("Building native CUDA library", result.stdout)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_missing_library_aborts_and_cleans_private_directory(self):
+        (self.root / "simulator/build-rosie-cuda-75/minecraft_sim_training.so").unlink()
+        result = self.launch()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("native training library was not produced", result.stdout)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_private_library_uses_tmpdir_when_slurm_scratch_is_unset(self):
+        fallback = self.root / "fallback scratch"
+        fallback.mkdir()
+        result = self.launch(SLURM_TMPDIR="", TMPDIR=str(fallback))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertEqual(Path(arguments[arguments.index("--library") + 1]).parent.parent, fallback)
+        self.assertEqual(list(fallback.iterdir()), [])
+
+    def test_custom_build_directory_uses_its_own_lock_and_snapshot(self):
+        build = self.root / "custom build"
+        build.mkdir()
+        (build / "minecraft_sim_training.so").write_bytes(b"custom simulator")
+        result = self.launch(SIM_BUILD_DIR=str(build), JOB_TEST_BUILD=str(build))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((build / ".build.lock").exists())
+        self.assertEqual(self.snapshot.read_bytes(), b"custom simulator")
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_second_job_builds_while_first_trains_from_unchanged_snapshot(self):
+        after = self.root / "first-library-after-rebuild"
+        environment = self.job_environment(JOB_TEST_VERSIONED_BUILD="1", JOB_TEST_WAIT_FOR_INPUT="1",
+                                           JOB_TEST_AFTER_SNAPSHOT=str(after))
+        with subprocess.Popen(["bash", str(self.script)], env=environment, stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as first:
+            try:
+                assert first.stdout is not None
+                for line in first.stdout:
+                    if line.strip() == "TRAINING_READY":
+                        break
+                else:
+                    self.fail("First job never reached training")
+                second_snapshot = self.root / "second-library"
+                second = self.launch(SLURM_JOB_ID="78", JOB_TEST_VERSIONED_BUILD="1",
+                                     JOB_TEST_LOG=str(self.root / "second-arguments"),
+                                     JOB_TEST_SNAPSHOT=str(second_snapshot))
+                self.assertEqual(second.returncode, 0, second.stderr)
+                self.assertIsNone(first.poll(), "First job must still be training when the second completes")
+                self.assertEqual(self.snapshot.read_bytes(), b"77")
+                self.assertEqual(second_snapshot.read_bytes(), b"78")
+                _, errors = first.communicate("continue\n", timeout=10)
+                self.assertEqual(first.returncode, 0, errors)
+                self.assertEqual(after.read_bytes(), b"77", "A later build must not change the first job's library")
+            finally:
+                if first.poll() is None:
+                    first.kill()
+                    first.communicate(timeout=10)
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
 
 @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
 class SubmitTests(unittest.TestCase):
@@ -192,25 +321,31 @@ class SubmitTests(unittest.TestCase):
         self.tools = self.root / "tools"
         self.tools.mkdir()
         self.log = self.root / "submission.json"
+        self.history = self.root / "submissions.jsonl"
         sbatch = self.tools / "sbatch"
         sbatch.write_text(f"#!{sys.executable}\n" + '''import json
 import os
 from pathlib import Path
 import sys
 
-Path(os.environ["SUBMIT_TEST_LOG"]).write_text(json.dumps({
+submission = {
     "arguments": sys.argv[1:], "cwd": os.getcwd(),
     "inherited": [name for name in os.environ if name.startswith(("SIM_", "SBATCH_"))],
-}))
-if os.environ.get("SUBMIT_TEST_FAIL") == "1":
+}
+Path(os.environ["SUBMIT_TEST_LOG"]).write_text(json.dumps(submission))
+history = Path(os.environ["SUBMIT_TEST_HISTORY"])
+count = len(history.read_text().splitlines()) if history.exists() else 0
+with history.open("a") as stream:
+    stream.write(json.dumps(submission) + "\\n")
+if os.environ.get("SUBMIT_TEST_FAIL") == "1" or os.environ.get("SUBMIT_TEST_FAIL_AT") == str(count + 1):
     raise SystemExit(9)
-print("12345;test-cluster")
+print(f"{12345 + count};test-cluster")
 ''')
         sbatch.chmod(0o700)
 
     def launch(self, answers=None, dry_run=True, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
-                       "SUBMIT_TEST_LOG": str(self.log), **settings}
+                       "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
         arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
         return subprocess.run(arguments, input="\n".join(answers or [""] * 17) + "\n",
                               cwd=self.temporary.name, env=environment,
@@ -238,6 +373,69 @@ print("12345;test-cluster")
                     self.assertIn(expected, result.stdout)
                 self.assertFalse(self.log.exists())
 
+    def test_nested_plan_learning_rate_sweep_preview(self):
+        relative = "simulator/setups/curricula/experiments/comparison.json"
+        destination = self.root / relative
+        destination.parent.mkdir(parents=True)
+        destination.write_text(json.dumps({
+            "format": "minecraft_sim_training_plan", "version": 2,
+            "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
+            "stages": [{"advance": {"updates": 300}}, {"advance": {"updates": 1200}}],
+        }))
+        answers = self.sweep_answers(10, [".0001", ".0003", ".0006"])
+        answers[1] = "2"
+        answers[2] = "comparison-lr"
+        result = self.launch(answers)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("experiments/comparison.json", result.stdout)
+        commands = [shlex.split(line) for line in result.stdout.splitlines()
+                    if line.lstrip().startswith("sbatch --parsable")]
+        self.assertEqual(len(commands), 3)
+        for rate, command in zip((".0001", ".0003", ".0006"), commands):
+            self.assertIn(f"--job-name=comparison-lr-{rate}", command)
+            export = next(argument for argument in command if argument.startswith("--export="))
+            settings = dict(item.split("=", 1) for item in export.removeprefix("--export=ALL,").split(","))
+            self.assertEqual(settings["SIM_UPDATES"], "1500")
+            self.assertEqual(settings["SIM_PLAN"], relative)
+            self.assertEqual(settings["SIM_OUTPUT"], f"simulator/training/runs/comparison-lr-{rate}")
+            self.assertEqual(settings["SIM_LR"], rate)
+        self.assertFalse(self.log.exists())
+
+    def test_recursive_buckets_show_distinct_names_and_select_nested_default(self):
+        plans = self.root / "simulator/setups/curricula"
+        first = plans / "v1"
+        first.mkdir()
+        for plan in plans.glob("*.json"):
+            plan.rename(first / plan.name)
+        nested = plans / "v2/aim practice/shield-axe-curriculum.json"
+        nested.parent.mkdir(parents=True)
+        value = json.loads((first / nested.name).read_text())
+        value["stages"] = [{"advance": {"updates": 25}}]
+        nested.write_text(json.dumps(value))
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("v1/axe-shield-fighting.json", "v1/shield-axe-curriculum.json",
+                     "v2/aim practice/shield-axe-curriculum.json"):
+            self.assertIn(name, result.stdout)
+        self.assertIn("Plan number [3]", result.stderr)
+        self.assertIn("SIM_UPDATES=25", result.stdout)
+        self.assertFalse(self.log.exists())
+        result = self.launch([""] * 16 + ["y"], dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submission = json.loads(self.log.read_text())
+        export = next(argument for argument in submission["arguments"] if argument.startswith("--export="))
+        self.assertIn("SIM_PLAN=simulator/setups/curricula/v2/aim practice/shield-axe-curriculum.json,", export)
+
+    def test_empty_plan_tree_fails_without_submission(self):
+        plans = self.root / "simulator/setups/curricula"
+        for plan in plans.glob("*.json"):
+            plan.unlink()
+        (plans / "empty/deeply/nested").mkdir(parents=True)
+        result = self.launch()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No training plans found", result.stderr)
+        self.assertFalse(self.log.exists())
+
     def test_invalid_choices_reprompt_and_overrides_are_applied(self):
         answers = ["bad-gpu", "v100", "99", "1", "custom", "2-00:00:00", "0", "1024",
                    "50", "32", "256", "3", "4096", "0", "1e-4", "2", "32G", "3", "2", "0", "77:78"]
@@ -262,12 +460,149 @@ print("12345;test-cluster")
         self.assertIn("--partition=dgxh100", submission["arguments"])
         self.assertTrue((self.root / "rosie/logs").is_dir())
         self.assertIn("Submitted job 12345", result.stdout)
-        self.assertIn("runs/rosie-12345", result.stdout)
+        self.assertIn("runs/shield-axe-curriculum", result.stdout)
+
+    def test_custom_name_sets_job_and_dashboard_run_directory(self):
+        result = self.launch(["", "", "lr-experiment"] + [""] * 13 + ["y"], dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = json.loads(self.log.read_text())["arguments"]
+        self.assertIn("--job-name=lr-experiment", arguments)
+        export = next(argument for argument in arguments if argument.startswith("--export="))
+        self.assertIn("SIM_OUTPUT=simulator/training/runs/lr-experiment,", export)
+        self.assertIn("Run: simulator/training/runs/lr-experiment", result.stdout)
 
     def test_enter_at_confirmation_cancels(self):
         result = self.launch(dry_run=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Cancelled", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def sweep_answers(self, index, values):
+        answers = [""] * 16
+        answers[2] = "sweep-test"
+        answers[index:index + 1] = ["multiple", *values, ""]
+        return answers + ["y"]
+
+    def test_learning_rate_sweep_submits_only_one_changed_setting(self):
+        rates = [".0001", ".0003", ".0006"]
+        answers = self.sweep_answers(10, rates)
+        answers[-2] = "77:78"
+        result = self.launch(answers, dry_run=False, SIM_RESUME="old.pt", SBATCH_PARTITION="wrong")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submissions = [json.loads(line) for line in self.history.read_text().splitlines()]
+        self.assertEqual(len(submissions), 3)
+        common = None
+        for rate, submission in zip(rates, submissions):
+            arguments = submission["arguments"]
+            self.assertEqual(submission["inherited"], [])
+            self.assertIn(f"--job-name=sweep-test-{rate}", arguments)
+            export = next(argument for argument in arguments if argument.startswith("--export="))
+            settings = dict(item.split("=", 1) for item in export.removeprefix("--export=ALL,").split(","))
+            self.assertEqual(settings.pop("SIM_LR"), rate)
+            self.assertEqual(settings.pop("SIM_OUTPUT"), f"simulator/training/runs/sweep-test-{rate}")
+            if common is None:
+                common = settings
+            self.assertEqual(settings, common)
+            self.assertIn("--dependency=afterany:77:78", arguments)
+            self.assertIn(f"Run: simulator/training/runs/sweep-test-{rate}", result.stdout)
+
+    def test_sweep_dry_run_previews_every_job_without_submitting(self):
+        result = self.launch(self.sweep_answers(10, [".0001", ".0003", ".0006"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("sbatch --parsable"), 3)
+        self.assertIn("3 jobs", result.stdout)
+        self.assertIn("concurrently", result.stdout)
+        self.assertNotIn("--dependency=", result.stdout)
+        self.assertNotIn("previous-job-id", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_sweep_without_explicit_dependencies_submits_independent_jobs(self):
+        result = self.launch(self.sweep_answers(10, [".0001", ".0003", ".0006"]), dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submissions = [json.loads(line) for line in self.history.read_text().splitlines()]
+        self.assertEqual(len(submissions), 3)
+        for submission in submissions:
+            self.assertFalse(any(argument.startswith("--dependency=") for argument in submission["arguments"]))
+
+    def test_second_multiple_reprompts_for_single_value(self):
+        answers = self.sweep_answers(4, ["1024", "2048"])
+        answers[13:14] = ["multiple", "0.0001"]
+        result = self.launch(answers, dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Only one setting can use multiple", result.stderr)
+        submissions = [json.loads(line) for line in self.history.read_text().splitlines()]
+        self.assertEqual(len(submissions), 2)
+        for submission in submissions:
+            self.assertIn("SIM_LR=0.0001,", " ".join(submission["arguments"]))
+
+    def test_sweep_rejects_invalid_empty_and_duplicate_values(self):
+        result = self.launch(self.sweep_answers(10, ["", "0", "bad", ".0001", ".0001", ".0003"]), dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("at least one value", result.stderr)
+        self.assertIn("Invalid value", result.stderr)
+        self.assertIn("already included", result.stderr)
+        self.assertEqual(len(self.history.read_text().splitlines()), 2)
+
+    def test_cpu_sweep_keeps_threads_valid_and_fixed(self):
+        result = self.launch(self.sweep_answers(11, ["8", "2"]), dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submissions = [json.loads(line) for line in self.history.read_text().splitlines()]
+        self.assertEqual(len(submissions), 2)
+        for cores, submission in zip((8, 2), submissions):
+            self.assertIn(f"--cpus-per-gpu={cores}", submission["arguments"])
+            self.assertIn("SIM_THREADS=2,", " ".join(submission["arguments"]))
+
+    def test_thread_sweep_rejects_values_above_allocated_cores(self):
+        result = self.launch(self.sweep_answers(13, ["2", "9", "4"]), dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("must not exceed", result.stderr)
+        self.assertEqual(len(self.history.read_text().splitlines()), 2)
+
+    def test_existing_run_name_aborts_entire_sweep_before_submission(self):
+        directory = self.root / "simulator/training/runs/sweep-test-.0003"
+        directory.mkdir(parents=True)
+        result = self.launch(self.sweep_answers(10, [".0001", ".0003"]), dry_run=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already exists", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_sweep_submission_failure_stops_remaining_jobs(self):
+        result = self.launch(self.sweep_answers(10, [".0001", ".0003", ".0006"]), dry_run=False,
+                             SUBMIT_TEST_FAIL_AT="2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count("Submitted job"), 1)
+        self.assertEqual(len(self.history.read_text().splitlines()), 2)
+        self.assertIn("no further jobs submitted", result.stderr)
+
+    def test_canceled_sweep_submits_nothing(self):
+        answers = self.sweep_answers(10, [".0001", ".0003"])
+        answers[-1] = ""
+        result = self.launch(answers, dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Cancelled", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_closed_sweep_input_submits_nothing(self):
+        result = self.launch([""] * 10 + ["multiple", ".0001"], dry_run=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Input closed", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_wall_time_sweep_uses_filename_safe_suffixes(self):
+        result = self.launch(self.sweep_answers(3, ["00:30:00", "01:00:00"]), dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submissions = [json.loads(line) for line in self.history.read_text().splitlines()]
+        self.assertEqual(len(submissions), 2)
+        for time, submission in zip(("00:30:00", "01:00:00"), submissions):
+            self.assertIn(f"--time={time}", submission["arguments"])
+            self.assertIn(f"--job-name=sweep-test-{time.replace(':', '-')}", submission["arguments"])
+
+    def test_sweep_name_length_includes_value_suffix(self):
+        answers = self.sweep_answers(10, [".0001", ".0003"])
+        answers[2] = "a" * 118
+        result = self.launch(answers, dry_run=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("120 filename-safe characters", result.stderr)
         self.assertFalse(self.log.exists())
 
     def test_closed_input_does_not_submit(self):

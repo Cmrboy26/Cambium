@@ -91,7 +91,7 @@ if [[ ! -x "$PYTHON" ]]; then
     echo "Using system Python $PYTHON with shared packages from $SITE_PACKAGES"
 fi
 
-for tool in cmake nvcc; do
+for tool in cmake nvcc flock; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: $tool is unavailable on this allocated compute node after loading Rosie modules."
         exit 1
@@ -107,6 +107,18 @@ fi
 nvidia-smi
 "$PYTHON" -c 'import torch; print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda); assert torch.cuda.is_available(), "CUDA is unavailable"'
 
+PRIVATE_DIR="$(mktemp -d "${SLURM_TMPDIR:-${TMPDIR:-/tmp}}/cambium-${SLURM_JOB_ID}.XXXXXX")"
+trap 'rm -rf -- "$PRIVATE_DIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkdir -p "$BUILD_DIR"
+BUILD_DIR="$(cd "$BUILD_DIR" && pwd -P)"
+LIBRARY="$BUILD_DIR/minecraft_sim_training.so"
+exec {BUILD_LOCK_FD}>>"$BUILD_DIR/.build.lock"
+echo "Waiting for shared CUDA build lock: $BUILD_DIR/.build.lock"
+flock --exclusive "$BUILD_LOCK_FD"
+
 echo "Building native CUDA library for architecture $CUDA_ARCHITECTURES on $(hostname)"
 cmake -S "$SIM_ROOT/simulator" -B "$BUILD_DIR" \
     -DMCSIM_ENABLE_CUDA=ON \
@@ -119,6 +131,13 @@ if [[ ! -f "$LIBRARY" ]]; then
     echo "ERROR: native training library was not produced: $LIBRARY"
     exit 1
 fi
+
+cp -- "$LIBRARY" "$PRIVATE_DIR/minecraft_sim_training.so"
+LIBRARY="$PRIVATE_DIR/minecraft_sim_training.so"
+chmod a-w "$LIBRARY"
+flock --unlock "$BUILD_LOCK_FD"
+exec {BUILD_LOCK_FD}>&-
+echo "Released build lock; training uses private library: $LIBRARY"
 
 echo "Training on $(hostname): envs=$SIM_ENVS updates=$SIM_UPDATES rollout_steps=$SIM_ROLLOUT_STEPS plan=$SIM_PLAN resume=$SIM_RESUME"
 TRAIN_ARGS=(

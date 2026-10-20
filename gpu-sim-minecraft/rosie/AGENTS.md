@@ -47,8 +47,27 @@ One requested H100 is used by this single-process trainer; requesting all eight
 does not enable multi-GPU training. Builds are isolated by architecture:
 `simulator/build-rosie-cuda-75` for T4 and
 `simulator/build-rosie-cuda-90` for H100. This avoids different architectures
-reconfiguring a shared CMake tree. Do not run concurrent jobs against the same
-architecture/build directory.
+reconfiguring a shared CMake tree. Concurrent jobs may share an architecture's
+build cache: the launcher holds an exclusive `flock` on `<build>/.build.lock`
+through CMake configure, build and the library snapshot copy. It canonicalizes
+the build path before opening the lock, and releases/closes the lock before
+training. Keep this persistent lock file; deleting it can split lock ownership.
+
+Each job copies the completed `minecraft_sim_training.so` into a unique private
+directory under `SLURM_TMPDIR`, falling back to `TMPDIR` and then `/tmp`. The
+copy is read-only and Python's `--library` points to it, not the shared output.
+Later builds cannot change an already-running job's library. The private
+directory is removed on normal/error exit and handled termination; forced
+SIGKILL/node failure may leave scratch for site cleanup. Build/copy/lock failures
+abort rather than starting training from an unprotected shared file.
+
+This needs util-linux `flock` and a shared filesystem with working cross-node
+advisory locks. Local process-level lock/snapshot tests do not certify cluster
+mount behavior. All writers must cooperate: manual builds and older submitted
+batch scripts do not automatically use this lock. Wait for older jobs to finish,
+or explicitly depend on them, before overlapping new jobs on that build tree.
+Do not change native sources while a build is running. Slurm GPU/resource/account
+limits still determine whether eligible training jobs actually run concurrently.
 
 ### Interactive Submission
 
@@ -56,6 +75,9 @@ Run `bash rosie/submit.sh` from any working directory using the script's path.
 The wizard changes to the project root. Enter accepts each displayed default;
 submission requires an explicit `y` after the escaped command preview.
 `--dry-run` walks through the same prompts without calling `sbatch`.
+Plan discovery includes all nested folders under `simulator/setups/curricula`.
+The menu shows paths relative to that directory so bucketed plans with the same
+filename remain distinguishable; submission retains the full selected path.
 
 | Preset | Partition | GPU / CUDA architecture | Worlds | Rollout | Wall-Time |
 | --- | --- | --- | --- | --- | --- |
@@ -68,14 +90,42 @@ GPU, eight CPUs and 24 GB host RAM by default. Other prompts cover plan selectio
 job name, update cap, learner settings, CPU threads and replay cadence. Learner
 defaults come from the selected plan; the default update cap sums plain update
 budgets, or falls back to 1,500 for other advancement rules. All values are editable.
-The wizard requires only Bash and Python 3 to preview a submission.
+The wizard requires Bash 4+ and Python 3 to preview a submission.
+
+The job/run name sets both the Slurm name and `SIM_OUTPUT` under
+`simulator/training/runs/<name>`, so the dashboard and artifact launcher show
+the chosen name. It defaults to the plan filename without `.json`. Names must
+start with an ASCII letter/digit, use only letters, digits, dots, underscores or
+hyphens, and fit within 120 characters including any sweep suffix. Existing run
+paths and duplicate generated names abort the whole setup before submission;
+choose a new name rather than overwriting an earlier test.
+
+Type `multiple` at one training/resource prompt (wall time, worlds, update cap,
+rollout, learner settings, CPU cores/threads, RAM or replay interval) for a
+single-variable sweep. Enter one value per line, then an empty line to continue
+to the next setting. Values use the normal validation, require at least one
+entry and ignore exact duplicates. A second `multiple` is rejected and that
+prompt requires a single value; GPU preset, plan, name and dependency remain
+single-valued. For example, name `lr-test` with learning-rate values `.0001`,
+`.0003` and `.0006` generates `lr-test-.0001`, `lr-test-.0003` and `lr-test-.0006`,
+each with the same other settings. Time suffixes replace colons with hyphens;
+positive exponent suffixes omit `+`. CPU sweeps keep threads fixed at a value
+valid for the smallest core allocation. The wizard previews every command,
+then asks once to submit the complete setup; closed input or cancellation
+submits nothing. A later submission failure stops the remainder without
+canceling jobs already submitted.
 
 The wizard starts fresh runs and clears inherited `SIM_*` and `SBATCH_*` variables
 before invoking `sbatch`; use the batch interface below for resumes/initialization.
-Run paths remain job-specific. The optional dependency prompt accepts colon-separated
-job IDs and adds `afterany` so a job can wait for others sharing its architecture's
-build directory. Independent submission does not isolate concurrent builds; do not
-overlap jobs sharing a build directory. No jobs are submitted by the mocked checks:
+The optional dependency prompt accepts colon-separated
+job IDs and applies the same `afterany` dependency to every job in the setup.
+Without explicit dependencies, sweep jobs are independently scheduled: only
+their build/snapshot steps serialize, not training. New wizard invocations can
+share the locked build cache. Use explicit dependencies when overlapping older,
+unlocked launchers; existing queued jobs retain their submitted scripts and
+dependency chains and are not migrated automatically. Direct `sbatch` submissions keep the
+`rosie-<JOB_ID>` output default unless `SIM_OUTPUT` is supplied.
+No jobs are submitted by the mocked checks:
 `python -B -m unittest simulator.training.test_rosie.SubmitTests -v`.
 
 ### Batch Environment
@@ -88,6 +138,8 @@ Supported training environment variables:
 - `SIM_EPOCHS`, `SIM_MINIBATCH_SIZE`, `SIM_HIDDEN_DIM`, `SIM_LR`: optional
   overrides of the plan's learner settings; unset by default.
 - `SIM_THREADS`: CPU threads; default 4. The plan owns the seed.
+- `SIM_BUILD_DIR`: optional shared build cache override; defaults to the
+  architecture-specific directory above. The same lock/snapshot rules apply.
 - `SIM_PLAN`: version-2 training plan path relative to `gpu-sim-minecraft` or
   absolute; defaults to `simulator/setups/curricula/shield-axe-curriculum.json`
   for new runs. References inside authoring files resolve relative to their
