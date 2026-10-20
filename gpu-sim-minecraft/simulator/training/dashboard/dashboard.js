@@ -31,6 +31,8 @@ let pending;
 let runSignature = "";
 let displayedRun = "";
 let configuration = null;
+let milestoneIndex = null;
+let milestoneRun = "";
 
 function sortRuns(runs) {
     return [...runs].sort((left, right) => right.name.localeCompare(left.name, undefined, { numeric: true, sensitivity: "base" }) || left.id.localeCompare(right.id));
@@ -257,6 +259,121 @@ function stageConditions(stage) {
     ];
 }
 
+function advancementText(advance) {
+    if (!advance || typeof advance !== "object") return "Not recorded";
+    for (const combination of ["any", "all"]) {
+        if (Array.isArray(advance[combination])) {
+            return `${combination === "any" ? "Any" : "All"} of (${advance[combination].map(advancementText).join("; ")})`;
+        }
+    }
+    return Object.entries(advance).map(([key, value]) => key === "evaluation"
+        ? `${value.suite}: ${value.metric} ≥ ${format(value.at_least, 4)}`
+        : `${format(value)} ${key}`).join("; ") || "Not recorded";
+}
+
+function renderMilestones() {
+    const experiment = resolvedExperiment(configuration);
+    const stages = experiment?.stages ?? [];
+    const latest = records.at(-1);
+    const signature = JSON.stringify([element("run").value, experiment?.name, stages.map((stage) => stage.name)]);
+    if (signature !== milestoneRun) {
+        milestoneIndex = null;
+        milestoneRun = signature;
+    }
+    element("milestone-browser").hidden = !stages.length;
+    element("legacy-stage-status").hidden = stages.length > 0;
+    element("run-context").hidden = stages.length > 0;
+    if (!stages.length) return;
+
+    const complete = latest?.completed_curriculum === true;
+    const recordedIndex = stages.indexOf(stageFor(latest, experiment));
+    const nextIndex = Number.isInteger(latest?.next_stage_index) ? latest.next_stage_index
+        : stages.findIndex((stage) => stage.name === latest?.curriculum_boundary?.next_stage);
+    const currentIndex = !latest ? 0 : !complete && nextIndex >= 0 && nextIndex < stages.length ? nextIndex : recordedIndex;
+    const selectedIndex = milestoneIndex ?? Math.max(0, currentIndex);
+    const selected = stages[selectedIndex];
+    const status = (index) => complete || currentIndex >= 0 && index < currentIndex ? "Completed"
+        : index === currentIndex ? latest ? "Current stage" : "Initial stage"
+        : currentIndex >= 0 ? "Upcoming" : "Status not recorded";
+    const select = (index) => {
+        if (index < 0 || index >= stages.length) return;
+        milestoneIndex = index === currentIndex ? null : index;
+        renderMilestones();
+    };
+    element("milestone-current").textContent = complete ? "Curriculum complete"
+        : currentIndex >= 0 ? `${latest ? "Current stage" : "Initial stage"}: ${stages[currentIndex].name}` : "Current stage not recorded";
+    element("milestone-position").textContent = `Stage ${selectedIndex + 1} of ${stages.length}`;
+    element("milestone-name").textContent = selected.name;
+    element("milestone-state").textContent = status(selectedIndex);
+    element("milestone-state").dataset.current = String(selectedIndex === currentIndex && !complete);
+    element("milestone-previous").disabled = selectedIndex === 0;
+    element("milestone-next").disabled = selectedIndex === stages.length - 1;
+    element("milestone-previous").onclick = () => select(selectedIndex - 1);
+    element("milestone-next").onclick = () => select(selectedIndex + 1);
+    element("milestone-return").hidden = currentIndex < 0 || selectedIndex === currentIndex;
+    element("milestone-return").onclick = () => select(currentIndex);
+    const strip = element("milestone-strip");
+    const refocus = document.activeElement && strip.contains(document.activeElement);
+    strip.onkeydown = (event) => {
+        const index = {ArrowLeft: selectedIndex - 1, ArrowRight: selectedIndex + 1, Home: 0, End: stages.length - 1}[event.key];
+        if (!Number.isInteger(index)) return;
+        event.preventDefault();
+        select(index);
+    };
+    const fragment = document.createDocumentFragment();
+    for (const index of [selectedIndex - 1, selectedIndex, selectedIndex + 1]) {
+        const item = document.createElement(index >= 0 && index < stages.length ? "button" : "div");
+        item.className = "milestone";
+        if (index >= 0 && index < stages.length) {
+            item.type = "button";
+            item.setAttribute("aria-pressed", String(index === selectedIndex));
+            item.setAttribute("aria-controls", "milestone-details");
+            if (index === currentIndex && !complete) item.setAttribute("aria-current", "step");
+            const order = document.createElement("span");
+            order.textContent = `Stage ${index + 1}`;
+            const name = document.createElement("strong");
+            name.textContent = stages[index].name;
+            const state = document.createElement("span");
+            state.textContent = status(index);
+            item.append(order, name, state);
+            item.onclick = () => select(index);
+        } else {
+            item.className = "milestone milestone-placeholder";
+            item.setAttribute("aria-hidden", "true");
+        }
+        fragment.append(item);
+    }
+    strip.replaceChildren(fragment);
+    if (refocus) strip.querySelector('[aria-pressed="true"]')?.focus({preventScroll: true});
+
+    const recorded = records.filter((row) => stageFor(row, experiment) === selected).at(-1);
+    element("milestone-observation").textContent = recorded ? `Latest stage rollout: update ${format(recorded.update)}` : "No rollout recorded for this stage";
+    renderFields("milestone-progress", [
+        ["Advance when", advancementText(selected.advance)],
+        ["Recorded progress", progressText(recorded?.stage_progress)],
+    ]);
+    const budget = Object.entries(selected.advance ?? {});
+    const [unit, limit] = budget[0] ?? [];
+    const value = recorded?.stage_progress?.[unit];
+    const progress = element("milestone-progress-bar");
+    progress.hidden = budget.length !== 1 || !["updates", "episodes", "transitions"].includes(unit)
+        || !Number.isFinite(limit) || limit <= 0 || !Number.isFinite(value);
+    if (!progress.hidden) {
+        progress.max = limit;
+        progress.value = Math.min(limit, value);
+        progress.setAttribute("aria-label", `${format(value)} of ${format(limit)} ${unit}`);
+    }
+    renderFields("milestone-environment", stageConditions(selected).filter(([label]) => ["Environment", "Arena mixture", "Episode limit"].includes(label)));
+    const opponents = selected.opponents ?? [];
+    const total = opponents.reduce((sum, opponent) => sum + opponent.weight, 0);
+    renderFields("milestone-opponents", opponents.length ? opponents.map((opponent) => [opponent.id,
+        total > 0 ? `${format(opponent.weight / total * 100, 1)}%` : `Weight ${format(opponent.weight)}`]) : [["Opponent mix", "Not recorded"]]);
+    const controls = selected.controls?.fixed ?? selected.controls;
+    renderFields("milestone-controls", controls == null ? [["Fixed controls", "Not recorded"]]
+        : Object.keys(controls).length ? Object.entries(controls).map(([name, value]) => [name, String(value)])
+        : [["Action heads", "All learned"]]);
+}
+
 function renderTable(id, rows, columns, empty) {
     const fragment = document.createDocumentFragment();
     for (const values of rows.length ? rows : [[empty]]) {
@@ -275,6 +392,7 @@ function renderTable(id, rows, columns, empty) {
 function renderCurriculum() {
     const experiment = resolvedExperiment(configuration);
     const latest = records.at(-1);
+    renderMilestones();
     const hasResearchMetrics = records.some((row) => row.stage !== undefined || row.stage_index !== undefined
         || row.completed_curriculum !== undefined || row.evaluations !== undefined);
     element("curriculum").hidden = !experiment && !hasResearchMetrics;

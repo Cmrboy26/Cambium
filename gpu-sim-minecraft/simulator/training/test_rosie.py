@@ -166,6 +166,101 @@ class TrainingJobTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
 
+@unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
+class DashboardDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.tools = Path(self.temporary.name)
+        script = Path(__file__).resolve().parents[2] / "rosie/dashboard-connect.sh"
+        self.discovery = script.read_text().split("<<'REMOTE'\n", 1)[1].split("\nREMOTE\n", 1)[0]
+        self.jobs = {
+            "77": {"name": "shield-axe-curriculum", "state": "RUNNING", "work_dir": "/project",
+                   "command": "/project/rosie/train.sbatch", "node": "test-node"},
+            "78": {"name": "axe-shield-fighting", "state": "RUNNING", "work_dir": "/project",
+                   "command": "/project/rosie/train.sbatch", "node": "test-node"},
+        }
+        mock = f"#!{sys.executable}\n" + '''import json
+import os
+from pathlib import Path
+import sys
+
+jobs = json.loads(os.environ["DASHBOARD_TEST_JOBS"])
+arguments = sys.argv[1:]
+if Path(sys.argv[0]).name == "squeue":
+    assert "--states=RUNNING" in arguments
+    selected = next((value.split("=", 1)[1] for value in arguments if value.startswith("--jobs=")), None)
+    for job_id, job in jobs.items():
+        if job["state"] != "RUNNING" or (selected is not None and job_id != selected):
+            continue
+        if "--format=%i" in arguments:
+            print(job_id)
+        else:
+            print(f'{job_id}|{job["name"]}|{job["node"]}')
+elif arguments[:2] == ["show", "job"]:
+    job = jobs[arguments[-1]]
+    print(f'JobId={arguments[-1]} Command={job["command"]} WorkDir={job["work_dir"]}')
+elif arguments[:2] == ["show", "hostnames"]:
+    print(arguments[-1])
+else:
+    raise SystemExit(2)
+'''
+        for name in ("squeue", "scontrol"):
+            executable = self.tools / name
+            executable.write_text(mock)
+            executable.chmod(0o700)
+
+    def discover(self, job_id=""):
+        environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
+                       "DASHBOARD_TEST_JOBS": json.dumps(self.jobs), "USER": "test-user"}
+        return subprocess.run(["bash", "-s", "--", job_id], input=self.discovery,
+                              env=environment, capture_output=True, text=True, timeout=10)
+
+    def test_custom_names_share_runs_directory(self):
+        self.jobs["76"] = {**self.jobs["77"], "command": "/other/job.sbatch"}
+        result = self.discover()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t"), ["77", "test-node", "/project"])
+
+    def test_explicit_custom_named_job(self):
+        result = self.discover("78")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t"), ["78", "test-node", "/project"])
+
+    def test_default_name_still_works(self):
+        self.jobs["77"]["name"] = "cambium-sim"
+        result = self.discover("77")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_pending_jobs_are_not_selected(self):
+        for job in self.jobs.values():
+            job["state"] = "PENDING"
+        for job_id in ("", "77"):
+            with self.subTest(job_id=job_id):
+                result = self.discover(job_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("running", result.stderr)
+
+    def test_non_training_job_is_rejected_even_with_default_name(self):
+        self.jobs = {"77": {**self.jobs["77"], "name": "cambium-sim", "command": "/other/job.sbatch"}}
+        for job_id in ("", "77"):
+            with self.subTest(job_id=job_id):
+                result = self.discover(job_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("rosie/train.sbatch", result.stderr)
+
+    def test_different_working_directories_require_job_id(self):
+        self.jobs["78"]["work_dir"] = "/other-project"
+        result = self.discover()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different working directories", result.stderr)
+        self.assertIn("77 /project", result.stderr)
+        self.assertIn("78 /other-project", result.stderr)
+        explicit = self.discover("78")
+        self.assertEqual(explicit.returncode, 0, explicit.stderr)
+        self.assertIn("/other-project", explicit.stdout)
+
+
 class RosieTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

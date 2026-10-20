@@ -25,7 +25,27 @@
         <p id="notice" class="notice" role="status" hidden></p>
         <section id="overview" class="run-overview" aria-labelledby="run-title">
             <div class="section-title"><h2 id="run-title">Training overview</h2><a href="#run-settings">Run configuration <i data-lucide="arrow-down" aria-hidden="true"></i></a></div>
-            <div class="run-stage"><p id="run-stage-status" role="status">Waiting for run data</p><span id="run-budget"></span></div>
+            <section id="milestone-browser" class="milestone-browser" aria-labelledby="milestone-current" hidden>
+                <div class="milestone-heading">
+                    <h3 id="milestone-current" role="status">Current milestone</h3>
+                    <div class="milestone-heading-tools"><span id="milestone-position" aria-live="polite"></span><button id="milestone-return" class="milestone-arrow" type="button" aria-label="Return to current stage" title="Return to current stage" hidden><i data-lucide="locate-fixed" aria-hidden="true"></i></button></div>
+                </div>
+                <div class="milestone-navigation" role="group" aria-label="Curriculum stages">
+                    <button id="milestone-previous" class="milestone-arrow" type="button" aria-label="Previous stage" title="Previous stage" aria-controls="milestone-details"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+                    <div id="milestone-strip" class="milestone-strip"></div>
+                    <button id="milestone-next" class="milestone-arrow" type="button" aria-label="Next stage" title="Next stage" aria-controls="milestone-details"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+                </div>
+                <div id="milestone-details" class="milestone-details" aria-labelledby="milestone-name">
+                    <div class="milestone-detail-heading"><h3 id="milestone-name"></h3><span id="milestone-state"></span><p id="milestone-observation"></p></div>
+                    <div class="milestone-facts">
+                        <section><h4>Progress &amp; advancement</h4><dl id="milestone-progress"></dl><progress id="milestone-progress-bar" hidden></progress></section>
+                        <section><h4>Environment</h4><dl id="milestone-environment"></dl></section>
+                        <section><h4>Opponent mixture</h4><dl id="milestone-opponents" class="milestone-mixture"></dl></section>
+                        <section><h4>Fixed controls</h4><dl id="milestone-controls" class="milestone-mixture"></dl></section>
+                    </div>
+                </div>
+            </section>
+            <div id="legacy-stage-status" class="run-stage"><p id="run-stage-status" role="status">Waiting for run data</p><span id="run-budget"></span></div>
             <dl id="run-identity" class="run-identity"></dl>
             <dl id="run-context" class="run-context" aria-label="Latest rollout conditions"></dl>
             <section class="summary" aria-label="Latest metrics">

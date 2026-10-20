@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import hashlib
+from itertools import combinations, product
 import json
 import math
 from pathlib import Path
@@ -317,16 +318,24 @@ class EpisodeSampler:
                 poses = [{key: deepcopy(player[key]) for key in ("position", "yaw", "pitch") if key in player}
                          for player in players]
                 if "region" in spawn:
+                    minimum = spawn.get("minimum_separation", 0.6)
                     for _ in range(256):
                         for pose in poses:
                             pose["position"] = self.spawn_rng.uniform(spawn["region"]["min"], spawn["region"]["max"]).tolist()
-                        delta = np.abs(np.subtract(poses[0]["position"], poses[1]["position"]))
-                        separated = delta[0] >= 0.6 or delta[2] >= 0.6 or delta[1] >= 1.8
-                        if (separated and np.linalg.norm(delta) >= spawn.get("minimum_separation", 0.6)
+                        if (self._separated([pose["position"] for pose in poses], minimum)
                                 and all(self._valid_position(pose["position"], base) for pose in poses)):
                             break
                     else:
-                        raise ValueError("Could not sample collision-free separated spawns after 256 attempts")
+                        axes = [sorted({low, high}) for low, high in zip(spawn["region"]["min"], spawn["region"]["max"])]
+                        corners = [list(position) for position in product(*axes) if self._valid_position(position, base)]
+                        pairs = [pair for pair in combinations(corners, 2) if self._separated(pair, minimum)]
+                        if not pairs:
+                            raise ValueError("Could not sample collision-free separated spawns after 256 attempts "
+                                             f"and corner fallback (world {world}, region {spawn['region']}, "
+                                             f"minimum_separation {minimum})")
+                        pair = pairs[int(self.spawn_rng.integers(len(pairs)))]
+                        for pose, index in zip(poses, self.spawn_rng.permutation(2)):
+                            pose["position"] = list(pair[index])
                 for pose in poses:
                     for key in ("yaw", "pitch"):
                         if key in spawn:
@@ -338,6 +347,11 @@ class EpisodeSampler:
                     x, y, z = player["position"]
                     player["on_ground"] = not self._valid_position([x, y - 1e-5, z], base)
         return resolve_players(players)
+
+    @staticmethod
+    def _separated(positions, minimum):
+        delta = np.abs(np.subtract(positions[0], positions[1]))
+        return (delta[0] >= 0.6 or delta[2] >= 0.6 or delta[1] >= 1.8) and np.linalg.norm(delta) >= minimum
 
     @staticmethod
     def _valid_position(position, base):

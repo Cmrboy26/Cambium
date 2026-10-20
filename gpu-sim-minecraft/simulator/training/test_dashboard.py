@@ -53,14 +53,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 class Node {
-    constructor() {this.children=[]; this.dataset={}; this.hidden=false; this.value='run';}
+    constructor() {this.children=[]; this.dataset={}; this.attributes={}; this.hidden=false; this.value='run';}
     set textContent(value) {this.text=String(value); this.children=[];}
     get textContent() {return this.text ?? this.children.map(child=>child.textContent).join(' ');}
     set innerHTML(value) {throw new Error('Untrusted content must never use innerHTML');}
     append(...children) {this.text=undefined; this.children.push(...children);}
     replaceChildren(...children) {this.text=undefined; this.children=children;}
     addEventListener() {}
-    setAttribute() {}
+    setAttribute(name,value) {this.attributes[name]=value;}
 }
 const nodes = new Map();
 const document = {getElementById(id) {if (!nodes.has(id)) nodes.set(id,new Node()); return nodes.get(id);},
@@ -90,6 +90,29 @@ assert.equal(text('run-title'),experiment.name,'Run identity must be literal tex
 assert.match(text('run-identity'),/Seed 17.*Compute cpu.*Learning rate 0.01.*PPO epochs 3.*Minibatch 16/);
 assert.match(text('run-context'),/Aim environment.*target.*100%.*attack=false/);
 assert.equal(text('run-stage-status'),text('curriculum-status'));
+assert.equal(hidden('milestone-browser'),false);
+assert.equal(text('milestone-name'),'aim');
+assert.equal(text('milestone-position'),'Stage 1 of 2');
+assert.match(text('milestone-current'),/Initial stage: aim/);
+assert.equal(document.getElementById('milestone-previous').disabled,true);
+const milestoneSlots = () => document.getElementById('milestone-strip').children[0].children;
+assert.equal(milestoneSlots().length,3);
+assert.equal(milestoneSlots()[1].attributes['aria-pressed'],'true','The selected stage must occupy the center slot');
+assert.equal(milestoneSlots()[1].attributes['aria-current'],'step');
+document.getElementById('milestone-next').onclick();
+assert.equal(text('milestone-name'),'fight');
+assert.equal(text('milestone-position'),'Stage 2 of 2');
+assert.equal(milestoneSlots()[1].attributes['aria-pressed'],'true');
+assert.equal(milestoneSlots()[0].attributes['aria-current'],'step','Current and selected stage are separate states');
+assert.match(text('milestone-environment'),/Fight environment.*Hill.*Pit/);
+assert.match(text('milestone-opponents'),/sword.*25%.*axe.*75%/);
+assert.match(text('milestone-observation'),/No rollout recorded/);
+assert.equal(document.getElementById('milestone-next').disabled,true);
+assert.match(text('milestone-current'),/Initial stage: aim/,'Browsing must not change the current stage');
+vm.runInContext('renderCurriculum();',context);
+assert.equal(text('milestone-name'),'fight','Live refresh must preserve the browsed stage');
+document.getElementById('milestone-return').onclick();
+assert.equal(text('milestone-name'),'aim');
 assert.match(text('stage-context'),/Aim environment.*Flat.*target.*100%.*attack=false/);
 assert.match(text('config'),/Seed 17.*Learning rate 0.01/);
 assert.equal(hidden('experiment-details'),false);
@@ -103,6 +126,14 @@ vm.runInContext(`records=[{update:2,stage:'aim',stage_index:0,next_stage_index:1
     curriculum_boundary:{reset_worlds:2,next_stage:'fight'},
     evaluations:{'<held>':{win_rate:0.75,reward_mean:-1.5,episodes:4}}}]; renderCurriculum();`,context);
 assert.match(text('curriculum-status'),/Upcoming stage: fight.*latest rollout is from aim/);
+assert.equal(text('milestone-name'),'fight','Follow the stage selected at the recorded boundary');
+assert.match(text('milestone-current'),/Current stage: fight/);
+assert.match(text('milestone-observation'),/No rollout recorded/,'Do not attribute the previous stage progress to the next stage');
+document.getElementById('milestone-previous').onclick();
+assert.equal(text('milestone-name'),'aim');
+assert.match(text('milestone-state'),/Completed/);
+assert.match(text('milestone-progress'),/2.*updates.*3.*episodes.*64.*transitions/);
+document.getElementById('milestone-return').onclick();
 assert.match(text('run-context'),/Aim environment.*target.*100%/,'Boundary summary must describe the latest rollout, not the upcoming stage');
 assert.match(text('run-budget'),/updates: 2 \/ 2/);
 assert.match(text('stage-summary'),/Latest rollout stage aim.*updates: 2 \/ 2.*Not complete.*Upcoming stage fight/);
@@ -122,10 +153,13 @@ vm.runInContext(`records.push({update:4,stage:'fight',stage_index:1,next_stage_i
     stage_progress:{updates:2,episodes:10,transitions:128},completed_curriculum:true}); renderCurriculum();`,context);
 assert.equal(text('curriculum-status'),'Curriculum complete','Completion is explicit, not inferred from final stage');
 assert.equal(text('run-stage-status'),'Curriculum complete');
+assert.match(text('milestone-current'),/Curriculum complete/);
+assert.match(text('milestone-state'),/Completed/);
 assert.equal(hidden('upcoming-stage'),true,'Complete wins over stale next stage');
 assert.match(text('stage-timeline'),/3–4 fight.*Curriculum complete/);
 vm.runInContext(`records=[{update:1}]; renderConfig({options:{seed:5},metadata:{environment:{name:'Historical'}}}); renderCurriculum();`,context);
 assert.equal(hidden('curriculum'),true);
+assert.equal(hidden('milestone-browser'),true);
 assert.equal(hidden('experiment-details'),true);
 assert.equal(text('environment-name'),'Historical');
 assert.equal(text('run-title'),'Historical');
@@ -135,7 +169,38 @@ assert.doesNotMatch(text('run-context'),/sword|axe|Fight environment/,'Switching
 vm.runInContext(`records=[]; renderConfig({plan:{name:'Old plan',scenario:{base:'missing.json'},controls:{fixed:{attack:true}},
     stages:[{name:'old'}]}}); renderCurriculum();`,context);
 assert.match(text('curriculum-status'),/Initial stage: old/);
+assert.equal(text('milestone-name'),'old','Changing runs must reset the browsed stage');
+assert.equal(document.getElementById('milestone-next').disabled,true);
+assert.equal(document.getElementById('milestone-previous').disabled,true);
 assert.match(text('stage-context'),/Fixed controls Not recorded/,'Never resolve authoring inheritance');
+vm.runInContext(`const longer = JSON.parse(JSON.stringify(fixture));
+    longer.experiment.name='Four stage curriculum';
+    longer.experiment.stages.push({...longer.experiment.stages[1],name:'pursuit'},
+        {...longer.experiment.stages[1],name:'combat'});
+    records=[{update:3,stage:'fight',stage_index:1,stage_progress:{updates:1,episodes:2,transitions:64}}];
+    renderConfig(longer); renderCurriculum();`,context);
+assert.equal(text('milestone-name'),'fight');
+assert.match(milestoneSlots()[0].textContent,/aim/);
+assert.match(milestoneSlots()[2].textContent,/pursuit/);
+assert.equal(document.getElementById('milestone-progress-bar').hidden,true,'Combined criteria must not become a fake percentage');
+const stageKey = key => document.getElementById('milestone-strip').onkeydown({key,preventDefault(){}});
+stageKey('End');
+assert.equal(text('milestone-name'),'combat');
+stageKey('ArrowLeft');
+assert.equal(text('milestone-name'),'pursuit');
+vm.runInContext(`records.push({update:4,stage:'pursuit',stage_index:2,stage_progress:{updates:1,episodes:1,transitions:32}});
+    renderCurriculum();`,context);
+assert.equal(text('milestone-name'),'pursuit','A browsed stage remains selected as training advances');
+assert.match(text('milestone-current'),/Current stage: pursuit/);
+assert.equal(document.getElementById('milestone-return').hidden,true);
+stageKey('Home');
+assert.equal(text('milestone-name'),'aim');
+assert.match(text('milestone-current'),/Current stage: pursuit/);
+document.getElementById('milestone-return').onclick();
+vm.runInContext(`records=[{update:5,stage:'unknown'}]; renderCurriculum();`,context);
+assert.equal(text('milestone-current'),'Current stage not recorded');
+assert.equal(text('milestone-state'),'Status not recorded');
+assert.equal(document.getElementById('milestone-progress-bar').hidden,true);
 // Replay metadata is independent of self-play, and equipment remains concrete.
 const arenaSource=fs.readFileSync(path.join(process.argv[1],'arena.js'),'utf8');
 vm.runInContext(arenaSource.slice(arenaSource.indexOf('function renderReplayTraining'),arenaSource.indexOf('\nclass ArenaViewer')),context);

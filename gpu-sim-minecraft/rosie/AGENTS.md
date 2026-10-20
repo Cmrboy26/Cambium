@@ -130,14 +130,16 @@ still required after key setup.
 
 ## Dashboard And SSH Tunnel
 
-With a `cambium-sim` training job running, start
+With a simulator training job running, start
 `bash ./rosie/dashboard-connect.sh`
 from PowerShell in the local `gpu-sim-minecraft` directory (Git Bash must be
 installed and available as `bash`), or `bash rosie/dashboard-connect.sh` from
 Git Bash.
-Connect to GlobalVPN first. The script finds the unique running training job,
-or selects one automatically when several share a working directory; pass the
-job ID when they use different working directories.
+Connect to GlobalVPN first. The script identifies running training jobs by their
+submitted `rosie/train.sbatch` command, regardless of `--job-name`. It selects
+one automatically when several share a working directory; pass the job ID when
+they use different working directories. Explicit job IDs must also be running
+and use the training script; pending and unrelated jobs are not dashboard hosts.
 It starts the read-only Python dashboard with `srun --jobid ... --overlap` on
 the allocated compute node, so it does not submit another job or request
 another node. Both the remote and local loopback ports are selected

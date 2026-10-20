@@ -58,8 +58,13 @@ training flags have no implicit migration aliases.
   state/loadouts never rebuilds or uploads terrain.
 - Environment spawn sampling: `sample: world|episode`, optional `region` with `min/max`
   XYZ, `minimum_separation` (at least 0.6), `yaw` and `pitch`. Sampling uses
-  bounded rejection for collision-free positions in the supported air/stone
-  scene; exhaustion is an explicit error. Without a region, preserve positions.
+  256 independent rejection attempts for collision-free positions in the
+  supported air/stone scene. On exhaustion, choose a random collision-free,
+  separated region-corner pair and randomize player assignment; this fallback
+  is not a uniform interior draw. If no valid corner pair exists either, fail
+  explicitly with world, region and separation diagnostics. Normal successful
+  draws and checkpointed component RNG ownership are unchanged. Without a
+  region, preserve positions.
 - Environment equipment sampling: `sample: world|episode`, `players: independent`, and
   `loadout`. Specified loadout fields replace the base field; unspecified ones
   inherit it. Weapon slots never shift; the compiler pads missing slots with air
@@ -426,11 +431,16 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   start before/after server, with no trainer flags.
 - `--runs-dir` selects a parent; repeat `--run` for individual extra directories.
   Use `--port` if occupied; Ctrl+C stops server.
-- The overview leads with experiment identity, seed, compute/world count,
-  policy width, rollout/PPO settings and initialization mode, followed by latest
-  rollout conditions, headline metrics and session timing. Saved experiment
-  settings, not current authoring files, describe a run. Boundary summaries
-  retain the just-finished stage's conditions until a new rollout is recorded.
+- The overview leads with experiment identity and a centered curriculum-stage
+  browser, then seed/compute/policy/PPO settings, headline metrics and timing.
+  Arrows or stage buttons browse conditions without changing training/charts;
+  left/right and Home/End keys also navigate. Current and selected stages are
+  separate. Browsing survives refresh; changing runs resets to the current stage.
+  Stage details group advancement/progress, environment, opponents and controls.
+  Simple recorded budgets get a progress bar; composed/unknown budgets do not.
+  Saved experiments, not current authoring files, describe a run. Boundaries
+  select the next stage but retain the just-finished rollout's progress only
+  under its own stage. Runs without stages retain the historical summary.
 - Section links lead to training results, curriculum/evaluation, world/replays,
   run configuration and recent updates. Charts group outcomes, optimization
   and runtime. Stage details/timeline and full configuration start collapsed;

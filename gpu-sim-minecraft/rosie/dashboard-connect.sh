@@ -81,16 +81,16 @@ REMOTE_INFO="$(ssh -T -l "$SSH_USER" "$SSH_JUMP" "bash -s -- $(printf '%q' "$JOB
 set -euo pipefail
 job_id="${1:-}"
 if [[ -z "$job_id" ]]; then
-    mapfile -t matches < <(squeue --noheader --user="$USER" --states=RUNNING --format='%i|%j' |
-        awk -F'|' '$2 == "cambium-sim" { print $1 }')
-    if [[ "${#matches[@]}" -eq 0 ]]; then
-        echo 'ERROR: No running cambium-sim job found. Start training first.' >&2
-        exit 1
-    fi
-    job_id="${matches[0]}"
+    mapfile -t candidates < <(squeue --noheader --user="$USER" --states=RUNNING --format='%i')
+    matches=()
     first_work_dir=""
-    for candidate_id in "${matches[@]}"; do
+    for candidate_id in "${candidates[@]}"; do
         candidate_details="$(scontrol show job --oneliner "$candidate_id")"
+        candidate_command="$(sed -n 's/.* Command=\([^ ]*\).*/\1/p' <<< "$candidate_details")"
+        if [[ "$candidate_command" != */rosie/train.sbatch && "$candidate_command" != rosie/train.sbatch ]]; then
+            continue
+        fi
+        matches+=("$candidate_id")
         candidate_work_dir="$(sed -n 's/.* WorkDir=\([^ ]*\).*/\1/p' <<< "$candidate_details")"
         if [[ -z "$candidate_work_dir" ]]; then
             echo "ERROR: Could not determine the working directory for job $candidate_id." >&2
@@ -99,28 +99,35 @@ if [[ -z "$job_id" ]]; then
         if [[ -z "$first_work_dir" ]]; then
             first_work_dir="$candidate_work_dir"
         elif [[ "$candidate_work_dir" != "$first_work_dir" ]]; then
-            echo 'ERROR: Running cambium-sim jobs use different working directories.' >&2
+            echo 'ERROR: Running simulator training jobs use different working directories.' >&2
             echo 'Pass the job ID whose runs directory you want to monitor:' >&2
-            printf '  %s %s\n' "$job_id" "$first_work_dir" >&2
+            printf '  %s %s\n' "${matches[0]}" "$first_work_dir" >&2
             printf '  %s %s\n' "$candidate_id" "$candidate_work_dir" >&2
             exit 1
         fi
     done
+    if [[ "${#matches[@]}" -eq 0 ]]; then
+        echo 'ERROR: No running simulator training job found (rosie/train.sbatch). Start training or wait for a pending job to run.' >&2
+        exit 1
+    fi
+    job_id="${matches[0]}"
 fi
 
-job_record="$(squeue --noheader --jobs="$job_id" --format='%i|%j|%N')"
+job_record="$(squeue --noheader --jobs="$job_id" --states=RUNNING --format='%i|%j|%N')"
 if [[ -z "$job_record" ]]; then
     echo "ERROR: Job $job_id is not running." >&2
     exit 1
 fi
 IFS='|' read -r _ job_name nodes <<< "$job_record"
-if [[ "$job_name" != "cambium-sim" ]]; then
-    echo "ERROR: Job $job_id is '$job_name', not a cambium-sim training job." >&2
+
+job_details="$(scontrol show job --oneliner "$job_id")"
+job_command="$(sed -n 's/.* Command=\([^ ]*\).*/\1/p' <<< "$job_details")"
+if [[ "$job_command" != */rosie/train.sbatch && "$job_command" != rosie/train.sbatch ]]; then
+    echo "ERROR: Job $job_id ('$job_name') was not submitted with rosie/train.sbatch." >&2
     exit 1
 fi
 
 node="$(scontrol show hostnames "$nodes" | head -n 1)"
-job_details="$(scontrol show job --oneliner "$job_id")"
 work_dir="$(sed -n 's/.* WorkDir=\([^ ]*\).*/\1/p' <<< "$job_details")"
 if [[ -z "$node" || -z "$work_dir" ]]; then
     echo "ERROR: Could not determine the node or working directory for job $job_id." >&2

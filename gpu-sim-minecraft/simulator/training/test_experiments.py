@@ -181,6 +181,51 @@ class ExperimentChecks(unittest.TestCase):
         self.assertEqual(before, sampler.state_dict()["rng"])
         self.assertTrue(all(len(player["loadout"]["weapons"]) == 9 for player in players))
 
+    def test_tight_spawn_region_does_not_exhaust_random_retries(self):
+        self.environment["spawns"] = {
+            "sample": "episode", "region": {"min": [-0.1, 1, -1.3], "max": [0.1, 1, 1.3]},
+            "minimum_separation": 2.6,
+        }
+        self.write()
+        scenario = self.resolve()["scenario"]
+        sampler = EpisodeSampler(scenario, 1, 42)
+        for _ in range(4):
+            players = sampler.players(0)
+            positions = np.asarray([player["position"] for player in players])
+            self.assertGreaterEqual(np.linalg.norm(positions[0] - positions[1]), 2.6)
+            self.assertTrue(np.all(positions >= [-0.1, 1, -1.3]))
+            self.assertTrue(np.all(positions <= [0.1, 1, 1.3]))
+            self.assertTrue(all(sampler._valid_position(position, scenario["arenas"][0]["environment"])
+                                for position in positions))
+        clone = EpisodeSampler(scenario, 1, 999)
+        clone.load_state_dict(sampler.state_dict())
+        self.assertEqual(sampler.players(0), clone.players(0))
+        self.assertEqual(sampler.state_dict(), clone.state_dict())
+
+    def test_impossible_spawn_region_still_fails(self):
+        self.environment["spawns"] = {
+            "sample": "episode", "region": {"min": [-0.1, 1, -1.3], "max": [0.1, 1, 1.3]},
+            "minimum_separation": 3,
+        }
+        self.write()
+        sampler = EpisodeSampler(self.resolve()["scenario"], 1, 42)
+        with self.assertRaisesRegex(ValueError, "collision-free separated spawns"):
+            sampler.players(0)
+
+    def test_spawn_corner_fallback_rejects_blocked_positions(self):
+        self.environment["spawns"] = {
+            "sample": "episode", "region": {"min": [-0.1, 1, -1.3], "max": [0.1, 1, 1.3]},
+            "minimum_separation": 2,
+        }
+        self.write()
+        scenario = self.resolve()["scenario"]
+        scenario["arenas"][0]["environment"]["blocks"].append({
+            "from": [-1, 1, -2], "to": [0, 2, 1], "block": "minecraft:stone",
+        })
+        sampler = EpisodeSampler(scenario, 1, 42)
+        with self.assertRaisesRegex(ValueError, "corner fallback.*world 0.*minimum_separation 2"):
+            sampler.players(0)
+
     def test_checkpoint_opponents_are_the_only_reopened_runtime_files(self):
         checkpoint = self.directory / "opponent.pt"
         checkpoint.write_bytes(b"trusted-checkpoint-identity")
