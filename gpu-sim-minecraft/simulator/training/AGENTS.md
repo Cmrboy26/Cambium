@@ -79,6 +79,11 @@ An episode resolves concrete players/loadouts before native reset. ABI2 additive
 retains per-world slots, and reuses terrain. `mcsim_scenario_for` returns the
 actual initial scenario, not a sampling distribution. Ordinary native reset
 restores the world's most recently assigned players. Initial scene templates
+are validated when the sampler is constructed or reconfigured, not per episode;
+sampled players still undergo loadout normalization and finite-value checks.
+Sampled resets reuse the observations returned by `mcsim_reset_players` rather
+than immediately recomputing them; untouched arena groups are observed normally.
+Initial scene templates
 and live world state have distinct ownership: future block edits must be
 per-world, restore on reset, and distinguish initial/protected blocks from
 placed blocks. Placement/breaking are not implemented; do not accept settings
@@ -421,8 +426,16 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   start before/after server, with no trainer flags.
 - `--runs-dir` selects a parent; repeat `--run` for individual extra directories.
   Use `--port` if occupied; Ctrl+C stops server.
-- Environment identity, source, episode limit and arena/policy appear above the
-  metrics; expandable settings include loadouts and resolved reward weights.
+- The overview leads with experiment identity, seed, compute/world count,
+  policy width, rollout/PPO settings and initialization mode, followed by latest
+  rollout conditions, headline metrics and session timing. Saved experiment
+  settings, not current authoring files, describe a run. Boundary summaries
+  retain the just-finished stage's conditions until a new rollout is recorded.
+- Section links lead to training results, curriculum/evaluation, world/replays,
+  run configuration and recent updates. Charts group outcomes, optimization
+  and runtime. Stage details/timeline and full configuration start collapsed;
+  held-out evaluation results remain visible. The run path, loadouts, resolved
+  reward weights and experiment JSON live in the configuration section.
 - Resolved experiments show stage budgets, environment/arena identity, opponent
   mixtures, fixed controls and held-out evaluations. Boundary rows distinguish
   the just-finished stage from the upcoming stage; completion is explicit.

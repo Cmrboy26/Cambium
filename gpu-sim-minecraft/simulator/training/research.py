@@ -88,12 +88,15 @@ class SampledWorlds:
         if mask.shape != (self.count,) or mask.dtype.kind != "b":
             raise ValueError("Sampled reset mask must contain one boolean per world")
         definitions = {int(world): self.sampler.players(int(world)) for world in np.flatnonzero(mask)}
+        observations = np.empty((self.count, 2, self.observation_dim), dtype=np.float32)
         for ids, environment in self.groups:
             selected = mask[ids]
             if selected.any():
-                environment.reset_players([definitions[int(world)] if selected[index] else None
+                observations[ids] = environment.reset_players([definitions[int(world)] if selected[index] else None
                     for index, world in enumerate(ids)], selected)
-        return self.observe()
+            else:
+                observations[ids] = environment.observe()
+        return observations
 
     def step(self, actions):
         observations = np.empty((self.count, 2, self.observation_dim), dtype=np.float32)

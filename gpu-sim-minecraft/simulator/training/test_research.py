@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from backend.fast_rl_model import ActorCritic
-from simulator.training.contract import from_legacy
+from simulator.training.contract import from_legacy, resolve_scenario
 from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, reached, resolve_plan
@@ -158,6 +158,41 @@ class PlanChecks(unittest.TestCase):
                 mutation(value)
                 with self.assertRaises(ValueError):
                     resolve_plan(value)
+
+    def test_sampler_validates_scenarios_only_on_configuration(self):
+        scenario = resolve_plan(short_plan())["scenario"]
+        with patch("simulator.training.plans.resolve_scenario", wraps=resolve_scenario) as validate:
+            sampler = EpisodeSampler(scenario, 2, 42)
+            initial_calls = validate.call_count
+            self.assertGreater(initial_calls, 0)
+            for world in (0, 1, 0, 1):
+                players = sampler.players(world)
+                base = scenario["arenas"][sampler.arenas[world]]["environment"]
+                self.assertEqual(players, resolve_scenario({**base, "players": players})["players"])
+            self.assertEqual(validate.call_count, initial_calls)
+            sampler.configure(scenario)
+            self.assertGreater(validate.call_count, initial_calls)
+        invalid = deepcopy(scenario)
+        invalid["arenas"][0]["environment"]["rules"]["natural_regeneration"] = True
+        before = sampler.state_dict()
+        with self.assertRaises(ValueError):
+            sampler.configure(invalid)
+        self.assertEqual(sampler.state_dict(), before)
+
+    def test_sampler_still_validates_sampled_players(self):
+        scenario = resolve_plan(short_plan())["scenario"]
+        scenario["spawns"]["sample"] = "world"
+        scenario["equipment"]["sample"] = "world"
+        sampler = EpisodeSampler(scenario, 1, 42)
+        sampler.players(0)
+        saved = sampler.state_dict()
+        sampler.cache[0]["equipment"][0]["offhand"] = "minecraft:banana"
+        with self.assertRaisesRegex(ValueError, "offhand"):
+            sampler.players(0)
+        sampler.load_state_dict(saved)
+        sampler.cache[0]["spawns"][0]["yaw"] = float("nan")
+        with self.assertRaises(ValueError):
+            sampler.players(0)
 
     def test_component_rng_and_world_cache(self):
         scenario = resolve_plan(short_plan())["scenario"]
@@ -342,6 +377,29 @@ class ResearchChecks(unittest.TestCase):
         row = json.loads((output / "metrics.jsonl").read_text().splitlines()[0])
         self.assertNotIn("reward_types", row)
         self.assertTrue(np.isfinite(row["reward_total"]))
+
+    def test_reset_reuses_observations_for_reset_groups(self):
+        plan = resolve_plan(short_plan())
+        stage = plan["stages"][0]
+        stage["scenario"]["arenas"].append(deepcopy(stage["scenario"]["arenas"][0]))
+        worlds = SampledWorlds(stage["scenario"], plan["policy"], 8, "cpu", self.library, 2, 42)
+        self.addCleanup(worlds.close)
+        self.assertEqual(len(worlds.groups), 2)
+        worlds.configure(stage)
+        partial = np.zeros(8, dtype=bool)
+        partial[worlds.groups[0][0][0]] = True
+        for mask in (np.zeros(8, dtype=bool), partial, np.ones(8, dtype=bool)):
+            with self.subTest(mask=mask.tolist()), contextlib.ExitStack() as stack:
+                spies = [(ids,
+                    stack.enter_context(patch.object(environment, "observe", wraps=environment.observe)),
+                    stack.enter_context(patch.object(environment, "reset_players", wraps=environment.reset_players)))
+                    for ids, environment in worlds.groups]
+                result = worlds.reset(mask)
+                for ids, observe, reset in spies:
+                    selected = mask[ids].any()
+                    self.assertEqual(observe.call_count, 0 if selected else 1)
+                    self.assertEqual(reset.call_count, 1 if selected else 0)
+            np.testing.assert_array_equal(result, worlds.observe())
 
     def test_learner_only_collection_and_selective_resets(self):
         plan = resolve_plan(short_plan())

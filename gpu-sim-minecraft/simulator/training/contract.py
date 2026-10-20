@@ -90,22 +90,12 @@ def fingerprint(contract):
                                      allow_nan=False).encode("utf-8")).hexdigest()
 
 
-def resolve_scenario(definition):
-    scenario = deepcopy(definition)
-    if (scenario.get("format") != "minecraft_sim_environment" or scenario.get("version") != 1
-            or scenario.get("minecraft") != "26.3" or len(scenario.get("players", [])) != 2):
-        raise ValueError("Unsupported environment format/version/build/player count")
-    profile = scenario.get("profile", "configured")
+def resolve_players(players, profile="configured"):
+    players = deepcopy(players)
+    if not isinstance(players, list) or len(players) != 2:
+        raise ValueError("Environment needs two players")
     if profile not in ("configured", "unarmored_diamond_sword", "unarmored_sword_axe_shield"):
         raise ValueError("Unsupported environment profile")
-    for capability in scenario.get("requires", []):
-        if capability not in CAPABILITIES:
-            raise ValueError(f"Unsupported scenario capability: {capability}")
-    rules = scenario.get("rules", {})
-    if (not isinstance(rules, dict) or set(rules) - set(RULES)
-            or any(type(value) is not bool or value is not False for value in rules.values())):
-        raise ValueError("Scenario bridge currently requires frozen food and no natural regeneration")
-    scenario["rules"] = dict(RULES)
     materials = ("leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite")
     weapons = {"minecraft:air", *(f"minecraft:{material}_{kind}" for material in materials
                                  if material not in ("leather", "chainmail") for kind in ("sword", "axe")),
@@ -113,7 +103,7 @@ def resolve_scenario(definition):
     default = {"weapons": ["minecraft:diamond_sword"], "offhand": "minecraft:air"}
     if profile == "unarmored_sword_axe_shield":
         default = {"weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"], "offhand": "minecraft:shield"}
-    for player in scenario["players"]:
+    for player in players:
         loadout = deepcopy(player.get("loadout", default))
         if not isinstance(loadout, dict) or set(loadout) - {"weapons", "selected", "offhand", "armor"}:
             raise ValueError("Unsupported loadout fields")
@@ -138,6 +128,25 @@ def resolve_scenario(definition):
             if item not in allowed:
                 raise ValueError(f"Unsupported armor item: {item}")
         player["loadout"] = {"weapons": slots, "selected": selected, "offhand": offhand, "armor": armor}
+    json.dumps(players, allow_nan=False)
+    return players
+
+
+def resolve_scenario(definition):
+    scenario = deepcopy(definition)
+    if (scenario.get("format") != "minecraft_sim_environment" or scenario.get("version") != 1
+            or scenario.get("minecraft") != "26.3" or len(scenario.get("players", [])) != 2):
+        raise ValueError("Unsupported environment format/version/build/player count")
+    profile = scenario.get("profile", "configured")
+    for capability in scenario.get("requires", []):
+        if capability not in CAPABILITIES:
+            raise ValueError(f"Unsupported scenario capability: {capability}")
+    rules = scenario.get("rules", {})
+    if (not isinstance(rules, dict) or set(rules) - set(RULES)
+            or any(type(value) is not bool or value is not False for value in rules.values())):
+        raise ValueError("Scenario bridge currently requires frozen food and no natural regeneration")
+    scenario["rules"] = dict(RULES)
+    scenario["players"] = resolve_players(scenario["players"], profile)
     scenario["profile"] = "configured"
     scenario["requires"] = list(CAPABILITIES)
     scenario.pop("policy", None)

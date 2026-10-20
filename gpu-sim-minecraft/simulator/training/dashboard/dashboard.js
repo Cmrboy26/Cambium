@@ -156,6 +156,21 @@ function renderConfig(config) {
     const options = config?.options ?? {};
     const metadata = config?.metadata ?? {};
     const environment = metadata.scenario ?? metadata.environment ?? {};
+    const experiment = resolvedExperiment(config);
+    const learner = experiment?.learner ?? {};
+    const policy = metadata.schema?.id ?? options.schema ?? (experiment?.policy ? "Custom layout" : "--");
+    const width = metadata.hidden_dim ?? learner.hidden_dim ?? options.hidden_dim;
+    element("run-title").textContent = experiment?.name ?? environment.name ?? "Training overview";
+    renderFields("run-identity", [
+        ["Seed", experiment?.seed ?? options.seed],
+        ["Compute", `${options.device ?? "--"} / ${format(options.envs)} worlds`],
+        ["Policy", `${policy}${width != null ? ` / width ${format(width)}` : ""}`],
+        ["Rollout", `${format(options.rollout_steps)} steps / world`],
+        ["Learning rate", learner.lr ?? options.lr],
+        ["PPO epochs", learner.epochs ?? options.epochs],
+        ["Minibatch", format(learner.minibatch_size ?? options.minibatch_size)],
+        ["Initialization", options.resume ? "Resumed checkpoint" : options.initialize ? "Transferred weights" : config ? "Fresh weights" : "--"],
+    ]);
     element("arena").scenario = environment;
     element("arena").runId = element("run").value;
     document.dispatchEvent(new CustomEvent("arena-config", { detail: { scenario: environment, runId: element("run").value } }));
@@ -176,6 +191,8 @@ function renderConfig(config) {
         ["Hidden dimension", metadata.hidden_dim ?? options.hidden_dim],
         ["Policy", metadata.schema?.id ?? options.schema],
         ["Environment", options.environment ?? "Checkpoint / default"],
+        ["Resume checkpoint", options.resume ?? "None"],
+        ["Initial weights", options.initialize ?? "None"],
         ["Replay interval", options.replay_every === 0 ? "Off" : options.replay_every],
     ];
     for (const [index, player] of (environment.players ?? []).entries()) {
@@ -188,7 +205,6 @@ function renderConfig(config) {
         fields.push([`Reward: ${name}`, weight]);
     }
     renderFields("config", fields);
-    const experiment = resolvedExperiment(config);
     element("experiment-details").hidden = !experiment;
     element("experiment-json").textContent = experiment ? JSON.stringify(experiment, null, 2) : "";
 }
@@ -262,6 +278,7 @@ function renderCurriculum() {
     const hasResearchMetrics = records.some((row) => row.stage !== undefined || row.stage_index !== undefined
         || row.completed_curriculum !== undefined || row.evaluations !== undefined);
     element("curriculum").hidden = !experiment && !hasResearchMetrics;
+    element("nav-curriculum").hidden = !experiment && !hasResearchMetrics;
     const stage = stageFor(latest, experiment);
     const initial = !latest ? experiment?.stages?.[0] : null;
     const boundary = latest?.curriculum_boundary;
@@ -275,6 +292,16 @@ function renderCurriculum() {
         : upcomingName ? `Upcoming stage: ${upcomingName} (latest rollout is from ${stageName(latest, experiment)})`
         : latest?.stage !== undefined || latest?.stage_index !== undefined ? `Active stage (latest rollout): ${stageName(latest, experiment)}`
         : initial ? `Initial stage: ${initial.name} (waiting for updates)` : "Stage status not recorded";
+    element("run-stage-status").textContent = element("curriculum-status").textContent;
+    element("run-budget").textContent = stage || initial ? budgetText((stage ?? initial).advance, latest?.stage_progress) : "";
+    const metadata = configuration?.metadata ?? {};
+    const environment = metadata.scenario ?? metadata.environment ?? {};
+    const conditions = stage || initial ? stageConditions(stage ?? initial).filter(([label]) => label !== "Arena mixture") : [
+        ["Environment", environment.name], ["Opponent mix", "Not recorded"],
+        ["Fixed controls", fixedControls(metadata.controls)],
+        ["Episode limit", metadata.max_ticks ?? configuration?.options?.max_ticks ?? environment.max_ticks],
+    ];
+    renderFields("run-context", conditions);
     renderFields("stage-summary", [
         ["Latest rollout stage", latest ? stageName(latest, experiment) : "No rollout yet"],
         ["Budget progress (latest rollout)", progressText(latest?.stage_progress)],

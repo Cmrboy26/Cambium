@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from simulator.training.contract import FEATURES, resolve_scenario
+from simulator.training.contract import FEATURES, resolve_players, resolve_scenario
 from simulator.training.environment import ROOT
 
 
@@ -272,15 +272,16 @@ def scene_key(scenario):
 
 class EpisodeSampler:
     def __init__(self, scenario, count, seed):
-        self.scenario = deepcopy(scenario)
+        self.scenario = _scenario(scenario)
         streams = np.random.SeedSequence(seed).spawn(3)
         self.arena_rng, self.spawn_rng, self.gear_rng = [np.random.default_rng(stream) for stream in streams]
-        arenas = scenario["arenas"]
+        arenas = self.scenario["arenas"]
         self.arenas = [int(value) for value in np.asarray(
             self.arena_rng.choice(len(arenas), count, p=weights(arenas))).reshape(-1)] if len(arenas) > 1 else [0] * count
         self.cache = [{"spawns": None, "equipment": None} for _ in range(count)]
 
     def configure(self, scenario):
+        scenario = _scenario(scenario)
         if scene_key(scenario) != scene_key(self.scenario):
             raise ValueError("Changing arenas requires a new scene assignment")
         for component in ("spawns", "equipment"):
@@ -336,7 +337,7 @@ class EpisodeSampler:
                 if "region" in spawn:
                     x, y, z = player["position"]
                     player["on_ground"] = not self._valid_position([x, y - 1e-5, z], base)
-        return resolve_scenario({**base, "players": players})["players"]
+        return resolve_players(players)
 
     @staticmethod
     def _valid_position(position, base):

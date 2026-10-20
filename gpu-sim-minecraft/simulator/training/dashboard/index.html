@@ -19,28 +19,91 @@
     <main>
         <section class="toolbar" aria-label="Run selection">
             <div class="run-field"><label for="run">Training run</label><select id="run"><option value="">Loading runs...</option></select></div>
-            <label class="live-control"><input type="checkbox" id="show-world" aria-controls="world-view" checked> Show world view</label>
             <label class="live-control"><input type="checkbox" id="live" checked> Live updates</label>
-            <button id="refresh" type="button">Refresh</button>
+            <button id="refresh" type="button" aria-label="Refresh training run" title="Refresh training run"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
         </section>
-        <p id="run-path" class="run-path"></p>
         <p id="notice" class="notice" role="status" hidden></p>
-        <section id="curriculum" class="curriculum" aria-labelledby="curriculum-title" hidden>
-            <h2 id="curriculum-title">Experiment stages</h2>
+        <section id="overview" class="run-overview" aria-labelledby="run-title">
+            <div class="section-title"><h2 id="run-title">Training overview</h2><a href="#run-settings">Run configuration <i data-lucide="arrow-down" aria-hidden="true"></i></a></div>
+            <div class="run-stage"><p id="run-stage-status" role="status">Waiting for run data</p><span id="run-budget"></span></div>
+            <dl id="run-identity" class="run-identity"></dl>
+            <dl id="run-context" class="run-context" aria-label="Latest rollout conditions"></dl>
+            <section class="summary" aria-label="Latest metrics">
+                <div><h3>PPO update</h3><strong id="stat-update">--</strong><span id="stat-total">0 updates recorded</span></div>
+                <div><h3>Player samples</h3><strong id="stat-samples">--</strong><span>Cumulative</span></div>
+                <div><h3>Mean reward / step</h3><strong id="stat-reward">--</strong><span>Latest rollout</span></div>
+                <div><h3>Transitions / second</h3><strong id="stat-throughput">--</strong><span>Latest update</span></div>
+                <div><h3>Completed rounds</h3><strong id="stat-rounds">--</strong><span>Cumulative</span></div>
+                <div><h3>Timeouts</h3><strong id="stat-timeouts">--</strong><span>Across recorded updates</span></div>
+            </section>
+            <section class="summary timing" aria-label="Training time estimates">
+                <div><h3>Estimated time remaining</h3><strong id="stat-remaining">--</strong><span id="stat-remaining-detail">Waiting for updates</span></div>
+                <div><h3>Recorded training time</h3><strong id="stat-elapsed">--</strong><span>Collection + optimization this session</span></div>
+                <div><h3>Average update duration</h3><strong id="stat-average">--</strong><span>Last 20 timed updates</span></div>
+                <div><h3>Training target</h3><strong id="stat-target">--</strong><span>Current session</span></div>
+            </section>
+        </section>
+        <nav class="section-nav" aria-label="Dashboard sections">
+            <a href="#results">Training results</a><a id="nav-curriculum" href="#curriculum" hidden>Curriculum &amp; evaluation</a><a href="#world">World &amp; recordings</a><a href="#run-settings">Configuration</a><a href="#recent-updates">Recent updates</a>
+        </nav>
+        <section id="results" class="dashboard-section" aria-labelledby="results-title">
+            <div class="section-title"><h2 id="results-title">Training results</h2></div>
+            <div class="view-controls" aria-label="Chart settings">
+                <fieldset><legend>Update window</legend><div class="segments">
+                    <label><input type="radio" name="window" value="50"><span>50</span></label>
+                    <label><input type="radio" name="window" value="100" checked><span>100</span></label>
+                    <label><input type="radio" name="window" value="500"><span>500</span></label>
+                    <label><input type="radio" name="window" value="0"><span>All</span></label>
+                </div></fieldset>
+                <div class="smoothing"><label for="smooth">Smoothing</label><select id="smooth"><option value="1">Off</option><option value="5">EMA 5</option><option value="10">EMA 10</option><option value="20">EMA 20</option></select></div>
+                <span id="window-info">No updates</span>
+            </div>
+            <p id="empty" class="empty" hidden>No training runs found.</p>
+            <section class="chart-group" aria-labelledby="outcomes-title">
+                <h3 id="outcomes-title">Rewards &amp; duel outcomes</h3>
+                <div class="charts">
+                    <article class="chart"><h2>Mean reward / step <span>Per rollout</span></h2><div class="plot"><canvas id="reward-chart" role="img" aria-label="Mean reward per player step by PPO update"></canvas></div></article>
+                    <article class="chart"><h2>Total reward <span>Per update</span></h2><div class="plot"><canvas id="total-reward-chart" role="img" aria-label="Total player reward by PPO update"></canvas></div></article>
+                    <article class="chart reward-breakdown"><h2>Reward breakdown <span>Per update</span></h2><div class="plot"><canvas id="reward-types-chart" role="img" aria-label="Reward contributions by type and PPO update"></canvas><p id="reward-types-empty" class="plot-empty">No per-type reward data recorded.</p></div></article>
+                    <article class="chart reward-breakdown"><h2>Duel endings <span>Per update</span></h2><div class="plot"><canvas id="duels-chart" role="img" aria-label="Terminated duels and timeouts by PPO update"></canvas></div></article>
+                </div>
+            </section>
+            <section class="chart-group" aria-labelledby="optimization-title">
+                <h3 id="optimization-title">Policy optimization</h3>
+                <div class="charts">
+                    <article class="chart"><h2>Policy loss <span>PPO objective</span></h2><div class="plot"><canvas id="policy-loss-chart" role="img" aria-label="Policy loss by PPO update"></canvas></div></article>
+                    <article class="chart"><h2>PPO losses <span>Value, total</span></h2><div class="plot"><canvas id="loss-chart" role="img" aria-label="Value and total loss by PPO update"></canvas></div></article>
+                    <article class="chart"><h2>Policy entropy <span>Exploration</span></h2><div class="plot"><canvas id="entropy-chart" role="img" aria-label="Policy entropy by PPO update"></canvas></div></article>
+                </div>
+            </section>
+            <section class="chart-group" aria-labelledby="runtime-title">
+                <h3 id="runtime-title">Runtime &amp; throughput</h3>
+                <div class="charts">
+                    <article class="chart"><h2>Throughput <span>Player transitions / second</span></h2><div class="plot"><canvas id="throughput-chart" role="img" aria-label="Player transitions per second by PPO update"></canvas></div></article>
+                    <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Rollout collection and optimization seconds by PPO update"></canvas></div></article>
+                </div>
+            </section>
+        </section>
+        <section id="curriculum" class="dashboard-section curriculum" aria-labelledby="curriculum-section-title" hidden>
+            <div class="section-title"><h2 id="curriculum-section-title">Curriculum &amp; evaluation</h2></div>
+            <h3 id="curriculum-title">Experiment stages</h3>
             <p id="curriculum-status" role="status"></p>
+            <h3>Held-out evaluations</h3>
+            <p class="section-note">Latest recorded result per suite; mean return is per evaluation episode.</p>
+            <div class="table-scroll"><table><thead><tr><th>Suite</th><th>Update</th><th>Rollout stage</th><th>Win rate</th><th>Mean return</th><th>Episodes</th></tr></thead><tbody id="evaluations"></tbody></table></div>
+            <details><summary>Stage progress &amp; conditions</summary>
             <dl id="stage-summary"></dl>
             <h3 id="stage-context-title">Stage conditions</h3><dl id="stage-context"></dl>
             <div id="upcoming-stage" hidden><h3>Upcoming stage conditions</h3><dl id="upcoming-context"></dl></div>
-            <details open><summary>Stage timeline / chart update markers</summary>
+            </details>
+            <details><summary>Stage timeline &amp; boundaries</summary>
                 <p class="section-note">Update ranges refer to the stage that produced each rollout. Boundary rows describe the just-finished stage, not the upcoming stage.</p>
                 <div class="table-scroll"><table><thead><tr><th>Updates</th><th>Stage</th><th>Last budget progress</th><th>Boundary / completion</th></tr></thead><tbody id="stage-timeline"></tbody></table></div>
             </details>
-            <h3>Evaluations</h3>
-            <p class="section-note">Latest recorded result per suite (independent of chart window); mean return is per evaluation episode.</p>
-            <div class="table-scroll"><table><thead><tr><th>Suite</th><th>Update</th><th>Rollout stage</th><th>Win rate</th><th>Mean return</th><th>Episodes</th></tr></thead><tbody id="evaluations"></tbody></table></div>
         </section>
-        <section class="configuration" aria-labelledby="environment-name">
-            <h2 id="environment-name">Environment</h2><dl id="environment"></dl>
+        <section id="world" class="dashboard-section configuration" aria-labelledby="world-title">
+            <div class="section-title"><h2 id="world-title">World &amp; recordings</h2><label class="live-control"><input type="checkbox" id="show-world" aria-controls="world-view" checked> Show world view</label></div>
+            <h3 id="environment-name">Environment</h3><dl id="environment"></dl>
             <div id="world-view" class="duel-preview" aria-label="Environment and player equipment">
                 <section class="player-equipment player-one" aria-labelledby="player-one-title">
                     <h3 id="player-one-title"><span class="player-dot"></span>Player 1</h3>
@@ -84,46 +147,14 @@
                     <p id="player-two-state" class="player-state">--</p><dl id="player-two-gear"></dl>
                 </section>
             </div>
-            <details><summary>Run settings, loadouts and rewards</summary><dl id="config"></dl></details>
+        </section>
+        <section id="run-settings" class="dashboard-section configuration" aria-labelledby="settings-title">
+            <div class="section-title"><h2 id="settings-title">Run configuration</h2></div>
+            <p id="run-path" class="run-path"></p>
+            <details><summary>Training settings, loadouts &amp; rewards</summary><dl id="config"></dl></details>
             <details id="experiment-details" hidden><summary>Resolved experiment JSON (research details)</summary><pre id="experiment-json"></pre></details>
         </section>
-        <section class="summary" aria-label="Latest metrics">
-            <div><h2>PPO update</h2><strong id="stat-update">--</strong><span id="stat-total">0 updates recorded</span></div>
-            <div><h2>Player samples</h2><strong id="stat-samples">--</strong><span>Cumulative</span></div>
-            <div><h2>Mean reward / step</h2><strong id="stat-reward">--</strong><span>Latest rollout</span></div>
-            <div><h2>Transitions / second</h2><strong id="stat-throughput">--</strong><span>Latest update</span></div>
-            <div><h2>Completed rounds</h2><strong id="stat-rounds">--</strong><span>Cumulative</span></div>
-            <div><h2>Timeouts</h2><strong id="stat-timeouts">--</strong><span>Across recorded updates</span></div>
-        </section>
-        <section class="summary timing" aria-label="Training time estimates">
-            <div><h2>Estimated time remaining</h2><strong id="stat-remaining">--</strong><span id="stat-remaining-detail">Waiting for updates</span></div>
-            <div><h2>Recorded training time</h2><strong id="stat-elapsed">--</strong><span>Collection + optimization this session</span></div>
-            <div><h2>Average update duration</h2><strong id="stat-average">--</strong><span>Last 20 timed updates</span></div>
-            <div><h2>Training target</h2><strong id="stat-target">--</strong><span>Current session</span></div>
-        </section>
-        <section class="view-controls" aria-label="Chart settings">
-            <fieldset><legend>Update window</legend><div class="segments">
-                <label><input type="radio" name="window" value="50"><span>50</span></label>
-                <label><input type="radio" name="window" value="100" checked><span>100</span></label>
-                <label><input type="radio" name="window" value="500"><span>500</span></label>
-                <label><input type="radio" name="window" value="0"><span>All</span></label>
-            </div></fieldset>
-            <div class="smoothing"><label for="smooth">Smoothing</label><select id="smooth"><option value="1">Off</option><option value="5">EMA 5</option><option value="10">EMA 10</option><option value="20">EMA 20</option></select></div>
-            <span id="window-info">No updates</span>
-        </section>
-        <p id="empty" class="empty" hidden>No training runs found.</p>
-        <section class="charts" aria-label="Training charts">
-            <article class="chart"><h2>Mean reward / step <span>Per rollout</span></h2><div class="plot"><canvas id="reward-chart" role="img" aria-label="Mean reward per player step by PPO update"></canvas></div></article>
-            <article class="chart"><h2>Total reward <span>Per update</span></h2><div class="plot"><canvas id="total-reward-chart" role="img" aria-label="Total player reward by PPO update"></canvas></div></article>
-            <article class="chart reward-breakdown"><h2>Reward breakdown <span>Per update</span></h2><div class="plot"><canvas id="reward-types-chart" role="img" aria-label="Reward contributions by type and PPO update"></canvas><p id="reward-types-empty" class="plot-empty">No per-type reward data recorded.</p></div></article>
-            <article class="chart"><h2>Policy loss <span>PPO objective</span></h2><div class="plot"><canvas id="policy-loss-chart" role="img" aria-label="Policy loss by PPO update"></canvas></div></article>
-            <article class="chart"><h2>PPO losses <span>Value, total</span></h2><div class="plot"><canvas id="loss-chart" role="img" aria-label="Value and total loss by PPO update"></canvas></div></article>
-            <article class="chart"><h2>Policy entropy <span>Exploration</span></h2><div class="plot"><canvas id="entropy-chart" role="img" aria-label="Policy entropy by PPO update"></canvas></div></article>
-            <article class="chart"><h2>Throughput <span>Player transitions / second</span></h2><div class="plot"><canvas id="throughput-chart" role="img" aria-label="Player transitions per second by PPO update"></canvas></div></article>
-            <article class="chart"><h2>Duel endings <span>Per update</span></h2><div class="plot"><canvas id="duels-chart" role="img" aria-label="Terminated duels and timeouts by PPO update"></canvas></div></article>
-            <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Rollout collection and optimization seconds by PPO update"></canvas></div></article>
-        </section>
-        <section class="updates" aria-labelledby="updates-title">
+        <section id="recent-updates" class="dashboard-section updates" aria-labelledby="updates-title">
             <div class="section-title"><h2 id="updates-title">Recent updates</h2><span id="row-count">0 recorded</span></div>
             <div class="table-scroll" tabindex="0" aria-label="Recent training updates"><table><thead><tr><th scope="col">Update</th><th scope="col">Samples</th><th scope="col">Reward / step</th><th scope="col">Policy loss</th><th scope="col">Value loss</th><th scope="col">Entropy</th><th scope="col">Rounds</th><th scope="col">Timeouts</th></tr></thead><tbody id="updates"><tr><td colspan="8">No updates recorded.</td></tr></tbody></table></div>
         </section>

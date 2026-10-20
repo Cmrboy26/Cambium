@@ -42,10 +42,32 @@ main { max-width: 1456px; padding: 24px; margin: 0 auto; }
 .live-control input { width: 16px; height: 16px; margin: 0; }
 .run-path { margin: 9px 0 20px; color: var(--muted); font-family: Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; min-height: 14px; }
 .notice { font-size: 13px; color: #864b0a; border-left: 3px solid #c78b30; padding: 10px 14px; background: #fff6e8; overflow-wrap: anywhere; }
+.toolbar { margin-bottom: 24px; }
+#refresh { display: grid; place-items: center; width: 36px; height: 36px; padding: 8px; flex-shrink: 0; }
+#refresh svg, .section-title a svg { width: 16px; height: 16px; }
+.run-overview > .section-title { margin-bottom: 10px; }
+.run-overview h2 { font-size: 22px; font-weight: 600; overflow-wrap: anywhere; }
+.section-title a { display: inline-flex; gap: 6px; align-items: center; color: var(--green); font-size: 12px; text-decoration: none; }
+.section-title a:hover { text-decoration: underline; }
+.run-stage { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 20px; }
+.run-stage p { margin: 0; color: var(--green); font-size: 13px; overflow-wrap: anywhere; }
+.run-stage > span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.run-identity { grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 18px 0; margin: 18px 0 0; border-top: 1px solid var(--line); }
+.run-context { padding: 16px 0; margin: 0; border-top: 1px solid var(--line); }
+.run-identity dd { font-variant-numeric: tabular-nums; }
+.run-context dd { line-height: 1.5; }
+.section-nav { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.section-nav a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 4px 0; }
+.section-nav a:hover { color: var(--green); text-decoration: underline; }
+.dashboard-section { margin-top: 30px; padding-top: 24px; border-top: 1px solid var(--line); scroll-margin-top: 18px; }
+#results { border-top: 0; margin-top: 24px; padding-top: 0; }
+.chart-group { margin-top: 22px; }
+.chart-group > h3 { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: var(--muted); }
+.chart-group + .chart-group { margin-top: 28px; }
 .summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--paper); }
 .summary > div { padding: 18px 16px; border-right: 1px solid var(--line); min-width: 0; }
 .summary > div:last-child { border-right: 0; }
-.summary h2 { font-size: 11px; font-weight: 500; color: var(--muted); margin: 0 0 10px; }
+.summary h3 { font-size: 11px; font-weight: 500; color: var(--muted); margin: 0 0 10px; }
 .summary strong { display: block; font-size: 25px; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .summary > div:nth-child(3) strong { color: var(--green); }
 .summary > div:nth-child(4) strong { color: var(--blue); }
@@ -87,18 +109,16 @@ legend { float: left; padding: 0; margin-right: 10px; color: var(--muted); }
 .reward-breakdown { grid-column: 1 / -1; }
 .reward-breakdown .plot { height: 280px; }
 .plot-empty { position: absolute; inset: 0 0 45px; display: grid; place-items: center; margin: 0; font-size: 12px; color: var(--muted); background: #ffffffdd; pointer-events: none; text-align: center; padding: 12px; }
-.configuration, .updates { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
-.configuration > h2, .section-title h2 { font-size: 15px; font-weight: 500; margin: 0; }
-.configuration { margin: 0 0 20px; padding: 0; border-top: 0; }
-.configuration > h2 { overflow-wrap: anywhere; }
+.section-title h2 { font-size: 17px; font-weight: 600; margin: 0; }
+.run-overview .section-title h2 { font-size: 22px; }
+.configuration > h3 { overflow-wrap: anywhere; font-size: 13px; font-weight: 500; margin: 18px 0 0; }
 .configuration details { margin-top: 16px; }
 .configuration summary { cursor: pointer; color: var(--muted); font-size: 12px; }
-.curriculum { margin-bottom: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
-.curriculum h2 { margin: 0; font-size: 16px; font-weight: 600; }
 .curriculum h3 { margin: 20px 0 10px; font-size: 13px; font-weight: 500; }
 .curriculum details { margin-top: 16px; }
 .curriculum summary { cursor: pointer; font-size: 12px; color: var(--muted); }
-#curriculum-status { font-size: 14px; color: var(--green); overflow-wrap: anywhere; }
+.curriculum details, .configuration details { padding: 14px 0; border-top: 1px solid var(--line); }
+#curriculum-status { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .section-note { font-size: 12px; color: var(--muted); }
 #experiment-json { max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
 #replay-training { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 0; }
@@ -136,7 +156,7 @@ dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px 
 dl div { min-width: 0; }
 dt { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
 dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
-.section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.section-title { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .section-title span { font-size: 11px; color: var(--muted); }
 .table-scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; min-width: 700px; font-variant-numeric: tabular-nums; background: var(--paper); }
@@ -165,6 +185,9 @@ tbody tr:hover { background: #f3f7f4; }
     main { padding: 18px 14px; }
     .toolbar { flex-wrap: wrap; gap: 10px 18px; }
     .run-field { flex-basis: 100%; }
+    .run-identity, .run-context { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .run-overview .section-title h2 { font-size: 20px; }
+    .section-nav { gap: 8px 18px; }
     #refresh { margin-left: auto; }
     .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .summary > div { padding: 15px 12px; }

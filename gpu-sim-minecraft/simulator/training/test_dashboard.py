@@ -1,4 +1,5 @@
 import json
+from html.parser import HTMLParser
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,6 +14,36 @@ from simulator.training.dashboard import RunStore, make_server
 
 
 class DashboardChecks(unittest.TestCase):
+    def test_page_sections_prioritize_run_overview(self):
+        class PageStructure(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.ids = []
+                self.links = []
+                self.disclosures = []
+
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                if "id" in attributes:
+                    self.ids.append(attributes["id"])
+                if tag == "a":
+                    self.links.append(attributes.get("href", ""))
+                if tag == "details":
+                    self.disclosures.append(attributes)
+
+        page = PageStructure()
+        page.feed(Path(__file__).with_name("dashboard").joinpath("index.html").read_text(encoding="utf-8"))
+        self.assertEqual(len(page.ids), len(set(page.ids)), "Dashboard IDs must remain unique")
+        ordered = ["run-title", "run-identity", "run-context", "stat-update", "stat-remaining",
+                   "results", "outcomes-title", "optimization-title", "runtime-title", "curriculum",
+                   "world", "run-settings", "recent-updates"]
+        positions = [page.ids.index(identity) for identity in ordered]
+        self.assertEqual(positions, sorted(positions), "Run identity and metrics must precede detailed sections")
+        for target in ("results", "curriculum", "world", "run-settings", "recent-updates"):
+            self.assertIn(f"#{target}", page.links)
+        self.assertTrue(page.disclosures)
+        self.assertTrue(all("open" not in attrs for attrs in page.disclosures), "Detailed configuration starts collapsed")
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for curriculum DOM checks")
     def test_experiment_stage_evaluation_and_replay_dom(self):
         directory = Path(__file__).with_name("dashboard")
