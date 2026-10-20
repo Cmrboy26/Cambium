@@ -437,6 +437,12 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   left/right and Home/End keys also navigate. Current and selected stages are
   separate. Browsing survives refresh; changing runs resets to the current stage.
   Stage details group advancement/progress, environment, opponents and controls.
+  Reward rows show the selected stage's configured signed weights, not observed
+  returns. Active terms lead; explicit zeros are collapsed separately and absent
+  maps stay unknown. Use resolved stage weights, then explicit task overrides,
+  then recorded per-arena maps; never borrow deployment/global defaults.
+  Reward swatches match the charts; signed magnitude bars normalize within each
+  map. Opponent bars show mixture probabilities, not measured episode shares.
   Simple recorded budgets get a progress bar; composed/unknown budgets do not.
   Saved experiments, not current authoring files, describe a run. Boundaries
   select the next stage but retain the just-finished rollout's progress only

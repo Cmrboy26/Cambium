@@ -34,7 +34,8 @@ class DashboardChecks(unittest.TestCase):
         page = PageStructure()
         page.feed(Path(__file__).with_name("dashboard").joinpath("index.html").read_text(encoding="utf-8"))
         self.assertEqual(len(page.ids), len(set(page.ids)), "Dashboard IDs must remain unique")
-        ordered = ["run-title", "run-identity", "run-context", "stat-update", "stat-remaining",
+        ordered = ["run-title", "milestone-browser", "milestone-strip", "milestone-details",
+                 "run-identity", "run-context", "stat-update", "stat-remaining",
                    "results", "outcomes-title", "optimization-title", "runtime-title", "curriculum",
                    "world", "run-settings", "recent-updates"]
         positions = [page.ids.index(identity) for identity in ordered]
@@ -47,13 +48,13 @@ class DashboardChecks(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for curriculum DOM checks")
     def test_experiment_stage_evaluation_and_replay_dom(self):
         directory = Path(__file__).with_name("dashboard")
-        result = subprocess.run([shutil.which("node"), "-e", r"""
+        result = subprocess.run(["node", "-e", r"""
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 class Node {
-    constructor() {this.children=[]; this.dataset={}; this.attributes={}; this.hidden=false; this.value='run';}
+    constructor() {this.children=[]; this.dataset={}; this.attributes={}; this.style={setProperty(name,value){this[name]=value;}}; this.hidden=false; this.value='run';}
     set textContent(value) {this.text=String(value); this.children=[];}
     get textContent() {return this.text ?? this.children.map(child=>child.textContent).join(' ');}
     set innerHTML(value) {throw new Error('Untrusted content must never use innerHTML');}
@@ -75,7 +76,8 @@ const experiment = {format:'minecraft_sim_experiment',version:1,name:'<img src=x
     learner:{lr:0.01,epochs:3,minibatch_size:16},policy:{},evaluations:{'<held>':{},unseen:{}},
     stages:[
         {name:'aim',environment_name:'Aim environment',arena_names:['Flat'],scenario:{arenas:[{environment:scene('flat'),weight:1}]},
-            controls:{attack:false},opponents:[{id:'target',weight:1}],advance:{updates:2}},
+            controls:{attack:false},opponents:[{id:'target',weight:1}],advance:{updates:2},
+            rewards:{mode:'replace',weights:{good_aim:0.025,death:-10,won_duel:0}}},
         {name:'fight',environment_name:'Fight environment',arena_names:['Hill','Pit'],
             scenario:{arenas:[{environment:scene('hill'),weight:1},{environment:scene('pit'),weight:3}]},
             controls:{},opponents:[{id:'sword',weight:1},{id:'axe',weight:3}],
@@ -99,6 +101,17 @@ const milestoneSlots = () => document.getElementById('milestone-strip').children
 assert.equal(milestoneSlots().length,3);
 assert.equal(milestoneSlots()[1].attributes['aria-pressed'],'true','The selected stage must occupy the center slot');
 assert.equal(milestoneSlots()[1].attributes['aria-current'],'step');
+assert.match(text('milestone-reward-source'),/Saved stage/);
+assert.match(text('milestone-reward-count'),/2 active.*3 recorded/);
+assert.match(text('milestone-rewards'),/Death.*-10.*Good aim.*\+0.025/);
+const rewardRows = document.getElementById('milestone-rewards').children[0].children;
+assert.equal(rewardRows[0].dataset.sign,'negative');
+assert.equal(rewardRows[1].dataset.sign,'positive');
+assert.equal(rewardRows[0].children[2].children[0].style.width,'100%');
+assert.equal(rewardRows[1].children[2].children[0].style.width,'0.25%');
+assert.equal(document.getElementById('milestone-controls').dataset.mode,'fixed');
+assert.match(text('milestone-rewards-inactive'),/Win.*0/);
+assert.doesNotMatch(text('milestone-rewards'),/Damage dealt/,'Never use deployment rewards for a stage');
 document.getElementById('milestone-next').onclick();
 assert.equal(text('milestone-name'),'fight');
 assert.equal(text('milestone-position'),'Stage 2 of 2');
@@ -106,6 +119,14 @@ assert.equal(milestoneSlots()[1].attributes['aria-pressed'],'true');
 assert.equal(milestoneSlots()[0].attributes['aria-current'],'step','Current and selected stage are separate states');
 assert.match(text('milestone-environment'),/Fight environment.*Hill.*Pit/);
 assert.match(text('milestone-opponents'),/sword.*25%.*axe.*75%/);
+const opponentRows = document.getElementById('milestone-opponents').children[0].children;
+assert.equal(opponentRows[0].children[2].children[0].style.width,'25%');
+assert.equal(opponentRows[1].children[2].children[0].style.width,'75%');
+assert.match(text('milestone-reward-empty'),/Not recorded/);
+assert.equal(text('milestone-rewards'),'','Changing stages must clear reward rows');
+assert.equal(text('milestone-rewards-inactive'),'');
+assert.match(text('milestone-controls'),/All learned/);
+assert.equal(document.getElementById('milestone-controls').dataset.mode,'learned');
 assert.match(text('milestone-observation'),/No rollout recorded/);
 assert.equal(document.getElementById('milestone-next').disabled,true);
 assert.match(text('milestone-current'),/Initial stage: aim/,'Browsing must not change the current stage');
@@ -133,6 +154,9 @@ document.getElementById('milestone-previous').onclick();
 assert.equal(text('milestone-name'),'aim');
 assert.match(text('milestone-state'),/Completed/);
 assert.match(text('milestone-progress'),/2.*updates.*3.*episodes.*64.*transitions/);
+assert.equal(document.getElementById('milestone-progress-bar').hidden,false);
+assert.equal(document.getElementById('milestone-progress-bar').max,2);
+assert.equal(document.getElementById('milestone-progress-bar').value,2);
 document.getElementById('milestone-return').onclick();
 assert.match(text('run-context'),/Aim environment.*target.*100%/,'Boundary summary must describe the latest rollout, not the upcoming stage');
 assert.match(text('run-budget'),/updates: 2 \/ 2/);
@@ -172,6 +196,19 @@ assert.match(text('curriculum-status'),/Initial stage: old/);
 assert.equal(text('milestone-name'),'old','Changing runs must reset the browsed stage');
 assert.equal(document.getElementById('milestone-next').disabled,true);
 assert.equal(document.getElementById('milestone-previous').disabled,true);
+assert.match(text('milestone-reward-empty'),/Not recorded/,'Unresolved authoring must not borrow inherited rewards');
+vm.runInContext(`renderMilestoneRewards({task_override:{rewards:{good_aim:0.00000001,death:-2}}});`,context);
+assert.match(text('milestone-reward-source'),/Task override/);
+assert.match(text('milestone-rewards'),/1e-8/,'Small nonzero weights must not round to zero');
+vm.runInContext(`renderMilestoneRewards({rewards:{mode:'replace',weights:{}}});`,context);
+assert.match(text('milestone-reward-empty'),/No reward terms configured/);
+vm.runInContext(`renderMilestoneRewards({rewards:{mode:'replace',weights:{death:0}}});`,context);
+assert.match(text('milestone-reward-empty'),/All recorded reward weights are zero/);
+assert.match(text('milestone-rewards-inactive'),/Death.*0/);
+vm.runInContext(`renderMilestoneRewards({scenario:{arenas:[
+    {environment:{name:'Hill',reward_weights:{death:-2}}},
+    {environment:{name:'Pit',reward_weights:{doing_damage:3}}}]}});`,context);
+assert.match(text('milestone-rewards'),/Hill.*Death.*-2.*Pit.*Damage dealt.*\+3/,'Historical arena rewards must retain their arena identity');
 assert.match(text('stage-context'),/Fixed controls Not recorded/,'Never resolve authoring inheritance');
 vm.runInContext(`const longer = JSON.parse(JSON.stringify(fixture));
     longer.experiment.name='Four stage curriculum';
@@ -217,7 +254,7 @@ assert.equal(text('replay-training'),'');
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for world-view checks")
     def test_world_view_toggle(self):
         script = Path(__file__).with_name("dashboard") / "arena.js"
-        result = subprocess.run([shutil.which("node"), "-e", r"""
+        result = subprocess.run(["node", "-e", r"""
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -247,7 +284,7 @@ assert.equal(vm.runInContext('tick',context),42);
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for weapon transform checks")
     def test_weapon_swing_is_forward_from_main_hand(self):
         directory = Path(__file__).with_name("dashboard")
-        result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", r"""
+        result = subprocess.run(["node", "--input-type=module", "-e", r"""
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -292,7 +329,7 @@ for (const weapon of ['minecraft:iron_sword', 'minecraft:netherite_axe']) {
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for replay interpolation checks")
     def test_replay_interpolation(self):
         script = Path(__file__).with_name("dashboard") / "arena-data.js"
-        result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", r"""
+        result = subprocess.run(["node", "--input-type=module", "-e", r"""
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const { replaySample, replayPlayers } = await import('data:text/javascript;base64,' +
@@ -322,7 +359,7 @@ assert.equal(replayPlayers(scenario,[frames[0].actors[0]])[0].loadout.selected,0
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard chart checks")
     def test_chart_math_and_training_estimates(self):
         script = Path(__file__).with_name("dashboard") / "dashboard.js"
-        result = subprocess.run([shutil.which("node"), "-e", r"""
+        result = subprocess.run(["node", "-e", r"""
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -370,19 +407,22 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         self.directory = tempfile.TemporaryDirectory(prefix=".dashboard-tests-", dir=".")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name).resolve()
-        self.run = self.root / "runs" / "first"
-        self.run.mkdir(parents=True)
-        (self.run / "config.json").write_text('{"options":{"device":"cpu","envs":4}}', encoding="utf-8")
-        self.metrics = self.run / "metrics.jsonl"
+        self.run_dir = self.root / "runs" / "first"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "config.json").write_text('{"options":{"device":"cpu","envs":4}}', encoding="utf-8")
+        self.metrics = self.run_dir / "metrics.jsonl"
         self.metrics.write_bytes(b'{"update":1,"reward_mean":0.25,"samples":16}\n')
         self.store = RunStore(self.root / "runs")
+
+    def test_fixture_preserves_unittest_runner(self):
+        self.assertTrue(callable(self.run))
 
     def test_discovery_custom_output_and_missing_root(self):
         self.assertEqual(len(self.store.list_runs()), 1)
         identity = self.store.list_runs()[0]["id"]
         self.assertEqual(self.store.read(identity)["config"]["options"]["envs"], 4)
         self.assertEqual(RunStore(self.root / "missing").list_runs(), [])
-        custom = RunStore(self.root / "missing", [self.run, self.run])
+        custom = RunStore(self.root / "missing", [self.run_dir, self.run_dir])
         self.assertEqual(custom.list_runs()[0]["id"], identity)
         self.assertEqual(len(custom.list_runs()), 1)
         with self.assertRaises(FileNotFoundError):
@@ -406,7 +446,7 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         result = self.store.read(identity)
         self.assertEqual([row["update"] for row in result["metrics"]], [1, 3])
         self.assertIn("Skipped 4", result["warnings"][0])
-        (self.run / "config.json").write_text('{"options":', encoding="utf-8")
+        (self.run_dir / "config.json").write_text('{"options":', encoding="utf-8")
         self.assertIsNone(self.store.read(identity)["config"])
         self.metrics.unlink()
         self.assertEqual(self.store.read(identity)["metrics"], [])
@@ -435,7 +475,7 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
                   "environment": {"version": 1, "name": "deployment"}, "controls": {"attack": False},
                   "max_ticks": 50, "hidden_dim": 32, "reward_weights": {"doing_damage": 1}},
                   "experiment": experiment}
-        (self.run / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        (self.run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
         row = {"update": 2, "stage": "aim", "stage_index": 0, "next_stage_index": 1,
                "stage_progress": {"updates": 2, "episodes": 4, "transitions": 128}, "completed_curriculum": False,
                "evaluations": {"held": {"win_rate": 0.75, "reward_mean": -1.5, "episodes": 4}},
@@ -452,7 +492,7 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
             output.write(json.dumps(row) + "\n")
         self.assertEqual(self.store.read(identity)["metrics"][-1], row)
         config["plan"] = config.pop("experiment")
-        (self.run / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        (self.run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
         self.assertEqual(self.store.read(identity)["config"], config)
 
     def test_invalid_research_metadata_is_skipped_without_losing_valid_rows(self):
@@ -500,7 +540,7 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         self.assertEqual(self.store.read(identity)["metrics"], [])
 
     def write_replay(self, directory=None):
-        directory = directory or self.run / "replays"
+        directory = directory or self.run_dir / "replays"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "training-round-000000010.jsonl"
         header = {"format": "minecraft_sim_replay", "version": 3, "players": 2,
@@ -544,7 +584,7 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
 
     def test_configured_replay_directory(self):
         path = self.write_replay(self.root / "exports")
-        (self.run / "config.json").write_text(json.dumps({"options": {"replay_dir": str(path.parent)}}), encoding="utf-8")
+        (self.run_dir / "config.json").write_text(json.dumps({"options": {"replay_dir": str(path.parent)}}), encoding="utf-8")
         identity = self.store.list_runs()[0]["id"]
         self.assertEqual(self.store.list_replays(identity)[0]["name"], path.name)
 

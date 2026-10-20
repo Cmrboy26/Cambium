@@ -43,6 +43,13 @@
                         <section><h4>Opponent mixture</h4><dl id="milestone-opponents" class="milestone-mixture"></dl></section>
                         <section><h4>Fixed controls</h4><dl id="milestone-controls" class="milestone-mixture"></dl></section>
                     </div>
+                    <section class="milestone-reward-section" aria-labelledby="milestone-reward-title">
+                        <div class="milestone-reward-heading"><h4 id="milestone-reward-title">Reward weights</h4><span id="milestone-reward-count"></span><span id="milestone-reward-source"></span></div>
+                        <div class="reward-legend" aria-label="Reward weight signs"><span class="reward-positive">+ Positive weight</span><span class="reward-negative">- Negative weight</span></div>
+                        <p id="milestone-reward-empty" class="section-note"></p>
+                        <div id="milestone-rewards" class="reward-list"></div>
+                        <details id="milestone-reward-zero" hidden><summary id="milestone-reward-zero-title">Zero-weight terms</summary><div id="milestone-rewards-inactive" class="reward-list"></div></details>
+                    </section>
                 </div>
             </section>
             <div id="legacy-stage-status" class="run-stage"><p id="run-stage-status" role="status">Waiting for run data</p><span id="run-budget"></span></div>

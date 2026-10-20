@@ -65,12 +65,13 @@ main { max-width: 1456px; padding: 24px; margin: 0 auto; }
 .milestone-arrow svg { width: 19px; height: 19px; }
 .milestone-arrow:disabled { opacity: 0.35; cursor: default; }
 .milestone-strip { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
-.milestone { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 7px; min-width: 0; min-height: 116px; padding: 14px 18px; text-align: left; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+.milestone { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 6px; min-width: 0; min-height: 100px; padding: 12px 16px; text-align: left; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
 .milestone span { font-size: 11px; color: var(--muted); }
 .milestone strong { font-size: 15px; font-weight: 500; overflow-wrap: anywhere; line-height: 1.4; }
 .milestone[aria-pressed="true"] { background: #e8f2ec; border-color: var(--green); box-shadow: inset 0 3px 0 var(--green); }
 .milestone[aria-pressed="true"] strong { color: var(--green); font-size: 18px; font-weight: 600; }
 .milestone[aria-current="step"] > span:last-child { color: var(--green); font-weight: 600; }
+.milestone[data-status="Completed"] > span:last-child { color: var(--blue); }
 .milestone-placeholder { border-color: transparent; }
 .milestone-details { margin-top: 18px; padding: 18px 0 0; border-top: 1px solid var(--line); }
 .milestone-detail-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 14px; margin-bottom: 18px; }
@@ -78,15 +79,45 @@ main { max-width: 1456px; padding: 24px; margin: 0 auto; }
 #milestone-state { font-size: 11px; color: var(--muted); }
 #milestone-state[data-current="true"] { color: var(--green); font-weight: 600; }
 #milestone-observation { margin: 0 0 0 auto; font-size: 11px; color: var(--muted); }
-.milestone-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
+.milestone-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
 .milestone-facts > section { min-width: 0; padding-right: 20px; border-right: 1px solid var(--line); }
 .milestone-facts > section:last-child { padding-right: 0; border-right: 0; }
-.milestone-facts h4 { margin: 0 0 14px; font-size: 12px; font-weight: 600; }
-.milestone-facts dl { grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 0; }
+.milestone-facts h4 { margin: 0 0 10px; font-size: 12px; font-weight: 600; padding-left: 8px; border-left: 3px solid var(--blue); }
+.milestone-facts > section:first-child h4 { border-color: var(--green); }
+.milestone-facts > section:nth-child(3) h4 { border-color: #29898c; }
+.milestone-facts > section:nth-child(4) h4 { border-color: var(--amber); }
+.milestone-facts dl { grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0; }
 .milestone-facts dd { line-height: 1.5; }
 .milestone-mixture > div { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .milestone-mixture dt { overflow-wrap: anywhere; }
 .milestone-mixture dd { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+#milestone-opponents > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; }
+.mixture-track { grid-column: 1 / -1; display: block; height: 4px; background: #e6ebe8; overflow: hidden; }
+.mixture-track > span { display: block; height: 100%; background: var(--mixture-color); }
+#milestone-controls dd { padding: 1px 5px; border-radius: 2px; background: #fff2dc; color: #875b16; font-size: 11px; }
+#milestone-controls[data-mode="learned"] dd { color: #22666a; background: #e2f1ef; }
+#milestone-controls[data-mode="unknown"] dd { color: var(--muted); background: #e9edea; }
+.milestone-reward-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.milestone-reward-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+.milestone-reward-heading h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.milestone-reward-heading > span { font-size: 11px; color: var(--muted); }
+#milestone-reward-source { margin-left: auto; }
+.reward-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 9px 0 12px; font-size: 10px; }
+.reward-positive { color: var(--green); }
+.reward-negative { color: var(--red); }
+.reward-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 24px; }
+.reward-list h5 { grid-column: 1 / -1; margin: 10px 0 2px; font-size: 12px; font-weight: 600; }
+.reward-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 5px 12px; padding: 7px 0; --reward-sign: var(--muted); }
+.reward-row[data-sign="positive"] { --reward-sign: var(--green); }
+.reward-row[data-sign="negative"] { --reward-sign: var(--red); }
+.reward-name { display: flex; align-items: baseline; gap: 7px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.reward-swatch { width: 6px; height: 6px; flex-shrink: 0; }
+.reward-row strong { color: var(--reward-sign); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.reward-track { grid-column: 1 / -1; display: block; height: 3px; background: #e6ebe8; overflow: hidden; }
+.reward-track > span { display: block; height: 100%; min-width: 2px; background: var(--reward-sign); }
+.reward-row[data-sign="zero"] .reward-track { display: none; }
+.milestone-reward-section details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.milestone-reward-section summary { font-size: 11px; color: var(--muted); cursor: pointer; }
 #milestone-progress-bar { display: block; width: 100%; height: 6px; margin-top: 14px; accent-color: var(--green); }
 .section-nav { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 16px 0; border-bottom: 1px solid var(--line); background: #f5f7f6; }
 .section-nav a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 4px 0; }
@@ -198,6 +229,7 @@ th:first-child, td:first-child { text-align: left; }
 tbody tr:hover { background: #f3f7f4; }
 @media (max-width: 1000px) {
     .milestone-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .reward-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .milestone-facts > section:nth-child(even) { border-right: 0; padding-right: 0; }
     .duel-preview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .arena-scene { grid-column: 1 / -1; grid-row: 1; }
@@ -224,12 +256,14 @@ tbody tr:hover { background: #f3f7f4; }
     .milestone-navigation { gap: 8px; }
     .milestone-strip { grid-template-columns: minmax(0, 1fr); }
     .milestone:not([aria-pressed="true"]) { display: none; }
-    .milestone[aria-pressed="true"] { min-height: 116px; padding: 14px; }
+    .milestone[aria-pressed="true"] { min-height: 100px; padding: 12px; }
     .milestone-heading h3 { font-size: 16px; }
     .milestone-facts { grid-template-columns: minmax(0, 1fr); gap: 18px; }
     .milestone-facts > section { border-right: 0; padding: 0 0 16px; border-bottom: 1px solid var(--line); }
     .milestone-facts > section:last-child { padding-bottom: 0; border-bottom: 0; }
     #milestone-observation { flex-basis: 100%; margin: 0; }
+    .reward-list { grid-template-columns: minmax(0, 1fr); }
+    #milestone-reward-source { margin-left: 0; }
     .section-nav { gap: 8px 18px; }
     .dashboard-section { scroll-margin-top: 144px; }
     #refresh { margin-left: auto; }

@@ -271,6 +271,100 @@ function advancementText(advance) {
         : `${format(value)} ${key}`).join("; ") || "Not recorded";
 }
 
+function rewardWeight(value) {
+    const magnitude = Math.abs(value);
+    const number = magnitude !== 0 && (magnitude < 0.0001 || magnitude >= 1e6)
+        ? magnitude.toExponential() : format(magnitude, 8);
+    return `${value > 0 ? "+" : value < 0 ? "-" : ""}${number}`;
+}
+
+function renderMilestoneRewards(stage) {
+    const isMap = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+    const sources = isMap(stage?.rewards?.weights) ? [{name: "Saved stage weights", weights: stage.rewards.weights}]
+        : isMap(stage?.task_override?.rewards) ? [{name: "Task override", weights: stage.task_override.rewards}]
+        : (stage?.scenario?.arenas ?? []).flatMap((arena, index) => isMap(arena.environment?.reward_weights)
+            ? [{name: stage.arena_names?.[index] ?? arena.environment.name ?? `Arena ${index + 1}`, weights: arena.environment.reward_weights}] : []);
+    const entries = sources.flatMap((source) => Object.entries(source.weights).filter(([, value]) => Number.isFinite(value)));
+    const active = entries.filter(([, value]) => value !== 0).length;
+    element("milestone-reward-source").textContent = sources[0]?.name === "Saved stage weights" || sources[0]?.name === "Task override"
+        ? sources[0].name : sources.length ? "Saved arena weights" : "Reward weights unavailable";
+    element("milestone-reward-count").textContent = `${format(active)} active / ${format(entries.length)} recorded`;
+    element("milestone-reward-count").hidden = !sources.length;
+    element("milestone-reward-empty").textContent = !sources.length ? "Not recorded for this stage"
+        : !entries.length ? "No reward terms configured" : "All recorded reward weights are zero";
+    element("milestone-reward-empty").hidden = active > 0;
+    element("milestone-reward-zero").hidden = entries.length === active;
+    element("milestone-reward-zero-title").textContent = `Zero-weight terms (${format(entries.length - active)})`;
+    for (const [id, inactive] of [["milestone-rewards", false], ["milestone-rewards-inactive", true]]) {
+        const fragment = document.createDocumentFragment();
+        for (const source of sources) {
+            const weights = Object.entries(source.weights).filter(([, value]) => Number.isFinite(value));
+            const selected = weights.filter(([, value]) => (value === 0) === inactive)
+                .sort(([left, leftValue], [right, rightValue]) => Math.abs(rightValue) - Math.abs(leftValue) || left.localeCompare(right));
+            if (sources.length > 1 && selected.length) {
+                const heading = document.createElement("h5");
+                heading.textContent = source.name;
+                fragment.append(heading);
+            }
+            const maximum = Math.max(0, ...weights.map(([, value]) => Math.abs(value)));
+            for (const [name, value] of selected) {
+                const definition = rewardTypes.find(([key]) => key === name);
+                const row = document.createElement("div");
+                row.className = "reward-row";
+                row.dataset.sign = value > 0 ? "positive" : value < 0 ? "negative" : "zero";
+                const label = document.createElement("span");
+                label.className = "reward-name";
+                label.title = name;
+                const swatch = document.createElement("span");
+                swatch.className = "reward-swatch";
+                swatch.style.backgroundColor = definition?.[2] ?? colors.gray;
+                swatch.setAttribute("aria-hidden", "true");
+                const text = document.createElement("span");
+                text.textContent = definition?.[1] ?? name.replaceAll("_", " ");
+                label.append(swatch, text);
+                const weight = document.createElement("strong");
+                weight.textContent = rewardWeight(value);
+                const track = document.createElement("span");
+                track.className = "reward-track";
+                track.setAttribute("aria-hidden", "true");
+                track.title = "Magnitude relative to the largest absolute weight in this reward map";
+                const fill = document.createElement("span");
+                fill.style.width = `${maximum > 0 ? Math.abs(value) / maximum * 100 : 0}%`;
+                track.append(fill);
+                row.append(label, weight, track);
+                fragment.append(row);
+            }
+        }
+        element(id).replaceChildren(fragment);
+    }
+}
+
+function renderMilestoneOpponents(opponents) {
+    if (!opponents.length) {
+        renderFields("milestone-opponents", [["Opponent mix", "Not recorded"]]);
+        return;
+    }
+    const total = opponents.reduce((sum, opponent) => sum + opponent.weight, 0);
+    const fragment = document.createDocumentFragment();
+    for (const [index, opponent] of opponents.entries()) {
+        const row = document.createElement("div");
+        row.style.setProperty("--mixture-color", [colors.blue, "#29898c", colors.amber, colors.red][index % 4]);
+        const label = document.createElement("dt");
+        label.textContent = opponent.id;
+        const value = document.createElement("dd");
+        value.textContent = total > 0 ? `${format(opponent.weight / total * 100, 1)}%` : `Weight ${format(opponent.weight)}`;
+        const track = document.createElement("span");
+        track.className = "mixture-track";
+        track.setAttribute("aria-hidden", "true");
+        const fill = document.createElement("span");
+        fill.style.width = `${total > 0 ? opponent.weight / total * 100 : 0}%`;
+        track.append(fill);
+        row.append(label, value, track);
+        fragment.append(row);
+    }
+    element("milestone-opponents").replaceChildren(fragment);
+}
+
 function renderMilestones() {
     const experiment = resolvedExperiment(configuration);
     const stages = experiment?.stages ?? [];
@@ -335,6 +429,7 @@ function renderMilestones() {
             name.textContent = stages[index].name;
             const state = document.createElement("span");
             state.textContent = status(index);
+            item.dataset.status = status(index);
             item.append(order, name, state);
             item.onclick = () => select(index);
         } else {
@@ -364,14 +459,13 @@ function renderMilestones() {
         progress.setAttribute("aria-label", `${format(value)} of ${format(limit)} ${unit}`);
     }
     renderFields("milestone-environment", stageConditions(selected).filter(([label]) => ["Environment", "Arena mixture", "Episode limit"].includes(label)));
-    const opponents = selected.opponents ?? [];
-    const total = opponents.reduce((sum, opponent) => sum + opponent.weight, 0);
-    renderFields("milestone-opponents", opponents.length ? opponents.map((opponent) => [opponent.id,
-        total > 0 ? `${format(opponent.weight / total * 100, 1)}%` : `Weight ${format(opponent.weight)}`]) : [["Opponent mix", "Not recorded"]]);
+    renderMilestoneOpponents(selected.opponents ?? []);
     const controls = selected.controls?.fixed ?? selected.controls;
+    element("milestone-controls").dataset.mode = controls == null ? "unknown" : Object.keys(controls).length ? "fixed" : "learned";
     renderFields("milestone-controls", controls == null ? [["Fixed controls", "Not recorded"]]
         : Object.keys(controls).length ? Object.entries(controls).map(([name, value]) => [name, String(value)])
         : [["Action heads", "All learned"]]);
+    renderMilestoneRewards(selected);
 }
 
 function renderTable(id, rows, columns, empty) {
