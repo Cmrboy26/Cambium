@@ -78,6 +78,15 @@ submission requires an explicit `y` after the escaped command preview.
 Plan discovery includes all nested folders under `simulator/setups/curricula`.
 The menu shows paths relative to that directory so bucketed plans with the same
 filename remain distinguishable; submission retains the full selected path.
+After selection, the wizard runs `python -m simulator.training.validate_plans`
+on that file before reading defaults or prompting for training settings, including
+in `--dry-run` mode. Invalid JSON, missing references or invalid plan semantics
+abort with the validator's diagnostic and submit nothing. Only the selected
+plan is checked, so another person's unfinished curriculum does not block yours.
+This uses `.venv-rosie/bin/python`, falling back to `python3` on `PATH`; that
+interpreter needs the training Python requirements. Validation does not load the
+native library, train, compile CUDA or submit a job. Run the validator without
+paths separately to check all curricula.
 
 | Preset | Partition | GPU / CUDA architecture | Worlds | Rollout | Wall-Time |
 | --- | --- | --- | --- | --- | --- |
@@ -90,7 +99,7 @@ GPU, eight CPUs and 24 GB host RAM by default. Other prompts cover plan selectio
 job name, update cap, learner settings, CPU threads and replay cadence. Learner
 defaults come from the selected plan; the default update cap sums plain update
 budgets, or falls back to 1,500 for other advancement rules. All values are editable.
-The wizard requires Bash 4+ and Python 3 to preview a submission.
+The wizard requires Bash 4+ and Python 3 with the training requirements to preview a submission.
 
 The job/run name sets both the Slurm name and `SIM_OUTPUT` under
 `simulator/training/runs/<name>`, so the dashboard and artifact launcher show
@@ -212,25 +221,35 @@ still required after key setup.
 
 ## Dashboard And SSH Tunnel
 
-With a simulator training job running, start
-`bash ./rosie/dashboard-connect.sh`
+Start `bash ./rosie/dashboard-connect.sh`
 from PowerShell in the local `gpu-sim-minecraft` directory (Git Bash must be
 installed and available as `bash`), or `bash rosie/dashboard-connect.sh` from
 Git Bash.
-Connect to GlobalVPN first. The script identifies running training jobs by their
-submitted `rosie/train.sbatch` command, regardless of `--job-name`. It selects
-one automatically when several share a working directory; pass the job ID when
-they use different working directories. Explicit job IDs must also be running
-and use the training script; pending and unrelated jobs are not dashboard hosts.
-It starts the read-only Python dashboard with `srun --jobid ... --overlap` on
-the allocated compute node, so it does not submit another job or request
-another node. Both the remote and local loopback ports are selected
-automatically; the script prints and opens the local URL. Ctrl+C stops the
-dashboard step and tunnel, not the training job.
+Connect to GlobalVPN first. By default, the script starts the read-only,
+standard-library Python dashboard directly on the management node without
+querying Slurm or requiring/submitting an allocation. It reads saved run files,
+so training can start or stop independently. The default remote checkout is
+`~/minecraftlol/Cambium/gpu-sim-minecraft`; `ROSIE_PROJECT_DIR` overrides it.
+When invoked on a management node, the default is the script's own checkout.
+Missing checkouts fail with an explicit override diagnostic.
 
-The dashboard binds only to loopback and is reached through SSH `ProxyJump` via
-the assigned `dh-mgmt1` through `dh-mgmt4` host; do not expose its port to the
-network. If `ROSIE_SSH_JUMP` is unset, the script derives the host when run on
+An explicit job ID (positional or `ROSIE_JOB_ID`) retains compute-node hosting
+with `srun --jobid ... --overlap`, using that job's working directory and SSH
+`ProxyJump` through the management host. It must be running and submitted with
+`rosie/train.sbatch`, regardless of job name; pending/unrelated jobs fail.
+No additional allocation is submitted, and stopping the dashboard does not
+cancel training.
+
+Both ports are selected automatically and bound only to loopback. The default
+tunnel goes directly to the assigned `dh-mgmt1` through `dh-mgmt4` host; do not
+expose its port to the network. The script verifies an HTTP run-list response
+through the tunnel before printing/opening the local URL. The server's SSH
+connection owns a remote PTY so closing it terminates the dashboard. Ctrl+C
+stops both SSH connections; losing the server also ends the tunnel with an
+error. Run the command locally to put the forwarded localhost port on your
+computer, not in a remote management-node terminal.
+
+If `ROSIE_SSH_JUMP` is unset, the script derives the host when run on
 a Rosie management node; from a local computer it prompts for the node number
 (`1`-`4`) or full hostname (for example, `dh-mgmt1.hpc.msoe.edu`). The variable
 accepts either form. The local computer needs Git Bash, SSH and Python 3

@@ -40,8 +40,10 @@ not real world raycasts or full live behavior.
 
 ## Live Policy Duels
 
-Two real actors share a checkpoint policy and use vanilla movement/targeting/
-combat, never simulator physics or recorded future states. Python inference runs
+Two real actors use vanilla movement/targeting/combat, never simulator physics or
+recorded future states. Legacy service mode shares one checkpoint; panel duels
+select independent policy/scripted controllers with one common semantic layout.
+Python inference runs
 on the same machine, loopback-only `127.0.0.1:8766`. Trusted standalone PPO formats
 only; v1/v2/custom descriptive contracts/loadouts share the adapter. Unsupported
 primitives/items fail before spawning. [Contract](../docs/simulation_contract.md).
@@ -87,6 +89,8 @@ Small-flat-arena policies may fail on stairs/water/cliffs/special blocks/distanc
 
 | Command | Behavior |
 | --- | --- |
+| `/simmenu`, `/simduel menu` | Open the F8 native control panel. |
+| `/simduel hud` | Toggle the dedicated live/replay sidebar; persist preference. |
 | `/simduel arena [port]` | Embedded arena/spawns. |
 | `/simduel pos1 [x y z]`, `/simduel pos2 [x y z]` | Mark feet/look. |
 | `/simduel world [port]` | Both marks, no arena construction. |
@@ -170,6 +174,54 @@ chat. Terminal-launched inference processes are not owned or terminated by the m
 Headless fixtures check process arguments, not real SSH or Minecraft lifecycle;
 manually test playback, join/stop restoration, cancellation and disconnect cleanup.
 
+### Native Panel And Local Library
+
+F8 is rebindable under Cambium Menus. `ControlPanel` uses Minecraft screens and
+widgets, paginated searchable lists and tooltips for clipped names. It does not
+pause the world. Command opening is deferred to the client tick because chat
+closes its screen after submitting a command. Private-world checks apply again
+before opening. Closing the panel leaves the current duel running.
+
+The Rosie tab explicitly lists remote runs and syncs a selected one. Opening the
+panel, browsing cached entries and starting a local duel never contact Rosie.
+Login still happens in the local terminal connection flow, never a password UI.
+Helpers retain generation/world/owner guards, literal process arguments and
+disconnect/LAN/shutdown cleanup. The Live Stop button cancels the owned helper
+and stops actors, including externally served actors without killing that server.
+
+Game `sim-rosie-cache/library.json` version 1 stores readable policy/environment
+entries. Policy IDs use `run:latest.pt` or `run:snapshots/<name>.pt`; each has a
+local checkpoint path, update/stage, semantic contract hash and policy descriptor.
+Environments include checkpoint scenes and every resolved stage/arena template
+from synced `config.json`. These are fixed templates, not distribution sampling
+or a live curriculum. Sync preserves other runs and existing policy aliases.
+Renaming is disabled while the helper runs. Cached checkpoints must exist inside
+the cache's real path; mismatched contracts are rejected before starting.
+
+`selections.json` stores both fighter modes/policy IDs, scripted options, chosen
+environment and arena/world mode. `duel.json` is a `minecraft_sim_duel` version 1
+configuration with concrete policy/environment and exactly two fighter entries.
+Launching invokes the configured local interpreter/repository with Rosie action
+`local --duel <file> --offline`; CPU inference uses a free loopback port and no
+native simulator library. `/simrosie local` starts the last saved arena setup.
+Basic melee options cover attack/strafe intervals, melee distance, strafe,
+sprint, shield and optional zero-based axe/sword slots; unavailable semantic
+features/actions are rejected by the service. Stationary target requires no
+options. No arbitrary Python factories or training opponent pools are executed.
+
+`DuelHud` publishes immutable server-tick telemetry to a dedicated top-right
+Fabric HUD layer: round/ticks/scores, fighter names, health/charge/shield/input
+and inference latency, or replay progress/error/hit outcomes. It wraps to width,
+limits height and hides with vanilla HUD or an open screen. The Live tab reads
+the same snapshot. Preference lives in `config/cambium-hud.json`; disconnect or
+session close clears telemetry. No live/replay telemetry uses action-bar text.
+
+Validation: `replayAnalysisChecks` covers local duel files, aliases, cache bounds
+and offline helper arguments; `InferenceChecks`/`RosieTests` cover per-side
+controllers, offline service startup and snapshot/library sync. Actual F8/command
+opening, GUI scales, HUD rendering and join/reset/stop/disconnect restoration
+still require Minecraft testing; headless compilation does not prove them.
+
 ## Simulation Playback
 
 Export with `./scripts/export-replay.ps1 -Ticks 80 -ToMinecraft`; this is scripted,
@@ -201,7 +253,7 @@ legacy sword-only 2 supported; version 1 must be re-exported.
 Reset/restart/mode switches reuse loaded memory without rereading, preserve speed.
 Reset/reload/mode changes/stop also finalize partial analysis.
 
-Action bar: tick/mode/rate/buttons/actual health; absolute mode adds recorded hit
+Sidebar: tick/mode/rate/buttons/actual health; absolute mode adds recorded hit
 outcomes; input adds positional error in blocks. Swings visualize attempts;
 default player skins.
 

@@ -124,7 +124,8 @@ that pretend to enable them or allocate mutable terrain for unchanged worlds.
   "target": {"type":"scripted","controller":"stationary_target"},
   "fighter": {"type":"scripted","controller":"basic_melee","options":{"strafe":true}},
   "frozen": {"type":"checkpoint","path":"simulator/training/runs/baseline/latest.pt"},
-  "policy": {"type":"self_play"}
+  "policy": {"type":"self_play"},
+  "past": {"type":"frozen_self_play","every_updates":100}
 }
 ```
 
@@ -142,6 +143,23 @@ PPO. Sampling uses a separate, checkpointed RNG; the learner weights are saved
 once, not duplicated in controller state. Optional `deterministic: true` selects
 argmax actions; default inference samples actions. Evaluation and replay pools
 bind to the same learner without changing training-pool RNG state.
+
+`frozen_self_play` uses an independent frozen copy of the learner, initially at
+update zero (after `--initialize` if supplied). Required `every_updates` counts
+global completed PPO updates, not stage-local updates. After each matching update,
+capture the new weights and the current stage's fixed controls. New episodes use
+the latest snapshot; episodes already running keep their assigned version and
+controls until reset. Inference has a separate checkpointed sampling RNG and
+accepts the same optional `deterministic` flag as self-play/checkpoint opponents.
+Only the latest snapshot and versions still assigned to episodes are retained;
+obsolete versions are discarded, not accumulated into an opponent history.
+The resume checkpoint embeds their weights, controls, assignments and RNG state.
+Resuming still starts fresh episodes, all assigned the latest saved snapshot;
+it does not recapture the resumed learner or reset the global capture schedule.
+Evaluation uses the latest training snapshot with isolated RNG, even in suites
+pinned to another stage. Replay uses the snapshot assigned to the sampled world;
+its opponent provenance includes `snapshot_update`. Neither captures the learner
+implicitly. No extra checkpoint files are written for these rolling opponents.
 
 Use [controllers.py](controllers.py)'s `register_controller`, or an explicit
 trusted `package.module:factory` controller name. Factories receive `contract`,
@@ -532,6 +550,51 @@ even if source moved/changed. Explicit incompatible overrides fail.
 Reject legacy eight-movement-head checkpoints; existing backend callers
 still default to eight movement categories and otherwise remain unchanged.
 
+### Retained Policy Snapshots
+
+Plans and stages optionally declare `snapshots`, a list of named save rules.
+Omission (or an empty list) writes no retained snapshots; normal rolling
+`latest.pt` saves and frozen-opponent resume state are unaffected. For example,
+these fields belong at the plan root:
+
+```json
+{
+  "snapshots": [{"name":"curriculum-final","on_completion":true}]
+}
+```
+
+Inside an individual stage, use:
+
+```json
+{
+  "snapshots": [
+    {"name":"combat-100","at_updates":100},
+    {"name":"combat-final","on_completion":true}
+  ]
+}
+```
+
+Each rule requires `name` and exactly one trigger: positive integer `at_updates`
+or literal `on_completion: true`. Updates are stage-local inside a stage and
+global at the plan root. Completion means reaching the stage's advancement rule,
+or completing the entire curriculum at the root, not exhausting CLI `--updates`.
+A stage that advances before an update trigger does not produce that save.
+Names must be unique across the whole plan, begin with an ASCII letter/digit,
+and otherwise contain only letters, digits, underscores or hyphens.
+
+Triggered policies are atomically saved as `snapshots/<name>.pt` in the run
+directory. They use the existing standalone PPO policy envelope and retain
+resolved layout, actual scenario, capture-stage controls, global update and
+stage-local update provenance. Capture happens after optimization and before
+changing stages, including a rule that fires on the stage's final update.
+Metrics list paths under `snapshots` only on updates that write them.
+These are policy-only saves, not optimizer/training-resume checkpoints: use
+`--initialize` to start a new run from one, or `type: checkpoint` plus its path
+to reuse it as a frozen opponent. They are not automatically added to mixtures.
+Use `latest.pt` for resume; its embedded plan restores pending save rules without
+requiring the authored JSON. Resuming from an older checkpoint can replace a
+same-named save when its trigger is reached again.
+
 ## Training Dashboard
 
 Launcher `./scripts/serve-dashboard.ps1`; direct
@@ -675,6 +738,35 @@ In private singleplayer `/simduel arena` reconstructs embedded arena. Or mark
 uses existing terrain. Minecraft computes observations/applies actions; no native
 stepping/PPO. Mod owns pause/resume/reset/status/stop and round resets. This is a
 bounded server-player adapter, not arbitrary-terrain transfer/network-client parity.
+
+### Independent Local Duels
+
+`python -m simulator.training.serve --duel <file.json>` serves two independent
+fighters using the existing protocol-1 `/info` and `/act` routes. The JSON format
+is `minecraft_sim_duel`, version 1, with `policy` (resolved semantic descriptor),
+`environment` (concrete v1 scene), and exactly two `fighters`. A trusted optional
+`reference` checkpoint can supply the policy/environment instead. Unknown keys,
+incompatible checkpoint layouts, unsupported controllers and invalid scripted
+options fail before the service starts.
+
+Each fighter is `{"type":"checkpoint","path":"...","name":"..."}` or
+`{"type":"scripted","controller":"basic_melee","options":{},"name":"..."}`;
+`stationary_target` is the other built-in script. Checkpoint paths are relative
+to the duel file unless absolute. Each controller sees only its own observation
+row; scripted state resets when the request session changes. Controllers keep
+independent fixed controls/RNG, and `/info.fighters` carries readable provenance.
+Live configs do not run self-play pools, curricula or arbitrary Python factories.
+Legacy positional-checkpoint serving remains unchanged; choose it or `--duel`,
+not both.
+
+Rosie `sync` additionally caches safe `snapshots/*.pt` artifacts and writes game
+`sim-rosie-cache/library.json`. It indexes checkpoint scenes and resolved stage
+arena templates, preserving aliases by ID and entries from other runs. The mod's
+[native panel](../../cambiummod/AGENTS.md#native-panel-and-local-library) writes
+the local duel config. Rosie action `local --duel <file> --offline` starts CPU
+inference on a free loopback port without constructing a Rosie client, reading
+SSH configuration or requiring a native library. This still needs the local
+training Python dependencies; GPU-trained checkpoint tensors load on CPU.
 
 ## Verification And Limits
 

@@ -320,22 +320,22 @@ final class SimulationReplay {
 				}
 			}
 			ReplayTrace.Frame sample = trace.frames.get(frame);
-			StringBuilder text = new StringBuilder(absolute ? "ABS " : "INPUT ");
-			text.append(paused ? "PAUSED " : "").append(frame).append('/').append(trace.frames.size() - 1)
-					.append(" @").append(speed).append("x");
+			var lines = new ArrayList<String>();
+			lines.add((absolute ? "Absolute" : "Input") + (paused ? " / Paused" : " / Playing"));
+			lines.add("Tick " + frame + " / " + (trace.frames.size() - 1) + " | " + speed + "x");
 			for (int index = 0; index < 2; index++) {
 				ReplayTrace.Actor reference = sample.actors().get(index);
 				ReplayPlayer player = actors.get(index);
-				text.append(index == 0 ? " | A " : " | B ").append(buttons(reference.controls()))
-						.append(String.format(Locale.ROOT, " HP%.1f", player.getHealth()));
+				lines.add((index == 0 ? "A: " : "B: ") + buttons(reference.controls()));
+				lines.add(String.format(Locale.ROOT, "HP %.1f", player.getHealth()));
 				if (!absolute) {
 					Vec3 expected = origin.add(reference.position()[0], reference.position()[1], reference.position()[2]);
-					text.append(String.format(Locale.ROOT, " err=%.4f", player.position().distanceTo(expected)));
+					lines.add(String.format(Locale.ROOT, "Position error %.4f", player.position().distanceTo(expected)));
 				} else if (reference.outcome().attempted()) {
-					text.append(reference.outcome().accepted() ? " HIT" : " NO-HIT");
+					lines.add(reference.outcome().accepted() ? "Hit accepted" : "Hit rejected");
 				}
 			}
-			viewer.sendOverlayMessage(Component.literal(text.toString()));
+			DuelHud.publish("CAMBIUM / REPLAY", lines);
 		}
 
 		void advance() {
@@ -543,6 +543,7 @@ final class SimulationReplay {
 		}
 
 		void close() {
+			DuelHud.clear();
 			finishAnalysis("partial", "session_closed");
 			if (live != null) live.close();
 			removeActors();
@@ -572,7 +573,7 @@ final class SimulationReplay {
 		}
 	}
 
-	private static String buttons(ReplayTrace.Controls input) {
+	static String buttons(ReplayTrace.Controls input) {
 		StringBuilder text = new StringBuilder();
 		if (input.forward()) text.append("W ");
 		if (input.backward()) text.append("S ");

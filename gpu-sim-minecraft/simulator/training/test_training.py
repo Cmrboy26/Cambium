@@ -21,7 +21,7 @@ from simulator.training.environment import (
     DEFAULT_REWARD_WEIGHTS, Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, SCHEMA, SCHEMA_V2, SHAPING_REWARD_NAMES,
 )
 from simulator.training.contract import FEATURES, from_legacy, validate_contract, resolve_scenario
-from simulator.training.serve import Policy, make_server
+from simulator.training.serve import DuelPolicy, Policy, make_server
 from simulator.training.compatibility_training import ReplaySamples, collect_rollout, compute_gae, main
 
 
@@ -49,6 +49,82 @@ class InferenceChecks(unittest.TestCase):
                                    "environment": json.loads((ROOT / "simulator/environments/duel.json").read_text())},
                       "model": ActorCritic(22, 16, 9).state_dict()}
         torch.save(self.saved, self.path)
+
+    def test_independent_fighters_and_scripted_round_reset(self):
+        definition = {"format": "minecraft_sim_duel", "version": 1, "reference": "policy.pt",
+                      "fighters": [{"type": "checkpoint", "path": "policy.pt", "name": "Saved fighter"},
+                                   {"type": "scripted", "controller": "basic_melee",
+                                    "options": {"attack_interval": 2}, "name": "Practice fighter"}]}
+        path = self.path.parent / "duel.json"
+        path.write_text(json.dumps(definition))
+        duel = DuelPolicy(path, deterministic=True)
+        request = {"protocol": 1, "session": "round-one", "tick": 0, "observations": np.zeros((2, 22)).tolist()}
+        first = duel.act(request)
+        self.assertEqual(first["actions"][0], Policy(self.path, deterministic=True).act(request)["actions"][0])
+        self.assertEqual(first["actions"][1][3], 1)
+        self.assertEqual(duel.act({**request, "tick": 1})["actions"][1][3], 0)
+        self.assertEqual(duel.act({**request, "session": "round-two"})["actions"][1][3], 1)
+        self.assertEqual(duel.info["fighters"][0]["name"], "Saved fighter")
+        separate = np.zeros((2, 22), dtype=np.float32)
+        distance_column = next(index for index, observation in enumerate(duel.contract["observations"])
+                       if observation["feature"] == "target.distance_fraction")
+        separate[1, distance_column] = 0.8
+        separated = duel.act({**request, "session": "separate-observations", "observations": separate.tolist()})
+        self.assertEqual(separated["actions"][0], first["actions"][0])
+        self.assertEqual(separated["actions"][1][3], 0)
+        other = self.path.parent / "other.pt"
+        changed = {**self.saved, "metadata": {**self.saved["metadata"], "controls": {"fixed": {"attack": False}}}}
+        torch.save(changed, other)
+        definition["fighters"][1] = {"type": "checkpoint", "path": "other.pt"}
+        definition.pop("reference")
+        definition.update(policy=duel.contract, environment=duel.info["environment"])
+        path.write_text(json.dumps(definition))
+        paired = DuelPolicy(path, deterministic=True)
+        self.assertEqual(paired.act({**request, "contract_hash": paired.info["contract_hash"]})["actions"][1][3], 0)
+        definition["fighters"][1] = {"type": "self_play"}
+        path.write_text(json.dumps(definition))
+        with self.assertRaisesRegex(ValueError, "Live fighters"):
+            DuelPolicy(path)
+
+    def test_offline_independent_launcher_without_rosie_configuration(self):
+        source = Policy(self.path)
+        game = self.path.parent / "Offline Minecraft with spaces"
+        path = game / "sim-rosie-cache" / "duel.json"
+        path.parent.mkdir(parents=True)
+        definition = {"format": "minecraft_sim_duel", "version": 1,
+                      "policy": source.contract, "environment": source.info["environment"],
+                      "fighters": [{"type": "scripted", "controller": "stationary_target"},
+                                   {"type": "scripted", "controller": "basic_melee"}]}
+        path.write_text(json.dumps(definition))
+        self.path.unlink()
+        self.assertFalse((game / "config/cambium-rosie.json").exists())
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen([sys.executable, "-u", "-B", "-m", "simulator.training.rosie",
+                "local", "--minecraft-directory", str(game), "--duel", str(path), "--offline", "--json"],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=errors)
+            events = queue.Queue()
+            reader = threading.Thread(target=lambda: events.put(process.stdout.readline()), daemon=True)
+            try:
+                reader.start()
+                event = json.loads(events.get(timeout=30))
+                self.assertEqual(event["event"], "policy", event)
+                base = f"http://127.0.0.1:{event['port']}"
+                with urlopen(base + "/info", timeout=3) as response:
+                    info = json.load(response)
+                self.assertEqual(info["device"], "cpu")
+                self.assertEqual([fighter["controller"] for fighter in info["fighters"]], ["stationary_target", "basic_melee"])
+                body = {"protocol": 1, "session": "offline-menu-duel", "tick": 0,
+                        "contract_hash": info["contract_hash"], "observations": np.zeros((2, 22)).tolist()}
+                with urlopen(Request(base + "/act", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=3) as response:
+                    actions = json.load(response)["actions"]
+                self.assertEqual(actions[0][3], 0)
+                self.assertEqual(actions[1][3], 1)
+            finally:
+                process.terminate()
+                process.wait(timeout=10)
+                process.stdout.close()
+                if reader.ident is not None:
+                    reader.join(timeout=3)
 
     def test_policy_and_validation(self):
         policy = Policy(self.path, deterministic=True)

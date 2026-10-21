@@ -32,9 +32,9 @@ references or execute curriculum schedules. Replays additionally carry semantic
 controls and resulting state, so playback needs neither weights nor source files.
 See the [training-plan reference](../simulator/training/AGENTS.md#research-training-plans).
 
-In the [shield/axe environment](../simulator/setups/environments/shield-axe-duel.json),
+In the [example environment](../simulator/setups/environments/example/sword-duel.json),
 `players.shared` holds constant initialization and `players.overrides` contains
-only each actor's spawn differences. `equipment` describes sampled fields:
+only each actor's spawn differences. To add gear sampling, use `equipment`:
 
 ```json
 {
@@ -86,9 +86,12 @@ proof of game parity. See the [extension recipes](../simulator/training/AGENTS.m
 ## Quick Start
 
 All authoring files live centrally in [simulator/setups](../simulator/setups/).
-Start with [shield-axe-curriculum.json](../simulator/setups/curricula/shield-axe-curriculum.json).
-It references reusable [arenas](../simulator/setups/arenas/),
-[environments](../simulator/setups/environments/) and [policies](../simulator/setups/policies/).
+Start with the [setup creation guide](../simulator/setups/README.md) and adapt
+[the example plan](../simulator/setups/curricula/example/melee.json).
+It references only the [example arena](../simulator/setups/arenas/example/flat-duel.json),
+[environment](../simulator/setups/environments/example/sword-duel.json) and
+[policy](../simulator/setups/policies/example/melee.json). Keep personal definitions
+in person-named subfolders; category roots are reserved for intentionally shared files.
 Edit the environment to change item presence; edit the plan to change training,
 not arena geometry or policy dimensions.
 
@@ -99,7 +102,7 @@ standard launcher detection. No fixed launcher instance name is required.
 After building the native library, start training:
 
 ```powershell
-.\scripts\train.ps1 -Plan simulator/setups/curricula/shield-axe-curriculum.json `
+.\scripts\train.ps1 -Plan simulator/setups/curricula/example/melee.json `
   -Updates 1500 -ReplayEvery 100 -ReplayToMinecraft
 ```
 
@@ -124,7 +127,7 @@ a changed training task/layout; restart the service when switching checkpoints.
 Active sessions do not hot-swap contracts, equipment or weights.
 The live service exposes experiment/stage provenance in `/info`; the mod shows
 that deployment context. Both live actors use the same served learner and fixed
-checkpoint conditions. Scripted/checkpoint/self-play opponent pools, curriculum advancement
+checkpoint conditions. Scripted/checkpoint/self-play/frozen-self-play opponent pools, curriculum advancement
 and reset-time distribution sampling are trainer functionality, not live-duel
 features. The dashboard reads resolved experiments and metrics; it does not edit
 plans or launch training.

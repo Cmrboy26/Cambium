@@ -14,6 +14,7 @@ final class DeploymentSummary {
 					+ " (" + experiment.get("stage").getAsString() + ")"
 					+ " | environment " + experiment.get("environment").getAsString() + ". ";
 		}
-		return deployment + "Live rounds use a fixed embedded scenario and shared learner; no curriculum runtime.";
+		return deployment + "Live rounds use a fixed embedded scenario and "
+				+ (info.has("fighters") ? "independent fighters" : "shared learner") + "; no curriculum runtime.";
 	}
 }

@@ -11,9 +11,33 @@ from uuid import uuid4
 import numpy as np
 
 from simulator.training._test_plans import example_plan
+from simulator.training.compiler import _opponents, _snapshots
 from simulator.training.environment import REWARD_NAMES, ROOT
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
 from simulator.training.validate_plans import main as validate_plans
+
+
+class SnapshotRuleChecks(unittest.TestCase):
+    def test_snapshot_rules_and_frozen_opponent_validation(self):
+        names = set()
+        _snapshots([{"name": "stage-100", "at_updates": 100}], names)
+        _snapshots([{"name": "final", "on_completion": True}], names)
+        self.assertEqual(names, {"stage-100", "final"})
+        definition = {"past": {"type": "frozen_self_play", "every_updates": 100}}
+        self.assertEqual(_opponents(definition, Path.cwd()), definition)
+        invalid = [None, {}, [{"name": "../outside", "at_updates": 1}],
+                   [{"name": "stage-100", "at_updates": 1}],
+                   [{"name": "zero", "at_updates": 0}],
+                   [{"name": "boolean", "at_updates": True}],
+                   [{"name": "no", "on_completion": False}],
+                   [{"name": "both", "at_updates": 1, "on_completion": True}],
+                   [{"name": "none"}]]
+        for rules in invalid:
+            with self.subTest(rules=rules), self.assertRaises(ValueError):
+                _snapshots(rules, names.copy())
+        for interval in (None, True, 0, -1, 1.5):
+            with self.subTest(interval=interval), self.assertRaises(ValueError):
+                _opponents({"past": {"type": "frozen_self_play", "every_updates": interval}}, Path.cwd())
 
 
 class ExperimentChecks(unittest.TestCase):

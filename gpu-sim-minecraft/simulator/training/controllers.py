@@ -376,6 +376,91 @@ class SelfPlayController(_PolicyController):
         self._fixed = fixed_indices(self.contract, controls)
 
 
+class FrozenSelfPlayController(SelfPlayController):
+    def __init__(self, learner, contract, count, device="cpu", seed=1, deterministic=False,
+                 every_updates=100):
+        super().__init__(learner, contract, count, device, seed, deterministic)
+        self.every_updates = _integer(every_updates, "every_updates")
+        self._description.update(type="frozen_self_play", every_updates=self.every_updates)
+        self.latest_update = 0
+        self.snapshot_updates = np.zeros(count, dtype=np.int64)
+        self.model = deepcopy(learner).eval().requires_grad_(False)
+        self.snapshots = {0: (self.model, {})}
+
+    def capture(self, learner, update, controls, force=False):
+        from simulator.training.policies import fixed_indices
+
+        _integer(update, "snapshot update", 0)
+        if not force and (update <= self.latest_update or update % self.every_updates):
+            return
+        fixed = fixed_indices(self.contract, controls)
+        self.snapshots[update] = (deepcopy(learner).eval().requires_grad_(False), fixed)
+        self.latest_update = update
+        self._prune()
+
+    def _prune(self):
+        retained = set(self.snapshot_updates.tolist()) | {self.latest_update}
+        self.snapshots = {update: value for update, value in self.snapshots.items() if update in retained}
+        self.model = self.snapshots[self.latest_update][0]
+
+    def reset(self, mask):
+        self.snapshot_updates[self._mask(mask)] = self.latest_update
+        self._prune()
+
+    def act(self, observations, indices=None):
+        observations, indices = self._batch(observations, indices)
+        actions = np.empty((len(observations), len(self.contract["actions"])), dtype=np.int64)
+        for update in np.unique(self.snapshot_updates[indices]):
+            selected = self.snapshot_updates[indices] == update
+            self.model, self._fixed = self.snapshots[int(update)]
+            actions[selected] = super().act(observations[selected], indices[selected])
+        return actions
+
+    def copy_snapshot(self, source, update=None):
+        update = source.latest_update if update is None else update
+        model, fixed = source.snapshots[update]
+        self.model = deepcopy(model).to(self.device).eval().requires_grad_(False)
+        self.latest_update = update
+        self.snapshot_updates[:] = update
+        self.snapshots = {update: (self.model, fixed.copy())}
+
+    def state_dict(self):
+        return {**super().state_dict(), "latest_update": self.latest_update,
+                "snapshot_updates": self.snapshot_updates.tolist(),
+                "snapshots": {update: {"model": deepcopy(model.state_dict()), "fixed": fixed.copy()}
+                              for update, (model, fixed) in self.snapshots.items()}}
+
+    def load_state_dict(self, state):
+        import torch
+
+        self._state(state, ("rng_state", "latest_update", "snapshot_updates", "snapshots"))
+        latest = _integer(state["latest_update"], "latest snapshot update", 0)
+        assignments = state["snapshot_updates"]
+        snapshots = state["snapshots"]
+        if (not isinstance(assignments, list) or len(assignments) != self.count
+                or any(type(update) is not int or update < 0 for update in assignments)
+                or not isinstance(snapshots, dict) or latest not in snapshots
+                or not set(assignments).issubset(snapshots)):
+            raise ValueError("Invalid frozen self-play snapshots")
+        restored = {}
+        for update, saved in snapshots.items():
+            _integer(update, "snapshot update", 0, latest)
+            model = deepcopy(self.model)
+            model.load_state_dict(saved["model"], strict=True)
+            fixed = saved["fixed"]
+            if (not all(torch.isfinite(parameter).all() for parameter in model.parameters())
+                    or not isinstance(fixed, dict)
+                    or any(name not in self.contract["action_names"] or type(index) is not int
+                           or not 0 <= index < self.contract["action_sizes"][self.contract["action_names"].index(name)]
+                           for name, index in fixed.items())):
+                raise ValueError("Invalid frozen self-play policy")
+            restored[update] = (model.eval().requires_grad_(False), fixed.copy())
+        super().load_state_dict({key: state[key] for key in ("version", "provenance", "rng_state")})
+        self.latest_update, self.snapshots = latest, restored
+        self.snapshot_updates[:] = assignments
+        self.model = self.snapshots[latest][0]
+
+
 class CheckpointController(_PolicyController):
     def __init__(self, path, contract, count, device="cpu", seed=1, deterministic=False,
                  expected_sha256=None):
@@ -475,6 +560,11 @@ def create_controller(definition, contract, count, device="cpu", seed=1, *, lear
         _options(definition, ("type", "deterministic"))
         return SelfPlayController(learner, contract, count, device, seed,
                                   definition.get("deterministic", False))
+    if kind == "frozen_self_play":
+        _options(definition, ("type", "deterministic", "every_updates"))
+        return FrozenSelfPlayController(learner, contract, count, device, seed,
+                                        definition.get("deterministic", False),
+                                        _integer(definition.get("every_updates"), "every_updates"))
     if kind == "checkpoint":
         _options(definition, ("type", "path", "deterministic", "sha256"))
         path = definition.get("path")

@@ -22,7 +22,7 @@ squeue -u "$USER"
 tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 ```
 
-Use `bash rosie/submit.sh --dry-run` to preview without submitting.
+The selected plan is validated; `bash rosie/submit.sh --dry-run` previews without submitting.
 The job/run name appears in the dashboard. Sweep one setting with `multiple`, then
 values one per line and an empty line. Jobs get `-<value>` suffixes and train
 concurrently with locked builds and private libraries. [Options](AGENTS.md#interactive-submission).
@@ -69,7 +69,7 @@ saved outputs. [Offline use and configuration](AGENTS.md#local-artifact-launcher
 
 ## Dashboard
 
-With a training job running and GlobalVPN connected, run this from the
+With GlobalVPN connected, run this **on your local computer** from the
 `gpu-sim-minecraft` directory. In PowerShell, Git Bash must be installed and
 available as `bash`:
 
@@ -77,17 +77,17 @@ available as `bash`:
 bash ./rosie/dashboard-connect.sh
 ```
 
-In a Git Bash terminal, use `bash rosie/dashboard-connect.sh` instead.
-
 The dashboard lists every run under `simulator/training/runs` and refreshes
-every three seconds, including new or changing runs. The script starts it as an
-overlapping step on a running job's compute node, chooses both ports
-automatically, and opens the local URL. If multiple jobs share a working
-directory, it uses one to host the dashboard; pass a job ID only when jobs use
-different working directories: `bash rosie/dashboard-connect.sh <JOB_ID>`. The
-dashboard server runs on Rosie, not on the local computer. Press Ctrl+C to stop
-the remote dashboard step and local tunnel; no separate dashboard allocation
-is submitted.
+every three seconds, including new or changing runs. The script hosts it on
+your Rosie management node, chooses both ports automatically, and opens the
+local URL through an SSH tunnel. **No training job or Slurm allocation is
+required or submitted.** Saved runs remain accessible when training stops.
+Press Ctrl+C to stop the remote dashboard and local tunnel.
+
+Remote checkout: `~/minecraftlol/Cambium/gpu-sim-minecraft`.
+Override with `ROSIE_PROJECT_DIR`. On Rosie itself, the command uses its own
+checkout and forwards localhost on that node, not your computer. An optional
+`<JOB_ID>` still hosts the dashboard inside a running training allocation.
 
 See [AGENTS.md](AGENTS.md) for GPU selection, experiment options, output paths,
 tunneling details, and local Linux checks. If `ROSIE_SSH_JUMP` is unset, the

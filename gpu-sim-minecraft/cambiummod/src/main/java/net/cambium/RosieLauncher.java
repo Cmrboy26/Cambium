@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.UUID;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
@@ -28,6 +29,9 @@ final class RosieLauncher {
 	private static boolean serving;
 	private static Object world;
 	private static String operation = "idle";
+	private static String lastMessage = "Local library ready";
+	private static List<JsonObject> remoteRuns = List.of();
+	private static boolean arenaMode = true;
 
 	static void initialize() {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
@@ -48,6 +52,7 @@ final class RosieLauncher {
 				root.then(command.then(run));
 			}
 			root.then(ClientCommands.literal("status").executes(context -> message(context.getSource().getClient(), "Rosie: " + operation)));
+			root.then(ClientCommands.literal("local").executes(context -> start(context.getSource().getClient(), "local", "latest", "latest")));
 			root.then(ClientCommands.literal("stop").executes(context -> {
 				Minecraft client = context.getSource().getClient();
 				boolean stopDuel = serving;
@@ -64,7 +69,18 @@ final class RosieLauncher {
 		});
 	}
 
-	private static int start(Minecraft client, String action, String run, String replay) {
+	static boolean isBusy() { return busy; }
+	static boolean isServing() { return serving; }
+	static String status() { return busy ? operation : lastMessage; }
+	static List<JsonObject> remoteRuns() { return remoteRuns; }
+
+	static void stopOwned(Minecraft client) {
+		cancel();
+		LiveDuel.stop(client);
+		lastMessage = "Stopped; local files kept";
+	}
+
+	static int start(Minecraft client, String action, String run, String replay) {
 		var server = client.getSingleplayerServer();
 		if (server == null || client.player == null || server.isPublished()) {
 			return message(client, "Rosie commands require a private singleplayer world.");
@@ -80,6 +96,7 @@ final class RosieLauncher {
 		Object level = client.level;
 		world = level;
 		busy = true;
+		arenaMode = !action.equals("local-world");
 		operation = action + " " + run;
 		message(client, "Rosie: " + operation + "...");
 		Thread.ofVirtual().name("cambium-rosie").start(() -> {
@@ -131,9 +148,12 @@ final class RosieLauncher {
 	}
 
 	static ProcessBuilder helper(JsonObject config, Path game, String action, String run, String replay) {
-		return new ProcessBuilder(config.get("python").getAsString(), "-u", "-B", "-m",
-				"simulator.training.rosie", action, "--minecraft-directory", game.toString(),
-				"--run", run, "--replay", replay, "--json")
+		boolean local = action.equals("local") || action.equals("local-world");
+		var arguments = new ArrayList<>(List.of(config.get("python").getAsString(), "-u", "-B", "-m",
+				"simulator.training.rosie", local ? "local" : action, "--minecraft-directory", game.toString(),
+				"--run", run, "--replay", replay, "--json"));
+		if (local) arguments.addAll(List.of("--duel", game.resolve("sim-rosie-cache/duel.json").toString(), "--offline"));
+		return new ProcessBuilder(arguments)
 				.directory(Path.of(config.get("repository").getAsString()).toFile())
 				.redirectError(ProcessBuilder.Redirect.appendTo(game.resolve("logs/rosie-launcher.log").toFile()));
 	}
@@ -144,6 +164,13 @@ final class RosieLauncher {
 			case "runs", "replays" -> {
 				boolean runs = event.get("event").getAsString().equals("runs");
 				var items = event.getAsJsonArray("items");
+				if (runs) {
+					var rows = new ArrayList<JsonObject>();
+					for (var item : items) rows.add(item.getAsJsonObject().deepCopy());
+					remoteRuns = List.copyOf(rows);
+					lastMessage = "Loaded " + rows.size() + " remote runs";
+					if (client.gui.screen() instanceof ControlPanel panel) { panel.remoteChanged(); return; }
+				}
 				message(client, "Rosie: " + items.size() + (runs ? " saved runs (newest first)." : " replays (newest first)."));
 				for (var item : items) {
 					JsonObject row = item.getAsJsonObject();
@@ -158,14 +185,18 @@ final class RosieLauncher {
 			case "policy" -> {
 				serving = true;
 				operation = "serving " + event.get("run").getAsString() + " locally";
-				LiveDuel.connect(client, true, event.get("port").getAsInt());
+				LiveDuel.connect(client, arenaMode, event.get("port").getAsInt());
 			}
-			case "synced" -> message(client, "Cached " + event.get("run").getAsString() + " and " + event.get("replays").getAsInt() + " replays.");
+			case "synced" -> {
+				message(client, "Cached " + event.get("run").getAsString() + " and " + event.get("replays").getAsInt() + " replays.");
+				if (client.gui.screen() instanceof ControlPanel panel) panel.refreshLibrary();
+			}
 			default -> throw new IllegalArgumentException("Unknown Rosie helper event");
 		}
 	}
 
 	private static int message(Minecraft client, String text) {
+		lastMessage = text;
 		client.gui.hud.getChat().addClientSystemMessage(Component.literal(text));
 		return 1;
 	}

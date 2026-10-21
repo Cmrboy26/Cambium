@@ -1,0 +1,31 @@
+{
+  "format": "minecraft_sim_policy",
+  "version": 1,
+  "name": "example-melee",
+  "minecraft": "26.3",
+  "ticks_per_action": 1,
+  "requires": ["movement", "melee"],
+  "observations": [
+    {"feature": "self.health_fraction"},
+    {"feature": "self.yaw_fraction"},
+    {"feature": "self.pitch_fraction"},
+    {"feature": "opponent.alive"},
+    {"feature": "opponent.health_fraction"},
+    {"feature": "relative.x"},
+    {"feature": "relative.y"},
+    {"feature": "relative.z"},
+    {"feature": "target.distance_fraction"},
+    {"feature": "target.aim_dot"},
+    {"feature": "target.yaw_error"},
+    {"feature": "target.pitch_error"}
+  ],
+  "actions": [
+    {"name": "movement", "values": ["neutral", "forward", "forward_right", "right", "backward_right",
+                                     "backward", "backward_left", "left", "forward_left"]},
+    {"name": "jump", "values": [false, true]},
+    {"name": "sprint", "values": [false, true]},
+    {"name": "attack", "values": [false, true]},
+    {"name": "yaw", "values": [-15, -5, 0, 5, 15]},
+    {"name": "pitch", "values": [-5, 0, 5]}
+  ]
+}

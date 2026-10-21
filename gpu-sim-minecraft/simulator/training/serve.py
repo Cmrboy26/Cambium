@@ -1,6 +1,7 @@
 """Serve a trained duel policy to the Minecraft mod over loopback HTTP."""
 
 import argparse
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -13,6 +14,22 @@ from backend.fast_rl_model import ActorCritic
 from simulator.training.environment import SCHEMA, SCHEMAS
 from simulator.training.contract import CATALOGUE_HASH, fingerprint, from_legacy, resolve_scenario, validate_contract
 from simulator.training.policies import fixed_indices
+from simulator.training.controllers import create_controller
+
+
+def inference_observations(request, schema, contract_hash):
+    if (not isinstance(request, dict) or request.get("protocol") != 1
+            or not isinstance(request.get("session"), str) or not 1 <= len(request["session"]) <= 64
+            or type(request.get("tick")) is not int or not 0 <= request["tick"] < 2**53):
+        raise ValueError("Expected protocol 1, session ID and nonnegative integer tick")
+    observations = np.asarray(request.get("observations"), dtype=np.float32)
+    if (request.get("contract_hash") is not None or schema.get("format") == "minecraft_sim_policy") \
+            and request.get("contract_hash") != contract_hash:
+        raise ValueError("Inference request policy contract fingerprint does not match")
+    features = schema["observation_dim"]
+    if observations.shape != (2, features) or not np.isfinite(observations).all():
+        raise ValueError(f"Expected finite observations with shape [2,{features}]")
+    return observations
 
 
 class Policy:
@@ -69,17 +86,7 @@ class Policy:
 
     @torch.inference_mode()
     def act(self, request):
-        if (not isinstance(request, dict) or request.get("protocol") != 1
-                or not isinstance(request.get("session"), str) or not 1 <= len(request["session"]) <= 64
-                or type(request.get("tick")) is not int or not 0 <= request["tick"] < 2**53):
-            raise ValueError("Expected protocol 1, session ID and nonnegative integer tick")
-        observations = np.asarray(request.get("observations"), dtype=np.float32)
-        if (request.get("contract_hash") is not None or self.schema.get("format") == "minecraft_sim_policy") \
-                and request.get("contract_hash") != self.info["contract_hash"]:
-            raise ValueError("Inference request policy contract fingerprint does not match")
-        features = self.schema["observation_dim"]
-        if observations.shape != (2, features) or not np.isfinite(observations).all():
-            raise ValueError(f"Expected finite observations with shape [2,{features}]")
+        observations = inference_observations(request, self.schema, self.info["contract_hash"])
         with self.lock:
             logits, _ = self.model(torch.as_tensor(observations, device=self.device))
             actions = torch.stack([
@@ -89,6 +96,75 @@ class Policy:
                 for name in self.schema["action_names"]], dim=-1).cpu().tolist()
         return {"protocol": 1, "session": request["session"], "tick": request["tick"],
             "contract_hash": self.info["contract_hash"], "actions": actions}
+
+
+class DuelPolicy:
+    def __init__(self, configuration, device="cpu", deterministic=False, seed=1):
+        self.path = Path(configuration).resolve()
+        value = json.loads(self.path.read_text(encoding="utf-8"))
+        if (not isinstance(value, dict) or set(value) - {"format", "version", "reference", "policy", "environment", "fighters"}
+                or value.get("format") != "minecraft_sim_duel" or type(value.get("version")) is not int
+                or value["version"] != 1):
+            raise ValueError("Expected minecraft_sim_duel version 1")
+        fighters = value.get("fighters")
+        if not isinstance(fighters, list) or len(fighters) != 2:
+            raise ValueError("A duel requires exactly two fighters")
+        if "reference" in value:
+            reference = Path(value["reference"])
+            reference = reference if reference.is_absolute() else self.path.parent / reference
+            source = Policy(reference, device, deterministic, seed)
+            self.info = deepcopy(source.info)
+            self.schema, self.contract = source.schema, source.contract
+        else:
+            self.contract = validate_contract(value.get("policy"))
+            self.schema = self.contract
+            self.info = {"protocol": 1, "schema": self.schema, "contract": self.contract,
+                         "contract_hash": fingerprint(self.contract), "catalogue_hash": CATALOGUE_HASH,
+                         "minecraft_bridge_supported": True, "device": device, "controls": {"fixed": {}},
+                         "checkpoint": str(self.path), "update": 0, "deterministic": deterministic}
+        if "environment" in value:
+            self.info["environment"] = resolve_scenario(value["environment"])
+        if "environment" not in self.info:
+            raise ValueError("A duel requires an environment or reference checkpoint")
+        scenario = self.info["environment"]
+        self.info["max_ticks"] = scenario.get("max_ticks", 300)
+        for action in self.contract["actions"]:
+            if action["name"] == "weapon" and any(slot >= len(player["loadout"]["weapons"])
+                    for slot in action["values"] for player in scenario["players"]):
+                raise ValueError("Policy weapon action outside duel environment loadout")
+        self.controllers = []
+        self.info["fighters"] = []
+        for index, fighter in enumerate(fighters):
+            if not isinstance(fighter, dict):
+                raise ValueError("Fighter must be an object")
+            definition = {key: deepcopy(item) for key, item in fighter.items() if key != "name"}
+            if definition.get("type") not in ("checkpoint", "scripted"):
+                raise ValueError("Live fighters must be checkpoint policies or scripted controllers")
+            if definition["type"] == "scripted" and definition.get("controller") not in ("stationary_target", "basic_melee"):
+                raise ValueError("Live duels accept only built-in scripted controllers")
+            if definition["type"] == "checkpoint":
+                path = Path(definition.get("path", ""))
+                definition["path"] = str(path if path.is_absolute() else self.path.parent / path)
+                definition.setdefault("deterministic", deterministic)
+            controller = create_controller(definition, self.contract, 1, device, seed + index)
+            self.controllers.append(controller)
+            self.info["fighters"].append({"name": str(fighter.get("name", f"Fighter {index + 1}")),
+                                          **controller.describe})
+        self.lock = threading.Lock()
+        self.session = None
+
+    @torch.inference_mode()
+    def act(self, request):
+        observations = inference_observations(request, self.schema, self.info["contract_hash"])
+        with self.lock:
+            if request["session"] != self.session:
+                for controller in self.controllers:
+                    controller.reset(np.ones(1, dtype=bool))
+                self.session = request["session"]
+            actions = [controller.act(observations[index:index + 1])[0].tolist()
+                       for index, controller in enumerate(self.controllers)]
+        return {"protocol": 1, "session": request["session"], "tick": request["tick"],
+                "contract_hash": self.info["contract_hash"], "actions": actions}
 
 
 def make_server(policy, port):
@@ -131,7 +207,8 @@ def make_server(policy, port):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("checkpoint", type=Path, help="Standalone trainer checkpoint (trusted files only)")
+    parser.add_argument("checkpoint", type=Path, nargs="?", help="Standalone trainer checkpoint (trusted files only)")
+    parser.add_argument("--duel", type=Path, help="Local two-fighter duel configuration")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--deterministic", action="store_true", help="Use argmax instead of training-style stochastic actions")
@@ -140,8 +217,11 @@ def main(argv=None):
     options = parser.parse_args(argv)
     if not 1 <= options.port <= 65535 or options.threads < 1:
         parser.error("Invalid port or thread count")
+    if (options.checkpoint is None) == (options.duel is None):
+        parser.error("Choose a checkpoint or --duel, not both")
     torch.set_num_threads(options.threads)
-    policy = Policy(options.checkpoint, options.device, options.deterministic, options.seed)
+    policy = (DuelPolicy(options.duel, options.device, options.deterministic, options.seed) if options.duel else
+              Policy(options.checkpoint, options.device, options.deterministic, options.seed))
     with make_server(policy, options.port) as server:
         print(f"Policy: {policy.path}\nLoopback inference: http://127.0.0.1:{options.port}", flush=True)
         if policy.info["minecraft_bridge_supported"]:

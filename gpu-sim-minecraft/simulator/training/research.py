@@ -14,7 +14,7 @@ import torch
 
 from backend.fast_rl_model import ActorCritic, FastRLAgent
 from simulator.training.contract import fingerprint
-from simulator.training.controllers import SelfPlayController, create_controller
+from simulator.training.controllers import FrozenSelfPlayController, SelfPlayController, create_controller
 from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions
@@ -161,6 +161,16 @@ class OpponentPool:
         self.assignments[ids] = [self.names.index(self.mixture[int(index)]["id"]) for index in selected]
         self.learner_slots[ids] = self.side_rng.integers(0, 2, len(ids))
 
+    def capture(self, learner, update, controls, force=False):
+        for controller in self.controllers.values():
+            if isinstance(controller, FrozenSelfPlayController):
+                controller.capture(learner, update, controls, force)
+
+    def copy_snapshots(self, source):
+        for name, controller in self.controllers.items():
+            if isinstance(controller, FrozenSelfPlayController):
+                controller.copy_snapshot(source.controllers[name])
+
     def act(self, observations, learner_actions):
         actions = np.empty((self.count, 2, learner_actions.shape[-1]), dtype=np.int64)
         ids = np.arange(self.count)
@@ -178,7 +188,11 @@ class OpponentPool:
 
     def provenance(self, world):
         name = self.names[int(self.assignments[world])]
-        return {"id": name, "controller": self.controllers[name].provenance,
+        controller = self.controllers[name]
+        provenance = controller.provenance
+        if isinstance(controller, FrozenSelfPlayController):
+            provenance["snapshot_update"] = int(controller.snapshot_updates[world])
+        return {"id": name, "controller": provenance,
                 "learner_slot": int(self.learner_slots[world])}
 
     def state_dict(self):
@@ -249,7 +263,7 @@ def _lost(actor, scenario):
 
 
 @torch.no_grad()
-def evaluate(model, plan, suite, options, device, fixed):
+def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
     count = min(suite.get("worlds", 16), suite["episodes"])
     fixed = fixed_indices(plan["policy"], suite["controls"])
     worlds = SampledWorlds(suite["scenario"], plan["policy"], count, options.device,
@@ -259,6 +273,8 @@ def evaluate(model, plan, suite, options, device, fixed):
     try:
         pool = OpponentPool(plan["opponents"], plan["policy"], count, options.device, suite["seed"], learner=model)
         pool.configure(suite["opponents"], suite["controls"])
+        if opponent_pool is not None:
+            pool.copy_snapshots(opponent_pool)
         total = wins = finished = 0
         episode_rewards = np.zeros(count)
         observations = worlds.observe()
@@ -291,7 +307,8 @@ def evaluate(model, plan, suite, options, device, fixed):
 
 
 @torch.no_grad()
-def export_replay(model, plan, stage, options, scenario, provenance, device, rounds, update, directory):
+def export_replay(model, plan, stage, options, scenario, provenance, device, rounds, update, directory,
+                  opponent_pool=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"research-{rounds:09d}-{datetime.now():%Y%m%d-%H%M%S-%f}.jsonl"
@@ -307,6 +324,10 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
                 pool = OpponentPool({provenance["id"]: plan["opponents"][provenance["id"]]},
                                     plan["policy"], 1, options.device, plan["seed"], learner=model)
                 pool.configure([{"id": provenance["id"], "weight": 1}], stage["controls"])
+                controller = pool.controllers[provenance["id"]]
+                if isinstance(controller, FrozenSelfPlayController) and opponent_pool is not None:
+                    controller.copy_snapshot(opponent_pool.controllers[provenance["id"]],
+                                             provenance["controller"]["snapshot_update"])
                 pool.reset(np.ones(1, dtype=bool))
                 pool.learner_slots[:] = provenance["learner_slot"]
                 fixed = fixed_indices(plan["policy"], stage["controls"])
@@ -428,6 +449,8 @@ def run(options, checkpoint=None):
             model.load_state_dict(initial["model"], strict=True)
         if not all(torch.isfinite(parameter).all() for parameter in model.parameters()):
             raise ValueError("Learner checkpoint contains nonfinite parameters")
+        if checkpoint is None:
+            pool.capture(model, 0, stage["controls"], force=True)
         worlds.configure(stage)
         observations = worlds.observe()
         pool.reset(np.ones(options.envs, dtype=bool))
@@ -468,6 +491,7 @@ def run(options, checkpoint=None):
             rounds += endings + timeouts
             progress = {"updates": progress["updates"] + 1, "episodes": progress["episodes"] + endings + timeouts,
                         "transitions": progress["transitions"] + transitions}
+            pool.capture(model, update, stage["controls"])
             evaluation_seconds = 0.0
             evaluation_episodes = 0
             replay_seconds = 0.0
@@ -479,7 +503,7 @@ def run(options, checkpoint=None):
                         if counter % suite["every_updates"] == 0:
                             evaluation_start = time.perf_counter()
                             torch.manual_seed(suite["seed"])
-                            result = evaluate(model, plan, suite, options, device, fixed)
+                            result = evaluate(model, plan, suite, options, device, fixed, opponent_pool=pool)
                             elapsed = time.perf_counter() - evaluation_start
                             result.update(seconds=elapsed, snapshot_update=update,
                                           stage=stage["name"], stage_index=stage_index)
@@ -492,8 +516,33 @@ def run(options, checkpoint=None):
                         scenario, _ = worlds.episode(0)
                         torch.manual_seed(plan["seed"] + multiple)
                         export_replay(model, plan, stage, options, scenario, pool.provenance(0), device,
-                            multiple * options.replay_every, update, options.replay_dir or output / "replays")
+                            multiple * options.replay_every, update, options.replay_dir or output / "replays",
+                            opponent_pool=pool)
                     replay_seconds = time.perf_counter() - replay_start
+            stage_complete = reached(stage["advance"], progress, evaluations)
+            plan_complete = stage_complete and stage_index + 1 == len(plan["stages"])
+            retained_snapshots = []
+            for rules, counter, complete in ((plan.get("snapshots", []), update, plan_complete),
+                                              (stage.get("snapshots", []), progress["updates"], stage_complete)):
+                for rule in rules:
+                    if rule.get("at_updates") != counter and not (rule.get("on_completion") and complete):
+                        continue
+                    scenario, _ = worlds.episode(0)
+                    manifest = metadata(worlds.groups[0][1], options.hidden_dim)
+                    manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario,
+                                    scenario=scenario, learner="opponent_pool", controls=stage["controls"],
+                                    experiment=deployment_summary(plan, stage, stage_index),
+                                    snapshot={"name": rule["name"], "update": update,
+                                              "stage_updates": progress["updates"]})
+                    directory = output / "snapshots"
+                    directory.mkdir(exist_ok=True)
+                    temporary = directory / f"{rule['name']}.tmp"
+                    torch.save({"format": "minecraft_sim_ppo", "version": 1, "metadata": manifest,
+                                "model": model.state_dict(), "update": update, "samples": samples,
+                                "completed_rounds": rounds}, temporary)
+                    destination = directory / f"{rule['name']}.pt"
+                    temporary.replace(destination)
+                    retained_snapshots.append(str(destination.relative_to(output)))
             iteration_seconds = time.perf_counter() - start
             statistics.update(update=update, samples=samples, stage=stage["name"], stage_index=stage_index,
                 stage_progress=progress.copy(), completed_rounds=rounds, terminated_duels=endings, timeouts=timeouts,
@@ -502,10 +551,12 @@ def run(options, checkpoint=None):
                 evaluation_seconds=evaluation_seconds, evaluation_episodes=evaluation_episodes,
                 replay_seconds=replay_seconds, iteration_seconds=iteration_seconds,
                 evaluations=deepcopy(evaluations), player_transitions_per_second=transitions / iteration_seconds)
+            if retained_snapshots:
+                statistics["snapshots"] = retained_snapshots
             if device.type == "cuda":
                 statistics["cuda_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
                 statistics["cuda_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
-            if reached(stage["advance"], progress, evaluations):
+            if stage_complete:
                 if stage_index + 1 == len(plan["stages"]):
                     completed = True
                 else:

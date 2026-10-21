@@ -150,7 +150,7 @@ final class LivePolicy implements AutoCloseable {
 		return BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).toString().endsWith("_axe");
 	}
 
-	private static int shieldCooldown(ServerPlayer player) {
+	static int shieldCooldown(ServerPlayer player) {
 		return Math.round(player.getCooldowns().getCooldownPercent(new ItemStack(Items.SHIELD), 0) * 100);
 	}
 

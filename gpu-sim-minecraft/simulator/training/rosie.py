@@ -66,12 +66,24 @@ else:
                 name(path.name)
                 if path.is_file():
                     replays.append(entry(path))
-        print(json.dumps({"files": files, "replays": sorted(replays,
-                         key=lambda row: (-row["mtime_ns"], row["name"]))}))
+        snapshots = []
+        snapshot_dir = folder / "snapshots"
+        if snapshot_dir.is_dir():
+            inside(snapshot_dir)
+            for path in snapshot_dir.glob("*.pt"):
+                name(path.name)
+                if path.is_file():
+                    snapshots.append(entry(path))
+        print(json.dumps({"files": files, "snapshots": sorted(snapshots, key=lambda row: row["name"]),
+                         "replays": sorted(replays, key=lambda row: (-row["mtime_ns"], row["name"]))}))
     elif action == "fetch":
         filename = request["file"]
         if filename in ("latest.pt", "config.json", "metrics.jsonl"):
             path = folder / filename
+        elif filename.startswith("snapshots/"):
+            path = folder / "snapshots" / name(filename.removeprefix("snapshots/"))
+            if path.suffix != ".pt":
+                raise ValueError("Only policy snapshots may be fetched")
         else:
             path = folder / "replays" / name(filename)
             if path.suffix != ".jsonl":
@@ -426,7 +438,11 @@ class Rosie:
 
     def fetch(self, run, filename, destination, expected):
         valid_name(run)
-        valid_name(filename)
+        if filename.startswith("snapshots/"):
+            if not valid_name(filename.removeprefix("snapshots/")).endswith(".pt"):
+                raise ValueError("Snapshot must be a .pt file")
+        else:
+            valid_name(filename)
         destination = Path(destination)
         if destination.is_file():
             stat = destination.stat()
@@ -482,10 +498,62 @@ class Rosie:
         filename = valid_name(entry["name"])
         return self.fetch(run, filename, self.game / "sim-replays" / (run + "--" + filename), entry)
 
+    def sync_snapshots(self, run, manifest):
+        for entry in manifest.get("snapshots", []):
+            filename = valid_name(entry["name"])
+            self.fetch(run, "snapshots/" + filename, self.cache / run / "snapshots" / filename, entry)
+
+    def index_run(self, run):
+        from simulator.training.serve import Policy
+
+        path = self.cache / "library.json"
+        previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"policies": [], "environments": []}
+        aliases = {entry["id"]: entry["name"] for entry in previous["policies"]}
+        policies = [entry for entry in previous["policies"] if entry["run"] != run]
+        environments = [entry for entry in previous["environments"] if entry["run"] != run]
+        folder = self.cache / valid_name(run)
+        checkpoints = [folder / "latest.pt", *sorted((folder / "snapshots").glob("*.pt"))]
+        for checkpoint in checkpoints:
+            if not checkpoint.is_file():
+                continue
+            policy = Policy(checkpoint)
+            identity = run + ":" + checkpoint.relative_to(folder).as_posix()
+            policies.append({"id": identity, "name": aliases.get(identity, run + " / " + checkpoint.stem),
+                             "run": run, "path": str(checkpoint), "update": policy.info["update"],
+                             "stage": policy.info.get("experiment", {}).get("stage", ""),
+                             "contract_hash": policy.info["contract_hash"], "policy": policy.contract})
+            environments.append({"id": identity, "name": run + " / " + checkpoint.stem + " environment",
+                                 "run": run, "policy": policy.contract, "contract_hash": policy.info["contract_hash"],
+                                 "environment": policy.info["environment"]})
+        config = folder / "config.json"
+        if config.is_file():
+            experiment = json.loads(config.read_text(encoding="utf-8")).get("experiment", {})
+            for stage_index, stage in enumerate(experiment.get("stages", [])):
+                for arena_index, arena in enumerate(stage["scenario"]["arenas"]):
+                    from simulator.training.contract import fingerprint
+
+                    contract = experiment["policy"]
+                    environments.append({"id": f"{run}:stage:{stage_index}:{arena_index}",
+                                         "name": run + " / " + stage["name"] + (f" / arena {arena_index + 1}"
+                                             if len(stage["scenario"]["arenas"]) > 1 else ""),
+                                         "run": run, "policy": contract,
+                                         "contract_hash": fingerprint(contract), "environment": arena["environment"]})
+        result = {"version": 1, "policies": policies, "environments": environments}
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.cache, delete=False) as target:
+            temporary = Path(target.name)
+            try:
+                json.dump(result, target, indent=2, allow_nan=False)
+                target.close()
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return result
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel"))
+    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel", "local"))
+    parser.add_argument("--duel", type=Path)
     parser.add_argument("--minecraft-directory", required=True)
     parser.add_argument("--run", default="latest")
     parser.add_argument("--replay", default="latest")
@@ -518,6 +586,17 @@ def main(argv=None):
                 raise ValueError("Password login requires connect in a local terminal, without --json or --offline")
             connect_terminal(args.minecraft_directory)
             return 0
+        if args.action == "local":
+            import torch
+            from simulator.training.serve import DuelPolicy, make_server
+
+            if args.duel is None:
+                raise ValueError("Local duel requires --duel <configuration.json>")
+            torch.set_num_threads(1)
+            with make_server(DuelPolicy(args.duel), 0) as server:
+                emit("policy", run="Local duel", port=server.server_address[1])
+                server.serve_forever()
+            return 0
         rosie = Rosie(args.minecraft_directory, args.offline)
         if args.action == "runs":
             emit("runs", items=rosie.runs())
@@ -531,8 +610,10 @@ def main(argv=None):
         else:
             checkpoint = rosie.checkpoint(run, manifest)
             if args.action == "sync":
+                rosie.sync_snapshots(run, manifest)
                 for entry in manifest["replays"]:
                     rosie.replay(run, manifest, entry["name"])
+                rosie.index_run(run)
                 emit("synced", run=run, checkpoint=str(checkpoint), replays=len(manifest["replays"]))
             else:
                 import torch

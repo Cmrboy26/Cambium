@@ -17,7 +17,7 @@ import torch
 from backend.fast_rl_model import ActorCritic
 from simulator.training.contract import fingerprint, from_legacy, validate_contract
 from simulator.training.controllers import (
-    BasicMeleeController, CheckpointController, Controller, CONTROLLER_REGISTRY,
+    BasicMeleeController, CheckpointController, Controller, CONTROLLER_REGISTRY, FrozenSelfPlayController,
     SelfPlayController, StationaryTargetController, checkpoint_sha256, create_controller, register_controller,
 )
 from simulator.training.environment import SCHEMA
@@ -55,6 +55,47 @@ def decoded(contract, actions, name):
 
 
 class ScriptedChecks(unittest.TestCase):
+    def test_frozen_self_play_replacement_episode_pinning_and_resume(self):
+        contract = policy()
+        learner = ActorCritic(contract["observation_dim"], 8,
+                              action_sizes=dict(zip(contract["action_names"], contract["action_sizes"])))
+        definition = {"type": "frozen_self_play", "every_updates": 2}
+        controller = create_controller(definition, contract, 2, learner=learner)
+        assert isinstance(controller, FrozenSelfPlayController)
+        original = deepcopy(controller.snapshots[0][0].state_dict())
+        with torch.no_grad():
+            for parameter in learner.parameters():
+                parameter.add_(1)
+        controller.capture(learner, 1, {"fixed": {"attack": False}})
+        self.assertEqual(controller.latest_update, 0)
+        controller.capture(learner, 2, {"fixed": {"attack": False}})
+        for name, value in controller.snapshots[0][0].state_dict().items():
+            torch.testing.assert_close(value, original[name])
+        controller.reset(np.array([True, False]))
+        self.assertEqual(controller.snapshot_updates.tolist(), [2, 0])
+        self.assertEqual(set(controller.snapshots), {0, 2})
+        saved = controller.state_dict()
+        restored = create_controller(definition, contract, 2, learner=learner)
+        restored.load_state_dict(saved)
+        obs = observations(contract, 2)
+        np.testing.assert_array_equal(controller.act(obs), restored.act(obs))
+        self.assertFalse(decoded(contract, controller.act(obs), "attack")[0])
+        controller.reset(np.ones(2, dtype=bool))
+        self.assertEqual(set(controller.snapshots), {2})
+        copied = create_controller(definition, contract, 1, learner=learner)
+        assert isinstance(copied, FrozenSelfPlayController)
+        copied.copy_snapshot(controller)
+        self.assertEqual(copied.snapshot_updates.tolist(), [2])
+        self.assertEqual(copied.snapshots[2][1], controller.snapshots[2][1])
+        for name, value in copied.model.state_dict().items():
+            torch.testing.assert_close(value, controller.snapshots[2][0].state_dict()[name])
+        self.assertIsNot(copied.model, controller.snapshots[2][0])
+        controller.capture(learner, 4, {"fixed": {}})
+        controller.reset(np.ones(2, dtype=bool))
+        self.assertEqual(set(controller.snapshots), {4})
+        self.assertIs(controller.model, controller.snapshots[4][0])
+        self.assertTrue(all(not parameter.requires_grad for parameter in controller.model.parameters()))
+
     def test_stationary_legacy_and_reordered_neutral_values(self):
         legacy = from_legacy(SCHEMA)
         target = create_controller({"type": "scripted", "controller": "stationary_target"},

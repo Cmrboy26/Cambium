@@ -34,6 +34,7 @@ public final class ReplayAnalysisChecks {
 		checkSprintInput();
 		checkMinorCollision();
 		checkRosieLauncher();
+		checkDuelLibrary();
 		var replayFood = new ReplayPlayer.ReplayFoodData();
 		replayFood.setFoodLevel(12);
 		replayFood.setSaturation(2.0F);
@@ -105,7 +106,64 @@ public final class ReplayAnalysisChecks {
 		require(builder.command().contains(root.toString()) && builder.command().contains("run;not-a-shell"), "Helper arguments must be literal, including spaces and shell metacharacters");
 		require(builder.command().contains("--json") && !builder.redirectErrorStream(), "Helper stdout must remain a separate JSON event stream");
 		require(builder.directory().toPath().equals(root.resolve("checkout with spaces")), "Module must start from configured repository");
+		for (String action : java.util.List.of("local", "local-world")) {
+			ProcessBuilder local = RosieLauncher.helper(config, root, action, "latest", "latest");
+			require(local.command().get(5).equals("local") && local.command().contains("--offline"), "Local launch must select offline mode, including world mode");
+			int argument = local.command().indexOf("--duel");
+			require(argument >= 0 && local.command().get(argument + 1).equals(root.resolve("sim-rosie-cache/duel.json").toString()), "Offline duel path must remain one literal argument");
+		}
 		System.out.println("PASS: Rosie helper uses literal arguments, configured repository and separate JSON output");
+	}
+
+	private static void checkDuelLibrary() throws Exception {
+		Path game = Files.createTempDirectory("cambium-library-checks-");
+		try {
+			DuelLibrary library = new DuelLibrary(game);
+			require(library.policies.isEmpty() && library.environments.isEmpty(), "An unsynced library must be empty");
+			JsonObject environment = new JsonObject();
+			environment.addProperty("contract_hash", "a".repeat(64));
+			environment.add("policy", new JsonObject());
+			environment.add("environment", new JsonObject());
+			Path checkpoint = library.root.resolve("run/latest.pt");
+			Files.createDirectories(checkpoint.getParent());
+			Files.writeString(checkpoint, "fixture");
+			JsonObject entry = new JsonObject();
+			entry.addProperty("name", "My fighter");
+			entry.addProperty("path", checkpoint.toString());
+			entry.addProperty("contract_hash", "a".repeat(64));
+			JsonObject first = library.policyFighter(entry, environment);
+			JsonObject second = DuelLibrary.scriptedFighter("basic_melee", new JsonObject());
+			JsonObject duel = JsonParser.parseString(Files.readString(library.saveDuel(environment, first, second))).getAsJsonObject();
+			require(duel.getAsJsonArray("fighters").get(0).getAsJsonObject().get("name").getAsString().equals("My fighter"), "Readable fighter names must survive launch");
+			require(duel.getAsJsonArray("fighters").get(1).getAsJsonObject().get("type").getAsString().equals("scripted"), "Each side must retain its own controller type");
+			entry.addProperty("contract_hash", "b".repeat(64));
+			boolean rejected = false;
+			try { library.policyFighter(entry, environment); } catch (java.io.IOException expected) { rejected = true; }
+			require(rejected, "Incompatible policies must fail before launch");
+			entry.addProperty("contract_hash", "a".repeat(64));
+			entry.addProperty("path", game.resolve("outside.pt").toString());
+			Files.writeString(game.resolve("outside.pt"), "outside");
+			rejected = false;
+			try { library.policyFighter(entry, environment); } catch (java.io.IOException expected) { rejected = true; }
+			require(rejected, "Checkpoint selection must remain inside the local library cache");
+			JsonObject index = new JsonObject();
+			index.addProperty("version", 1);
+			JsonArray entries = new JsonArray();
+			entry.addProperty("id", "fixture:latest.pt");
+			entries.add(entry);
+			index.add("policies", entries);
+			index.add("environments", new JsonArray());
+			DuelLibrary.write(library.root.resolve("library.json"), index);
+			DuelLibrary reopened = new DuelLibrary(game);
+			reopened.rename(reopened.policies.getFirst(), " My saved alias ");
+			require(new DuelLibrary(game).policies.getFirst().get("name").getAsString().equals("My saved alias"), "Aliases must be trimmed and survive reopening Minecraft");
+			require(Files.readString(library.root.resolve("library.json")).contains("\n  \"policies\""), "The local library must remain human-readable after renaming");
+			System.out.println("PASS: local library and independent duel configuration");
+		} finally {
+			try (var paths = Files.walk(game)) {
+				for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
+			}
+		}
 	}
 
 	private static void checkReplay(Path path) throws Exception {

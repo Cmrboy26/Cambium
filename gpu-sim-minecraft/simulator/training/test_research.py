@@ -15,6 +15,7 @@ from backend.fast_rl_model import ActorCritic
 from simulator.training._test_plans import example_plan
 from simulator.training.contract import from_legacy, resolve_scenario
 from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
+from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions
@@ -160,6 +161,100 @@ class PlanChecks(unittest.TestCase):
         (-log_probs.mean() - entropy.mean() + values.mean()).backward()
         self.assertIsNone(model.attack_head.weight.grad)
         self.assertIsNone(model.yaw_head.weight.grad)
+
+
+class SnapshotChecks(unittest.TestCase):
+    def setUp(self):
+        torch.set_num_threads(1)
+        self.directory = ROOT / "simulator/training/runs" / f"test-snapshots-{uuid4().hex}"
+        self.directory.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.directory)
+        arena = {"format": "minecraft_sim_arena", "version": 1, "minecraft": "26.3", "name": "test-arena",
+                 "requires": ["movement", "melee"],
+                 "rules": {"simulate_food": False, "natural_regeneration": False},
+                 "bounds": {"min": [-5, 0, -5], "size": [11, 4, 11]},
+                 "blocks": [{"from": [-5, 0, -5], "to": [5, 0, 5], "block": "minecraft:stone"}]}
+        environment = {"format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+                       "name": "test-environment", "arena": "arena.json",
+                       "players": {"shared": {"loadout": {"weapons": ["minecraft:iron_sword"]}},
+                                   "overrides": [{"position": [-2, 1, 0]}, {"position": [2, 1, 0]}]},
+                       "task": {"max_ticks": 2, "rewards": {"episode_timeout": -1}}}
+        self.raw = {"format": "minecraft_sim_training_plan", "version": 2, "name": "snapshot-test", "seed": 42,
+                    "policy": "policy.json", "environment": "environment.json",
+                    "opponents": {"past": {"type": "frozen_self_play", "every_updates": 2}},
+                    "mixtures": {"past": [{"id": "past", "weight": 1}]},
+                    "stages": [{"name": "aim", "opponents": "past", "controls": {"fixed": {"attack": False}},
+                                "advance": {"updates": 2}},
+                               {"name": "combat", "opponents": "past", "advance": {"updates": 2}}]}
+        for name, value in (("arena", arena), ("environment", environment), ("policy", from_legacy(SCHEMA))):
+            (self.directory / f"{name}.json").write_text(json.dumps(value))
+        self.path = self.directory / "plan.json"
+        self.path.write_text(json.dumps(self.raw))
+        self.library = str(ROOT / "simulator/build-research/minecraft_sim_training.so")
+        self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4", "--hidden-dim", "8",
+                      "--rollout-steps", "3", "--epochs", "1", "--minibatch-size", "8", "--save-every", "1"]
+
+    def test_named_saves_rolling_opponent_resume_evaluation_and_replay(self):
+        self.raw["snapshots"] = [{"name": "final", "on_completion": True}]
+        self.raw["stages"][0]["snapshots"] = [{"name": "aim-1", "at_updates": 1},
+                                              {"name": "aim-end", "on_completion": True}]
+        self.raw["stages"][1]["snapshots"] = [{"name": "combat-1", "at_updates": 1}]
+        self.raw["evaluations"] = {"held": {"stage": "aim", "every_updates": 1, "episodes": 4, "seed": 17}}
+        self.path.write_text(json.dumps(self.raw))
+        plan = resolve_plan(self.raw, self.directory)
+        self.assertEqual(plan_hash(plan), plan_hash(resolve_plan(plan)))
+        output = self.directory / "run"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(output), "--replay-every", "4"])
+        first = torch.load(output / "latest.pt", weights_only=True)
+        frozen = first["research"]["pool"]["controllers"]["past"]
+        self.assertEqual(frozen["latest_update"], 0)
+        aim_one = torch.load(output / "snapshots/aim-1.pt", weights_only=True)
+        for name, value in first["model"].items():
+            torch.testing.assert_close(aim_one["model"][name], value, rtol=0, atol=0)
+        for path in self.directory.glob("*.json"):
+            path.unlink()
+        for _ in range(3):
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--resume", str(output / "latest.pt"), "--library", self.library,
+                      "--updates", "1", "--output", str(output)])
+        saved = torch.load(output / "latest.pt", weights_only=True)
+        self.assertTrue(saved["research"]["completed"])
+        self.assertEqual(saved["research"]["pool"]["controllers"]["past"]["latest_update"], 4)
+        self.assertEqual({path.stem for path in (output / "snapshots").glob("*.pt")},
+                         {"aim-1", "aim-end", "combat-1", "final"})
+        for name, update, stage, local in (("aim-1", 1, "aim", 1), ("aim-end", 2, "aim", 2),
+                                            ("combat-1", 3, "combat", 1), ("final", 4, "combat", 2)):
+            snapshot = torch.load(output / f"snapshots/{name}.pt", weights_only=True)
+            self.assertEqual(snapshot["update"], update)
+            self.assertEqual(snapshot["metadata"]["experiment"]["stage"], stage)
+            self.assertEqual(snapshot["metadata"]["snapshot"]["stage_updates"], local)
+            self.assertEqual(snapshot["metadata"]["controls"], {"fixed": {"attack": False} if stage == "aim" else {}})
+            CheckpointController(output / f"snapshots/{name}.pt", plan["policy"], 1)
+        for name, value in saved["model"].items():
+            torch.testing.assert_close(saved["research"]["pool"]["controllers"]["past"]["snapshots"][4]["model"][name], value)
+        rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertEqual([row["stage_progress"]["updates"] for row in rows], [1, 2, 1, 2])
+        self.assertTrue(all(row["evaluations"]["held"]["episodes"] == 4 for row in rows))
+        with next((output / "replays").glob("*.jsonl")).open() as source:
+            header = json.loads(source.readline())
+        self.assertEqual(header["training"]["opponent"]["controller"]["snapshot_update"], 0)
+        self.assertEqual(aim_one["metadata"]["controls"], {"fixed": {"attack": False}})
+
+    def test_retained_saves_are_opt_in_and_initialize_seeds_frozen_policy(self):
+        output = self.directory / "source"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(output)])
+        self.assertFalse((output / "snapshots").exists())
+        source = torch.load(output / "latest.pt", weights_only=True)
+        target = self.directory / "initialized"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(target), "--initialize", str(output / "latest.pt")])
+        saved = torch.load(target / "latest.pt", weights_only=True)
+        frozen = saved["research"]["pool"]["controllers"]["past"]["snapshots"][0]
+        for name, value in source["model"].items():
+            torch.testing.assert_close(frozen["model"][name], value, rtol=0, atol=0)
+        self.assertEqual(frozen["fixed"], {"attack": 0})
 
 
 class ResearchChecks(unittest.TestCase):

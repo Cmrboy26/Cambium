@@ -307,13 +307,37 @@ class SubmitTests(unittest.TestCase):
         shutil.copyfile(source, self.script)
         plans = self.root / "simulator/setups/curricula"
         plans.mkdir(parents=True)
+        definitions = {
+            "arenas/test.json": {
+                "format": "minecraft_sim_arena", "version": 1, "minecraft": "26.3", "name": "test-arena",
+                "bounds": {"min": [-3, 0, -3], "size": [7, 4, 7]},
+                "blocks": [{"from": [-3, 0, -3], "to": [3, 0, 3], "block": "minecraft:stone"}],
+            },
+            "environments/test.json": {
+                "format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3", "name": "test-duel",
+                "arena": "../arenas/test.json",
+                "players": {"shared": {"loadout": {"weapons": ["minecraft:iron_sword"]}},
+                            "overrides": [{"position": [-1, 1, 0]}, {"position": [1, 1, 0]}]},
+                "task": {"max_ticks": 100, "rewards": {"doing_damage": 1}},
+            },
+            "policies/test.json": {
+                "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "name": "test-policy",
+                "ticks_per_action": 1, "requires": ["movement", "melee"],
+                "observations": [{"feature": name} for name in
+                                 ("target.distance_fraction", "target.yaw_error", "target.pitch_error")],
+                "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                            {"name": "attack", "values": [False, True]},
+                            {"name": "yaw", "values": [-5, 0, 5]},
+                            {"name": "pitch", "values": [-5, 0, 5]}],
+            },
+        }
+        for relative, definition in definitions.items():
+            path = self.root / "simulator/setups" / relative
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(definition))
         for name, budgets in (("axe-shield-fighting", [1500]),
                               ("shield-axe-curriculum", [100, 200, 200, 1500])):
-            (plans / f"{name}.json").write_text(json.dumps({
-                "format": "minecraft_sim_training_plan", "version": 2,
-                "stages": [{"advance": {"updates": budget}} for budget in budgets],
-                "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
-            }))
+            self.write_plan(plans / f"{name}.json", budgets)
         python = self.root / ".venv-rosie/bin/python"
         python.parent.mkdir(parents=True)
         python.write_text(f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} \"$@\"\n")
@@ -343,8 +367,22 @@ print(f"{12345 + count};test-cluster")
 ''')
         sbatch.chmod(0o700)
 
+    def write_plan(self, path, budgets):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "format": "minecraft_sim_training_plan", "version": 2, "name": path.stem, "seed": 42,
+            "policy": str(self.root / "simulator/setups/policies/test.json"),
+            "environment": str(self.root / "simulator/setups/environments/test.json"),
+            "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
+            "mixtures": {"targets": [{"id": "target", "weight": 1}]},
+            "stages": [{"name": f"stage-{index}", "opponents": "targets", "advance": {"updates": budget}}
+                       for index, budget in enumerate(budgets)],
+            "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
+        }))
+
     def launch(self, answers=None, dry_run=True, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
+                       "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
         arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
         return subprocess.run(arguments, input="\n".join(answers or [""] * 17) + "\n",
@@ -357,9 +395,46 @@ print(f"{12345 + count};test-cluster")
         for expected in ("--partition=dgxh100", "--gres=gpu:h100:1", "MCSIM_CUDA_ARCHITECTURES=90",
                          "SIM_ENVS=8192", "SIM_UPDATES=2000", "SIM_ROLLOUT_STEPS=128",
                          "SIM_HIDDEN_DIM=512", "SIM_EPOCHS=2", "SIM_MINIBATCH_SIZE=16384",
-                         "SIM_LR=0.0003", "Dry run: nothing submitted"):
+                         "SIM_LR=0.0003", "Validated 1 plan(s); 0 failed", "Dry run: nothing submitted"):
             self.assertIn(expected, result.stdout)
         self.assertFalse(self.log.exists())
+
+    def test_invalid_advancement_blocks_preview_and_submission(self):
+        path = self.root / "simulator/setups/curricula/shield-axe-curriculum.json"
+        value = json.loads(path.read_text())
+        value["stages"][0]["advance"] = {"updates": 0}
+        path.write_text(json.dumps(value))
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                result = self.launch([""] * 16 + ["y"], dry_run=dry_run)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("validation failed; nothing submitted", result.stderr)
+                self.assertIn("ERROR", result.stderr)
+                self.assertNotIn("Training settings", result.stdout)
+                self.assertNotIn("sbatch --parsable", result.stdout)
+                self.assertFalse(self.log.exists())
+
+    def test_missing_reference_blocks_submission(self):
+        (self.root / "simulator/setups/policies/test.json").unlink()
+        result = self.launch([""] * 16 + ["y"], dry_run=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("test.json", result.stderr)
+        self.assertIn("validation failed; nothing submitted", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_malformed_json_blocks_submission(self):
+        (self.root / "simulator/setups/curricula/shield-axe-curriculum.json").write_text("{broken")
+        result = self.launch([""] * 16 + ["y"], dry_run=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("validation failed; nothing submitted", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_unselected_invalid_plan_does_not_block_valid_submission(self):
+        (self.root / "simulator/setups/curricula/unselected.json").write_text("{broken")
+        result = self.launch([""] * 16 + ["y"], dry_run=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Validated 1 plan(s); 0 failed", result.stdout)
+        self.assertTrue(self.log.exists())
 
     def test_other_gpu_presets_and_fighting_plan(self):
         for gpu, partition, arch, worlds, rollout in (("v100", "dgx", 70, 2048, 128),
@@ -376,12 +451,7 @@ print(f"{12345 + count};test-cluster")
     def test_nested_plan_learning_rate_sweep_preview(self):
         relative = "simulator/setups/curricula/experiments/comparison.json"
         destination = self.root / relative
-        destination.parent.mkdir(parents=True)
-        destination.write_text(json.dumps({
-            "format": "minecraft_sim_training_plan", "version": 2,
-            "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
-            "stages": [{"advance": {"updates": 300}}, {"advance": {"updates": 1200}}],
-        }))
+        self.write_plan(destination, [300, 1200])
         answers = self.sweep_answers(10, [".0001", ".0003", ".0006"])
         answers[1] = "2"
         answers[2] = "comparison-lr"
@@ -410,7 +480,7 @@ print(f"{12345 + count};test-cluster")
         nested = plans / "v2/aim practice/shield-axe-curriculum.json"
         nested.parent.mkdir(parents=True)
         value = json.loads((first / nested.name).read_text())
-        value["stages"] = [{"advance": {"updates": 25}}]
+        value["stages"] = [{**value["stages"][0], "advance": {"updates": 25}}]
         nested.write_text(json.dumps(value))
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -625,6 +695,11 @@ class DashboardDiscoveryTests(unittest.TestCase):
         self.tools = Path(self.temporary.name)
         script = Path(__file__).resolve().parents[2] / "rosie/dashboard-connect.sh"
         self.discovery = script.read_text().split("<<'REMOTE'\n", 1)[1].split("\nREMOTE\n", 1)[0]
+        self.project = self.tools / "project with spaces"
+        dashboard = self.project / "simulator/training/dashboard.py"
+        dashboard.parent.mkdir(parents=True)
+        dashboard.write_text('"""Test dashboard marker."""\n', encoding="utf-8")
+        self.calls = self.tools / "slurm-calls"
         self.jobs = {
             "77": {"name": "shield-axe-curriculum", "state": "RUNNING", "work_dir": "/project",
                    "command": "/project/rosie/train.sbatch", "node": "test-node"},
@@ -636,6 +711,8 @@ import os
 from pathlib import Path
 import sys
 
+with Path(os.environ["DASHBOARD_TEST_CALLS"]).open("a") as calls:
+    calls.write(Path(sys.argv[0]).name + "\\n")
 jobs = json.loads(os.environ["DASHBOARD_TEST_JOBS"])
 arguments = sys.argv[1:]
 if Path(sys.argv[0]).name == "squeue":
@@ -661,17 +738,48 @@ else:
             executable.write_text(mock)
             executable.chmod(0o700)
 
-    def discover(self, job_id=""):
+    def discover(self, job_id="", project_dir=None, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
-                       "DASHBOARD_TEST_JOBS": json.dumps(self.jobs), "USER": "test-user"}
-        return subprocess.run(["bash", "-s", "--", job_id], input=self.discovery,
+                       "DASHBOARD_TEST_JOBS": json.dumps(self.jobs), "USER": "test-user",
+                       "DASHBOARD_TEST_CALLS": str(self.calls), **settings}
+        return subprocess.run(["bash", "-s", "--", job_id,
+                               str(self.project) if project_dir is None else project_dir], input=self.discovery,
                               env=environment, capture_output=True, text=True, timeout=10)
 
-    def test_custom_names_share_runs_directory(self):
+    def test_default_uses_management_node_without_querying_jobs(self):
         self.jobs["76"] = {**self.jobs["77"], "command": "/other/job.sbatch"}
         result = self.discover()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip().split("\t"), ["77", "test-node", "/project"])
+        self.assertEqual(result.stdout.strip().split("\t"), ["-", "-", str(self.project)])
+        self.assertFalse(self.calls.exists())
+
+    def test_no_jobs_are_required(self):
+        self.jobs.clear()
+        result = self.discover()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t"), ["-", "-", str(self.project)])
+        self.assertFalse(self.calls.exists())
+
+    def test_default_remote_checkout(self):
+        home = self.tools / "home"
+        checkout = home / "minecraftlol/Cambium/gpu-sim-minecraft"
+        checkout.parent.mkdir(parents=True)
+        checkout.symlink_to(self.project, target_is_directory=True)
+        result = self.discover(project_dir="", HOME=str(home))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(result.stdout.strip().split("\t")[-1]).resolve(), self.project)
+
+    def test_home_relative_checkout(self):
+        result = self.discover(project_dir="~/project with spaces", HOME=str(self.tools))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t"), ["-", "-", str(self.project)])
+
+    def test_missing_checkout_reports_override(self):
+        result = self.discover(project_dir=str(self.tools / "missing"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Dashboard not found", result.stderr)
+        self.assertIn("ROSIE_PROJECT_DIR", result.stderr)
+        self.assertFalse(self.calls.exists())
 
     def test_explicit_custom_named_job(self):
         result = self.discover("78")
@@ -686,27 +794,24 @@ else:
     def test_pending_jobs_are_not_selected(self):
         for job in self.jobs.values():
             job["state"] = "PENDING"
-        for job_id in ("", "77"):
-            with self.subTest(job_id=job_id):
-                result = self.discover(job_id)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("running", result.stderr)
+        self.assertEqual(self.discover().returncode, 0)
+        result = self.discover("77")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running", result.stderr)
 
     def test_non_training_job_is_rejected_even_with_default_name(self):
         self.jobs = {"77": {**self.jobs["77"], "name": "cambium-sim", "command": "/other/job.sbatch"}}
-        for job_id in ("", "77"):
-            with self.subTest(job_id=job_id):
-                result = self.discover(job_id)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("rosie/train.sbatch", result.stderr)
+        self.assertEqual(self.discover().returncode, 0)
+        result = self.discover("77")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rosie/train.sbatch", result.stderr)
 
-    def test_different_working_directories_require_job_id(self):
+    def test_other_job_directories_do_not_affect_management_hosting(self):
         self.jobs["78"]["work_dir"] = "/other-project"
         result = self.discover()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("different working directories", result.stderr)
-        self.assertIn("77 /project", result.stderr)
-        self.assertIn("78 /other-project", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t"), ["-", "-", str(self.project)])
+        self.assertFalse(self.calls.exists())
         explicit = self.discover("78")
         self.assertEqual(explicit.returncode, 0, explicit.stderr)
         self.assertIn("/other-project", explicit.stdout)
@@ -759,6 +864,41 @@ class RosieTests(unittest.TestCase):
         self.assertEqual(offline.checkpoint("rosie-123", offline.manifest("rosie-123")).read_bytes(), b"new weights")
         with self.assertRaisesRegex(ValueError, "not cached"):
             offline.replay("rosie-123", manifest)
+
+    def test_named_snapshot_sync_and_persistent_local_library(self):
+        import torch
+        from backend.fast_rl_model import ActorCritic
+        from simulator.training.contract import from_legacy
+        from simulator.training.environment import ROOT, SCHEMA
+
+        environment = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        saved = {"format": "minecraft_sim_ppo", "version": 1, "update": 100,
+                 "metadata": {"schema": SCHEMA, "hidden_dim": 8, "max_ticks": 300,
+                              "players_per_environment": 2, "learner": "both_shared_policy", "environment": environment},
+                 "model": ActorCritic(22, 8, 9).state_dict()}
+        torch.save(saved, self.run / "latest.pt")
+        (self.run / "snapshots").mkdir()
+        torch.save({**saved, "update": 50}, self.run / "snapshots/stage-50.pt")
+        (self.run / "config.json").write_text(json.dumps({"experiment": {"policy": from_legacy(SCHEMA),
+            "stages": [{"name": "practice", "scenario": {"arenas": [{"environment": environment},
+                                                                   {"environment": environment}]}}]}}))
+        manifest = self.rosie.manifest("rosie-123")
+        self.assertEqual(manifest["snapshots"][0]["name"], "stage-50.pt")
+        self.rosie.checkpoint("rosie-123", manifest)
+        self.rosie.sync_snapshots("rosie-123", manifest)
+        library = self.rosie.index_run("rosie-123")
+        self.assertEqual([entry["update"] for entry in library["policies"]], [100, 50])
+        self.assertEqual(len(library["environments"]), 4)
+        self.assertEqual([entry["name"] for entry in library["environments"][2:]],
+                 ["rosie-123 / practice / arena 1", "rosie-123 / practice / arena 2"])
+        library["policies"][0]["name"] = "My reliable fighter"
+        (self.rosie.cache / "library.json").write_text(json.dumps(library))
+        with patch.object(self.rosie, "ssh_command", side_effect=AssertionError("offline library contacted Rosie")):
+            self.assertEqual(self.rosie.index_run("rosie-123")["policies"][0]["name"], "My reliable fighter")
+            self.rosie.sync_snapshots("rosie-123", manifest)
+        for invalid in ("snapshots/../outside.pt", "snapshots/a/b.pt", "snapshots/file.json"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.rosie.fetch("rosie-123", invalid, self.game / "outside", {})
 
     def test_truncated_transfer_does_not_replace_previous_file(self):
         manifest = self.rosie.manifest("rosie-123")
@@ -932,7 +1072,8 @@ class RosieTests(unittest.TestCase):
 
     def test_cli_sync_and_offline_replay(self):
         output = io.StringIO()
-        with patch.object(Rosie, "ssh_command", side_effect=self.local_command), contextlib.redirect_stdout(output):
+        with patch.object(Rosie, "ssh_command", side_effect=self.local_command), \
+            patch.object(Rosie, "index_run"), contextlib.redirect_stdout(output):
             result = main(["sync", "--minecraft-directory", str(self.game), "--run", "rosie-123", "--json"])
         self.assertEqual(result, 0)
         self.assertEqual(json.loads(output.getvalue())["replays"], 1)

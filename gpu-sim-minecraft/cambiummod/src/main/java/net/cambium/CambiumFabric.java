@@ -34,6 +34,8 @@ public class CambiumFabric implements ClientModInitializer {
 	public void onInitializeClient() {
 		SimulationReplay.initialize();
 		RosieLauncher.initialize();
+		DuelHud.initialize();
+		ControlPanel.initialize();
 		KeyMapping toggle = KeyMappingHelper.registerKeyMapping(new KeyMapping(
 				"key.cambiumfabric.toggle_recording", InputConstants.Type.KEYBOARD, InputConstants.KEY_F9,
 				KeyMapping.Category.register(id("recording"))));

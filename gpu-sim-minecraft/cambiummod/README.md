@@ -19,7 +19,19 @@ The helper does not install Fabric/API. Remove differently named older Cambium
 JARs to avoid duplicates, then reopen Minecraft. No particular launcher or instance
 name is required. [Game-folder selection](../scripts/README.md#minecraft-folder).
 
-## Live Policy Duels
+## In-Game Panel
+
+Press **F8** or use `/simmenu` in a private singleplayer world. After the
+[one-time local Rosie setup](../rosie/README.md#local-replays-and-duels), the
+**Rosie** tab lists runs and explicitly syncs their checkpoints, named snapshots
+and environments. **Library** shows local policies and lets you rename them.
+In **Duel**, choose an environment and independently select a policy or scripted
+controller for each fighter, then start. Synced setups run locally while offline.
+**Live** provides pause/resume/reset/stop and join/leave controls. The debug
+sidebar can be toggled there or with `/simduel hud`; it never uses the action bar.
+Selections and aliases persist in the game folder. Existing commands still work.
+
+## Live Policy Commands
 
 Start inference from a trusted checkpoint and leave it running:
 

@@ -1,0 +1,27 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "example-melee",
+  "seed": 42,
+  "policy": "../../policies/example/melee.json",
+  "environment": "../../environments/example/sword-duel.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "fighter": {"type": "scripted", "controller": "basic_melee",
+                "options": {"strafe": true, "sprint": true}}
+  },
+  "mixtures": {
+    "combat": [{"id": "target", "weight": 1}, {"id": "fighter", "weight": 3}]
+  },
+  "stages": [
+    {
+      "name": "melee",
+      "opponents": "combat",
+      "evaluations": {
+        "benchmark": {"every_updates": 10, "episodes": 16, "worlds": 16, "seed": 1729}
+      },
+      "advance": {"updates": 100}
+    }
+  ]
+}

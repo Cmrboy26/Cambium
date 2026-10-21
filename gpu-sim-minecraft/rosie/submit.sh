@@ -115,7 +115,12 @@ if [[ ! -x "$PYTHON" ]]; then
     PYTHON="$(command -v python3 || true)"
 fi
 if [[ -z "$PYTHON" ]]; then
-    printf 'Python 3 is required to read training plan defaults.\n' >&2
+    printf 'Python 3 with the training requirements is required to validate training plans.\n' >&2
+    exit 1
+fi
+printf '\nValidating selected training plan: %s\n' "$PLAN"
+if ! "$PYTHON" -m simulator.training.validate_plans "$PLAN"; then
+    printf 'Selected training plan validation failed; nothing submitted.\n' >&2
     exit 1
 fi
 if ! DEFAULTS="$("$PYTHON" - "$PLAN" <<'PY'

@@ -47,6 +47,8 @@ final class LiveDuel implements AutoCloseable {
 	private final LivePolicy policy;
 	private final int maxTicks;
 	private final String deploymentSummary;
+	private final String[] fighterNames = {"Policy A", "Policy B"};
+	private ReplayTrace.Controls[] lastControls;
 	private CompletableFuture<JsonObject> pending;
 	private String epoch;
 	private int tick;
@@ -69,6 +71,9 @@ final class LiveDuel implements AutoCloseable {
 		this.policy = policy;
 		this.maxTicks = info.get("max_ticks").getAsInt();
 		this.deploymentSummary = DeploymentSummary.describe(info);
+		if (info.has("fighters")) {
+			for (int index = 0; index < 2; index++) fighterNames[index] = info.getAsJsonArray("fighters").get(index).getAsJsonObject().get("name").getAsString();
+		}
 	}
 
 	static void cancelConnection() {
@@ -79,6 +84,8 @@ final class LiveDuel implements AutoCloseable {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
 			var root = ClientCommands.literal("simduel").executes(context -> dispatch(context.getSource().getClient(),
 					(server, viewer) -> tell(viewer, "/simduel arena|world [port], pos1|pos2 [x y z], join [1|2], leave, pause, resume, reset, status, stop")));
+			root.then(ClientCommands.literal("menu").executes(context -> ControlPanel.open(context.getSource().getClient())));
+			root.then(ClientCommands.literal("hud").executes(context -> { DuelHud.toggle(context.getSource().getClient()); return 1; }));
 			for (boolean arena : new boolean[]{true, false}) {
 				root.then(ClientCommands.literal(arena ? "arena" : "world")
 						.executes(context -> connect(context.getSource().getClient(), arena, LivePolicy.DEFAULT_PORT))
@@ -160,6 +167,19 @@ final class LiveDuel implements AutoCloseable {
 
 	static int stop(Minecraft client) {
 		return dispatch(client, (server, viewer) -> control(viewer, "stop"));
+	}
+
+	static int command(Minecraft client, String command) {
+		return dispatch(client, (server, viewer) -> control(viewer, command));
+	}
+
+	static int joinSide(Minecraft client, int slot) {
+		if (slot < 0 || slot > 1) throw new IllegalArgumentException("Invalid fighter side");
+		return dispatch(client, (server, viewer) -> join(viewer, slot));
+	}
+
+	static int markSpawn(Minecraft client, int slot) {
+		return mark(client, slot, null);
 	}
 
 	static int connect(Minecraft client, boolean arena, int port) {
@@ -269,6 +289,7 @@ final class LiveDuel implements AutoCloseable {
 		round++;
 		restartDelay = 0;
 		humanDefeated = false;
+			lastControls = null;
 	}
 
 	private static void join(ServerPlayer viewer, int slot) {
@@ -419,7 +440,19 @@ final class LiveDuel implements AutoCloseable {
 				}
 			}
 		}
-		viewer.sendOverlayMessage(Component.literal(status()));
+		var lines = new ArrayList<String>();
+		lines.add((session.paused ? "Paused" : restartDelay > 0 ? "Resetting" : "Running") + " | Round " + round);
+		lines.add("Tick " + tick + " / " + maxTicks + " | " + (session.buildArena ? "Arena" : "Existing world"));
+		lines.add("Wins " + winsA + " : " + winsB + " | Draws " + draws);
+		for (int index = 0; index < 2; index++) {
+			ServerPlayer fighter = fighters[index];
+			lines.add((index == 0 ? "A: " : "B: ") + fighterNames[index] + (index == humanSlot ? " (you)" : ""));
+			lines.add(String.format(Locale.ROOT, "HP %.1f | Charge %.0f%%", fighter.getHealth(), fighter.getAttackStrengthScale(0.5F) * 100));
+			lines.add("Shield " + (LivePolicy.shieldCooldown(fighter) > 0 ? "disabled " + LivePolicy.shieldCooldown(fighter) : fighter.isUsingItem() ? "raised" : "ready"));
+			if (lastControls != null && index != humanSlot) lines.add("Actions " + SimulationReplay.buttons(lastControls[index]));
+		}
+		lines.add(String.format(Locale.ROOT, "Inference %.0f ms", inferenceMillis));
+		DuelHud.publish("CAMBIUM / LIVE", lines);
 	}
 
 	private float[][] observations() {
@@ -445,6 +478,7 @@ final class LiveDuel implements AutoCloseable {
 	}
 
 	private void step(ReplayTrace.Controls[] controls) {
+		lastControls = controls.clone();
 		for (ReplayPlayer bot : session.actors) bot.prepare(controls[bot.replayIndex]);
 		HitResult[] picks = session.actors.stream().map(ReplayPlayer::pickAttack).toArray(HitResult[]::new);
 		for (int index = 0; index < session.actors.size(); index++) {

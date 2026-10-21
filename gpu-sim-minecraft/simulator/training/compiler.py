@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 
 from simulator.training.contract import CAPABILITIES, RULES, resolve_scenario, validate_contract
 from simulator.training.environment import REWARD_NAMES, MAX_MAX_TICKS
@@ -194,6 +195,23 @@ def _learner(value):
     return result
 
 
+def _snapshots(value, names):
+    if not isinstance(value, list):
+        raise ValueError("Snapshots must be a list of named save rules")
+    for rule in value:
+        fields(rule, ("name", "at_updates", "on_completion"), "snapshot rule")
+        name = _name(rule.get("name"), "Snapshot name")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) or name in names:
+            raise ValueError("Snapshot names must be unique safe filenames using letters, digits, '_' or '-'")
+        names.add(name)
+        if ("at_updates" in rule) == ("on_completion" in rule):
+            raise ValueError("Snapshot needs exactly one of at_updates or on_completion")
+        if "at_updates" in rule:
+            positive(rule["at_updates"], "snapshot at_updates")
+        elif rule["on_completion"] is not True:
+            raise ValueError("Snapshot on_completion must be true")
+
+
 def _opponents(value, base_dir):
     if not isinstance(value, dict) or not value:
         raise ValueError("Plan needs named opponents")
@@ -217,12 +235,16 @@ def _opponents(value, base_dir):
             if type(opponent.get("deterministic", False)) is not bool:
                 raise ValueError("Opponent deterministic must be boolean")
             opponent.update(path=str(path), sha256=digest)
-        elif opponent.get("type") == "self_play":
-            fields(opponent, ("type", "deterministic"), "self-play opponent")
+        elif opponent.get("type") in ("self_play", "frozen_self_play"):
+            allowed = ("type", "deterministic")
+            if opponent["type"] == "frozen_self_play":
+                allowed += ("every_updates",)
+                positive(opponent.get("every_updates"), "frozen self-play interval")
+            fields(opponent, allowed, "self-play opponent")
             if type(opponent.get("deterministic", False)) is not bool:
                 raise ValueError("Opponent deterministic must be boolean")
         else:
-            raise ValueError("Opponent type must be scripted, checkpoint or self_play")
+            raise ValueError("Opponent type must be scripted, checkpoint, self_play or frozen_self_play")
     return result
 
 
@@ -274,7 +296,7 @@ def _resolved_evaluations(value, policy, opponents):
 
 def _resolved(value, base_dir):
     fields(value, ("format", "version", "name", "seed", "policy", "learner", "opponents",
-                   "stages", "evaluations", "scenario"), "resolved experiment")
+                   "stages", "evaluations", "scenario", "snapshots"), "resolved experiment")
     _version(value, "minecraft_sim_experiment", 1, "resolved experiment")
     result = deepcopy(value)
     result["name"] = _name(result.get("name"), "Experiment name")
@@ -288,9 +310,12 @@ def _resolved(value, base_dir):
     if not isinstance(stages, list) or not stages:
         raise ValueError("Plan needs at least one stage")
     names = set()
+    snapshot_names = set()
+    _snapshots(result.get("snapshots", []), snapshot_names)
     suite_names = set(evaluations)
     for index, stage in enumerate(stages):
-        fields(stage, (*RESOLVED_CONDITION_FIELDS, "name", "advance", "evaluations"), "resolved stage")
+        fields(stage, (*RESOLVED_CONDITION_FIELDS, "name", "advance", "evaluations", "snapshots"), "resolved stage")
+        _snapshots(stage.get("snapshots", []), snapshot_names)
         name = _name(stage.get("name"), "Stage name")
         if name in names:
             raise ValueError("Stage names must be unique")
@@ -448,7 +473,7 @@ def resolve_experiment(value, base_dir):
     if value.get("format") == "minecraft_sim_experiment":
         return _resolved(value, base_dir)
     fields(value, ("format", "version", "name", "seed", "policy", "environment", "learner",
-                   "opponents", "mixtures", "stages", "evaluations"), "training plan")
+                   "opponents", "mixtures", "stages", "evaluations", "snapshots"), "training plan")
     _version(value, "minecraft_sim_training_plan", 2, "training plan")
     authoring = _Authoring(base_dir)
     policy, _ = authoring.read(value.get("policy"), base_dir)
@@ -470,14 +495,18 @@ def resolve_experiment(value, base_dir):
         "seed": value.get("seed", 1), "policy": policy, "learner": _learner(value.get("learner", {})),
         "opponents": opponents, "stages": [], "evaluations": {},
     }
+    if "snapshots" in value:
+        result["snapshots"] = deepcopy(value["snapshots"])
     named_stages = {}
     for stage in stages:
-        fields(stage, (*CONDITION_FIELDS, "name", "advance", "evaluations"), "stage")
+        fields(stage, (*CONDITION_FIELDS, "name", "advance", "evaluations", "snapshots"), "stage")
         name = _name(stage.get("name"), "Stage name")
         if name in named_stages:
             raise ValueError("Stage names must be unique")
         compiled = authoring.condition(stage, default, mixtures, policy, opponents)
         compiled.update(name=name, advance=deepcopy(stage.get("advance")))
+        if "snapshots" in stage:
+            compiled["snapshots"] = deepcopy(stage["snapshots"])
         named_stages[name] = compiled
         result["stages"].append(compiled)
     result["evaluations"] = authoring.evaluations(value.get("evaluations", {}), default, mixtures,
