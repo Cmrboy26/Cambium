@@ -509,6 +509,10 @@ for (const [id, direction] of [["replay-back", -1], ["replay-next", 1]]) {
 }
 timeline.addEventListener("input", () => { setPlaying(false); showTick(Number(timeline.value)); });
 document.addEventListener("visibilitychange", () => { previousTime = undefined; });
+document.addEventListener("dashboard-page", event => {
+    if (event.detail.page !== "replays") setPlaying(false);
+    else viewer?.resize();
+});
 document.addEventListener("arena-config", (event) => syncRun(event.detail.scenario, event.detail.runId));
 setInterval(() => { if (document.getElementById("live").checked && !document.hidden) refreshReplays(); }, 15000);
 syncRun(host.scenario, host.runId);

@@ -20,7 +20,7 @@ from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions
-from simulator.training.research import OpponentPool, SampledWorlds, collect, evaluate
+from simulator.training.research import EpisodeMetrics, OpponentPool, SampledWorlds, collect, evaluate
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
 from simulator.training.timing import CollectionTimer
@@ -32,6 +32,60 @@ def short_plan():
     for stage in value["stages"]:
         stage["advance"] = {"updates": 2}
     return value
+
+
+class EpisodeMetricChecks(unittest.TestCase):
+    def test_rollout_aggregates_include_every_completion_and_span_boundaries(self):
+        metrics = EpisodeMetrics(1, window=2)
+        metrics.step(np.array([10.]), np.array([False]), [], [])
+        metrics.begin_rollout()
+        for outcome, opponent in (("win", "sword"), ("loss", "sword"), ("timeout", "axe"),
+                                  ("win", "axe"), ("draw", "sword")):
+            metrics.step(np.array([2.]), np.array([True]), [outcome], [opponent])
+        result = metrics.rollout_snapshot()
+        self.assertEqual(metrics.snapshot()["training_episodes"], 2)
+        self.assertEqual(result["training_episodes"], 5)
+        self.assertEqual(result["training_return"], 4)
+        self.assertEqual(result["training_length"], 1.2)
+        self.assertEqual(result["training_win_rate"], .4)
+        self.assertEqual(result["training_opponents"]["sword"]["training_episodes"], 3)
+        self.assertEqual(result["training_opponents"]["axe"]["training_win_rate"], .5)
+        metrics.begin_rollout()
+        self.assertEqual(metrics.rollout_snapshot()["training_episodes"], 0)
+        self.assertNotIn("training_return", metrics.rollout_snapshot())
+        self.assertEqual(metrics.snapshot()["training_episodes"], 2)
+
+    def test_complete_episodes_span_rollouts_and_track_opponents(self):
+        metrics = EpisodeMetrics(2)
+        metrics.step(np.array([1., 10.]), np.array([False, False]), [], [])
+        self.assertEqual(metrics.snapshot()["training_episodes"], 0)
+        self.assertNotIn("training_return", metrics.snapshot())
+        metrics.step(np.array([2., 20.]), np.array([True, False]), ["win"], ["sword"])
+        self.assertEqual(metrics.snapshot()["training_return"], 3.)
+        metrics.step(np.array([4., 30.]), np.array([True, True]), ["timeout", "loss"], ["axe", "sword"])
+        result = metrics.snapshot()
+        self.assertEqual(result["training_episodes"], 3)
+        self.assertAlmostEqual(result["training_return"], 67 / 3)
+        self.assertEqual(result["training_length"], 2)
+        self.assertEqual(result["training_win_length"], 2)
+        self.assertEqual(result["training_loss_length"], 3)
+        self.assertEqual(result["training_opponents"]["sword"]["training_return"], 31.5)
+        self.assertEqual(result["training_opponents"]["axe"]["training_timeout_rate"], 1)
+        np.testing.assert_array_equal(metrics.returns, [0, 0])
+
+    def test_window_resume_and_stage_reset(self):
+        metrics = EpisodeMetrics(1, window=2)
+        for outcome in ("loss", "win", "draw"):
+            metrics.step(np.array([2.]), np.array([True]), [outcome], ["past"])
+        self.assertEqual(metrics.snapshot()["training_loss_rate"], 0)
+        self.assertEqual(metrics.snapshot()["training_draw_rate"], .5)
+        resumed = EpisodeMetrics(1, list(metrics.history), window=2)
+        self.assertEqual(resumed.snapshot(), metrics.snapshot())
+        metrics.step(np.array([99.]), np.array([False]), [], [])
+        metrics.reset()
+        self.assertEqual(metrics.snapshot()["training_episodes"], 0)
+        np.testing.assert_array_equal(metrics.returns, [0])
+        np.testing.assert_array_equal(metrics.lengths, [0])
 
 
 class PlanChecks(unittest.TestCase):
@@ -408,6 +462,56 @@ class SnapshotChecks(unittest.TestCase):
                   "--output", str(output), "--profile-every", "3"])
         rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
         self.assertIn("collection_profile", rows[-1])
+
+    def test_episode_metrics_collection_resume_and_stage_boundaries(self):
+        output = self.directory / "episode-metrics"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(output)])
+        first = json.loads((output / "metrics.jsonl").read_text())
+        self.assertEqual(first["training_episodes"], 4)
+        self.assertEqual(first["training_timeout_rate"], 1)
+        self.assertEqual(first["training_length"], 2)
+        self.assertEqual(first["training_return"], -1)
+        saved = torch.load(output / "latest.pt", weights_only=True)
+        self.assertEqual(len(saved["research"]["episode_history"]), 4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library,
+                  "--updates", "2", "--output", str(output)])
+        rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertEqual([row["training_episodes"] for row in rows], [4, 8, 4])
+        self.assertEqual([row["training_length"] for row in rows], [2, 2, 2])
+        self.assertEqual(rows[-1]["training_opponents"]["past"]["training_timeout_rate"], 1)
+
+    def test_native_losses_match_legacy_terminal_state_with_zero_rewards(self):
+        plan = resolve_plan(self.raw, self.directory)
+        worlds = SampledWorlds(plan["scenario"], plan["policy"], 4, "cpu", self.library, 2, 42)
+        self.addCleanup(worlds.close)
+        environment = worlds.groups[0][1]
+        players = [deepcopy(environment.scenario["players"]) for _ in range(4)]
+        for world, slot in ((1, 0), (2, 1), (3, 0), (3, 1)):
+            players[world][slot].update(position=[5.5, 1, -2 if slot == 0 else 2], velocity=[20, 0, 0])
+        environment.reset_players(players, np.ones(4, dtype=bool))
+        environment.set_rewards({})
+        environment.step(np.zeros((4, 2, environment.action_count), dtype=np.int64))
+        native = environment.losses(np.ones(4, dtype=bool))
+        with patch.object(environment.native, "mcsim_losses", None):
+            fallback = environment.losses(np.ones(4, dtype=bool))
+        np.testing.assert_array_equal(native, [[False, False], [True, False], [False, True], [True, True]])
+        np.testing.assert_array_equal(native, fallback)
+        environment.set_max_ticks(1)
+        observations = environment.reset_players(players, np.ones(4, dtype=bool))
+        pool = OpponentPool({"past": {"type": "scripted", "controller": "stationary_target"}},
+                    plan["policy"], 4, "cpu", 42)
+        pool.configure(plan["stages"][0]["opponents"])
+        pool.reset(np.ones(4, dtype=bool))
+        pool.learner_slots.fill(0)
+        model = ActorCritic(worlds.observation_dim, 8,
+            action_sizes=dict(zip(worlds.action_names, plan["policy"]["action_sizes"])))
+        with patch.object(worlds, "episode", side_effect=AssertionError("Collection must not serialize replays")):
+            rollout, _, endings, timeouts = collect(model, worlds, pool, observations, 1, torch.device("cpu"), {})
+        self.assertEqual((endings, timeouts), (3, 1))
+        for outcome in ("win", "loss", "draw", "timeout"):
+            self.assertEqual(rollout["episode_metrics"][f"training_{outcome}_rate"], .25)
 
     def test_collection_profile_cleanup_on_error(self):
         plan = resolve_plan(self.raw, self.directory)

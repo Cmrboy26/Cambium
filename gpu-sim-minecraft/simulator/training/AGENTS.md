@@ -101,6 +101,78 @@ and never mix reward scales or pretend updates are equal experience budgets.
 Matplotlib uses the Agg canvas directly, without a display/server, and atomically
 replaces the PNG. Rendering is separate from training and can run at any time.
 
+### Performance Metrics
+
+[metrics.py](metrics.py) owns chart IDs, labels, units, source fields and scales.
+The dashboard receives this catalog with each run; the PNG CLI uses the same
+catalog for `--metric`. Rates are logged as fractions and displayed as percentages
+exactly once. `--opponent ID` selects a training opponent; `--suite NAME` selects
+an evaluation. Training metrics default to `--aggregation rollout`; `recent`
+selects the rolling 1,000-episode window. All metrics support
+`--x elapsed_seconds|samples|update`:
+
+```sh
+python -B -m simulator.training.plot_sweep simulator/training/sweeps/<name>/sweep.json --metric training_win_rate --opponent past --x samples --output training-wins.png
+python -B -m simulator.training.plot_sweep simulator/training/sweeps/<name>/sweep.json --metric training_return --x elapsed_seconds --output training-returns.png
+python -B -m simulator.training.plot_sweep simulator/training/sweeps/<name>/sweep.json --metric training_win_rate --aggregation recent --output recent-training-wins.png
+```
+
+The dashboard's Benchmark / Training toggle switches performance panels, headline
+scores and suite/opponent controls without changing axes or hiding PPO/runtime
+diagnostics. Training always shows full-rollout summaries; bounded recent history
+remains available internally and through the PNG CLI, not a dashboard selector.
+Opponent details remain collapsed by default and live refresh preserves the mode.
+The smoothing slider maps positions 0..1000 to rounded `500 ** (position / 1000)`
+EMA spans: 1 is Off, the midpoint is 22, and the maximum is 500. It updates charts
+on input, displays the actual span, and exposes that value through aria-valuetext.
+Chart windows offer Latest, Range, Stage and All modes. Latest uses an exponential
+slider from one to all currently recorded rows, retaining the chosen row count as
+new updates arrive. All follows the entire growing run. Range has paired sliders
+and exact inclusive PPO-update inputs; its endpoints stay fixed on live refresh.
+Stage lists configured and recorded stages, defaults to the latest recorded stage
+on first selection, and follows new rows within the selected stage. Stage/range
+selections reset when changing runs; mode and smoothing remain selected. Every
+performance/diagnostic chart shares the chosen window on any horizontal axis.
+Benchmark filtering uses the evaluated snapshot's update/stage, not the row
+carrying a cached result. EMA retains earlier context within the same stage before
+cropping; the window never changes its span or bridges stage boundaries. Headline
+cards and curriculum milestone panels remain live run summaries, not windowed.
+
+`training_rollout` contains a summary of every learner episode completed during
+that rollout, plus `training_opponents` summaries with their own episode counts.
+Counters and sums reset at collection entry; partial return/tick totals persist
+across rollouts. Episodes that started earlier contribute their entire return and
+length when completed. No unfinished episode enters a mean. Existing root-level
+`training_*` fields retain their rolling 1,000-completion semantics for compatibility;
+the two aggregations are never silently substituted. Four recorded outcome rates
+sum to one. Both players losing is a draw; timeout is a nonterminal time-limit ending.
+Winning/losing lengths are absent when that outcome has no completions.
+
+Completed history is checkpointed. Resume starts fresh worlds and fresh unfinished
+totals, while retaining completed history; stage changes clear both. Native
+`mcsim_losses` reads loss flags independently of reward weights. Older libraries
+fall back to terminal snapshots (correct but slower); rebuild the library and
+restart/resume trainers for the fast path and new metric logging. Full-rollout
+bookkeeping adds counters/sums and a small JSON block, not extra simulation,
+inference or evaluation calls; H100 overhead has not been measured.
+
+RunStore recovers aggregate historical outcomes in memory only for opponent-pool
+research logs with matching stage identity, known finite nonzero win/death weights,
+integer reward-derived event counts and counts that reconcile with terminal endings.
+Existing recorded rollout data always wins. `source: recorded|recovered_rewards`
+distinguishes provenance. Recovered death events cannot separate losses from double-loss
+draws, so only `training_loss_or_draw_rate` is exposed alongside win/timeout rates.
+Original files are never rewritten. Historical episode returns, lengths and opponent
+splits remain unavailable, not fabricated from rollout reward or cached benchmarks.
+
+Benchmark curves deduplicate cached snapshot results and show their actual update,
+episode count and freshness. Moving self-play references and saturated benchmarks
+are identified in the dashboard. Training reward is reward per learner tick, not
+episode return or a universal strength score. Reward breakdowns are weighted reward
+contributions, not raw HP damage; raw combat counters remain a separate extension.
+Stage markers identify changed tasks; training lines/EMA do not bridge boundaries.
+Untimed historical points are omitted on elapsed axes, never placed at zero.
+
 ## Research Training Plans
 
 Pass `--plan simulator/setups/curricula/shield-axe-curriculum.json` (PowerShell
@@ -687,9 +759,22 @@ Launcher `./scripts/serve-dashboard.ps1`; direct
 `http://127.0.0.1:8767`, Python 3.10+ only, no torch/native imports/legacy backend.
 Bundled Chart.js 4.5.1/MIT supports offline use.
 
-- List live/saved runs under default runs root in descending natural name order
-  (newest timestamp/job names first); refresh every three seconds. Training may
-  start before/after server, with no trainer flags.
+- The top run picker searches directory/display/experiment names, notes,
+  environment/policy identity, seed, width and learning rate (including scientific
+  notation). Entries show recorded experiment names, distinguishing settings,
+  directory names and last-update dates. Sort by last activity (default) or
+  display name; dates are file modification times, not inferred start times.
+  Configuration summaries are cached by modification time/size; listing runs
+  never scans full metric histories. Malformed metadata is flagged per entry.
+  Refresh every three seconds without changing the selected run, search,
+  keyboard focus, scroll position or unsaved label edits.
+- Display names and notes are editable in Configuration or through the top
+  Edit label button. They persist in localStorage for this browser/origin,
+  keyed by the full run path, not in training artifacts. Empty fields restore
+  recorded names. Storage/read failures are shown explicitly. Search filters
+  the choices without silently changing the active run; arrow keys browse,
+  Enter selects and Escape closes the picker. Training may start before/after
+  the server, with no trainer flags.
 - `--runs-dir` selects a parent; repeat `--run` for individual extra directories.
   Use `--port` if occupied; Ctrl+C stops server.
 - The overview leads with experiment identity and a centered curriculum-stage
@@ -720,9 +805,13 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   measurements cannot then be distinguished). Budget metrics use recorded
   stage progress. These raw charts are independent of global window/EMA controls;
   browsing/refresh preserves selection, reuses live charts and releases old ones.
-- Section links lead to training results, curriculum/evaluation, world/replays,
-  run configuration and recent updates. Charts group outcomes, optimization
-  and runtime. Stage details/timeline and full configuration start collapsed;
+- The left sidebar switches the main content between Overview (including
+  curriculum/evaluations), Results (including recent updates), Replays and
+  Configuration. The run picker stays above the workspace. Hash links and
+  browser back/forward select the matching view; switching views resizes charts
+  and stops hidden replay playback without losing chart/window/stage selections.
+  Narrow screens use a compact four-item navigation row. Charts group outcomes,
+  optimization and runtime. Stage details/timeline and full configuration start collapsed;
   held-out evaluation results remain visible. The run path, loadouts, resolved
   reward weights and experiment JSON live in the configuration section.
 - Resolved experiments show stage budgets, environment/arena identity, opponent
@@ -735,6 +824,11 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   value/derivative mode. Derivatives are differences of EMA-smoothed values
   divided by update-number differences, computed before windowing; missing
   values break the series. Reward derivatives retain signed stacking.
+  Multi-series legends retain normal left-click toggles. Right-clicking an entry
+  hides every other series; right-clicking that sole visible entry shows all.
+  Right-clicking a different entry switches the solo. This also covers stacked
+  rewards and milestone value/threshold legends; context menus outside legend
+  hitboxes and single-series charts are unchanged. Visibility survives refresh.
   Window/EMA/pause controls are local. Counts use all updates, not chart window.
   Connected means readable, not training.
 - Time estimates use the last 20 timed updates' mean `iteration_seconds`, falling

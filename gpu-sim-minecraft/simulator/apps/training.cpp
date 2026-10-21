@@ -634,6 +634,16 @@ MCSIM_EXPORT int mcsim_step_reward_totals(void* handle, const std::uint8_t* mask
         std::copy(selected.begin(), selected.end(), totals);
     });
 }
+MCSIM_EXPORT int mcsim_losses(void* handle, std::uint8_t* losses) {
+    return protect([&] {
+        if (!handle || !losses) throw std::invalid_argument("Null losses argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        for (std::size_t index = 0; index < batch.players.size(); ++index) {
+            const auto& state = batch.players[index];
+            losses[index] = !state.alive() || batch.outside(state);
+        }
+    });
+}
 MCSIM_EXPORT int mcsim_shaping_reward_totals(void* handle, double* totals) {
     return protect([&] {
         if (!handle || !totals) throw std::invalid_argument("Null shaping totals argument");

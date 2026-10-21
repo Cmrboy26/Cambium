@@ -18,12 +18,37 @@
     </header>
     <main>
         <section class="toolbar" aria-label="Run selection">
-            <div class="run-field"><label for="run">Training run</label><select id="run"><option value="">Loading runs...</option></select></div>
+            <div class="run-field">
+                <span class="field-label">Training run</span>
+                <input id="run" type="hidden" value="">
+                <details id="run-picker" class="run-picker">
+                    <summary id="run-picker-toggle"><span><strong id="run-current">Loading runs...</strong><small id="run-current-meta"></small></span><i data-lucide="chevrons-up-down" aria-hidden="true"></i></summary>
+                    <div class="run-picker-panel">
+                        <div class="run-picker-tools">
+                            <label class="run-search-label" for="run-search">Search runs</label>
+                            <input id="run-search" type="search" placeholder="Name, experiment, seed, width, learning rate..." autocomplete="off" aria-controls="run-options">
+                            <label class="chart-select" for="run-sort">Sort by<select id="run-sort"><option value="modified">Last updated</option><option value="name">Name</option></select></label>
+                        </div>
+                        <p id="run-count" class="section-note" role="status">Loading runs...</p>
+                        <div id="run-options" class="run-options" role="group" aria-label="Matching training runs"></div>
+                    </div>
+                </details>
+            </div>
+            <button id="edit-run" type="button" disabled title="Edit display name and notes">Edit label</button>
             <label class="live-control"><input type="checkbox" id="live" checked> Live updates</label>
             <button id="refresh" type="button" aria-label="Refresh training run" title="Refresh training run"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
         </section>
         <p id="notice" class="notice" role="status" hidden></p>
-        <section id="overview" class="run-overview" aria-labelledby="run-title">
+        <div class="dashboard-layout">
+        <nav class="section-nav" aria-label="Dashboard sections">
+            <span class="sidebar-label">Workspace</span>
+            <a href="#overview" data-view="overview" aria-current="page"><i data-lucide="layout-dashboard" aria-hidden="true"></i>Overview</a>
+            <a href="#results" data-view="results"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>Results</a>
+            <a href="#world" data-view="replays"><i data-lucide="clapperboard" aria-hidden="true"></i>Replays</a>
+            <a href="#run-settings" data-view="configuration"><i data-lucide="settings-2" aria-hidden="true"></i>Configuration</a>
+        </nav>
+        <div class="dashboard-content">
+        <section id="overview" class="run-overview" data-page="overview" aria-labelledby="run-title">
             <div class="section-title"><h2 id="run-title">Training overview</h2><a href="#run-settings">Run configuration <i data-lucide="arrow-down" aria-hidden="true"></i></a></div>
             <section id="milestone-browser" class="milestone-browser" aria-labelledby="milestone-current" hidden>
                 <div class="milestone-heading">
@@ -59,13 +84,13 @@
             <div id="legacy-stage-status" class="run-stage"><p id="run-stage-status" role="status">Waiting for run data</p><span id="run-budget"></span></div>
             <dl id="run-identity" class="run-identity"></dl>
             <dl id="run-context" class="run-context" aria-label="Latest rollout conditions"></dl>
-            <section class="summary" aria-label="Latest metrics">
+            <section class="summary performance-summary" aria-label="Latest metrics">
                 <div><h3>PPO update</h3><strong id="stat-update">--</strong><span id="stat-total">0 updates recorded</span></div>
                 <div><h3>Player samples</h3><strong id="stat-samples">--</strong><span>Cumulative</span></div>
-                <div><h3>Mean reward / step</h3><strong id="stat-reward">--</strong><span>Latest rollout</span></div>
-                <div><h3>Transitions / second</h3><strong id="stat-throughput">--</strong><span>Latest update</span></div>
-                <div><h3>Completed rounds</h3><strong id="stat-rounds">--</strong><span>Cumulative</span></div>
-                <div><h3>Timeouts</h3><strong id="stat-timeouts">--</strong><span>Across recorded updates</span></div>
+                <div id="benchmark-summary-win"><h3>Benchmark win rate</h3><strong id="stat-benchmark">--</strong><span id="stat-benchmark-detail">Awaiting evaluation</span></div>
+                <div id="benchmark-summary-return"><h3>Benchmark episode return</h3><strong id="stat-benchmark-return">--</strong><span id="stat-benchmark-age">Awaiting evaluation</span></div>
+                <div id="training-summary-win" hidden><h3>Training win rate</h3><strong id="stat-training-win">--</strong><span id="stat-training-detail">Episode metrics not recorded</span></div>
+                <div id="training-summary-return" hidden><h3>Training episode return</h3><strong id="stat-training-return">--</strong><span id="stat-training-opponent">All opponents</span></div>
             </section>
             <section class="summary timing" aria-label="Training time estimates">
                 <div><h3>Estimated time remaining</h3><strong id="stat-remaining">--</strong><span id="stat-remaining-detail">Waiting for updates</span></div>
@@ -73,29 +98,66 @@
                 <div><h3>Average update duration</h3><strong id="stat-average">--</strong><span>Last 20 timed updates</span></div>
                 <div><h3>Training target</h3><strong id="stat-target">--</strong><span>Current session</span></div>
             </section>
+            <p class="section-links"><a id="nav-curriculum" href="#curriculum" hidden>Curriculum &amp; evaluation</a></p>
         </section>
-        <nav class="section-nav" aria-label="Dashboard sections">
-            <a href="#results">Training results</a><a id="nav-curriculum" href="#curriculum" hidden>Curriculum &amp; evaluation</a><a href="#world">World &amp; recordings</a><a href="#run-settings">Configuration</a><a href="#recent-updates">Recent updates</a>
-        </nav>
-        <section id="results" class="dashboard-section" aria-labelledby="results-title">
-            <div class="section-title"><h2 id="results-title">Training results</h2></div>
-            <div class="view-controls" aria-label="Chart settings">
-                <fieldset><legend>Update window</legend><div class="segments">
-                    <label><input type="radio" name="window" value="50"><span>50</span></label>
-                    <label><input type="radio" name="window" value="100" checked><span>100</span></label>
-                    <label><input type="radio" name="window" value="500"><span>500</span></label>
-                    <label><input type="radio" name="window" value="0"><span>All</span></label>
+        <section id="results" class="dashboard-section" data-page="results" aria-labelledby="results-title" hidden>
+            <div class="section-title"><h2 id="results-title">Performance</h2>
+                <fieldset><legend>View</legend><div class="segments">
+                    <label><input type="radio" name="performance-mode" value="benchmark" aria-controls="benchmark-performance" checked><span>Benchmark</span></label>
+                    <label><input type="radio" name="performance-mode" value="training" aria-controls="training-performance"><span>Training</span></label>
                 </div></fieldset>
-                <div class="smoothing"><label for="smooth">Smoothing</label><select id="smooth"><option value="1">Off</option><option value="5">EMA 5</option><option value="10">EMA 10</option><option value="20">EMA 20</option></select></div>
+            </div>
+            <div class="view-controls" aria-label="Chart settings">
+                <label class="chart-select">Horizontal axis<select id="chart-axis"><option value="elapsed_seconds">Elapsed time</option><option value="samples">Learner transitions</option><option value="update">PPO update</option></select></label>
+                <label id="benchmark-suite-control" class="chart-select">Benchmark suite<select id="benchmark-suite"><option value="">No evaluations yet</option></select></label>
+                <label id="training-opponent-control" class="chart-select" hidden>Training opponent<select id="training-opponent"><option value="">All opponents</option></select></label>
+                <div class="smoothing"><label for="smooth">Smoothing</label><input id="smooth" type="range" min="0" max="1000" step="1" value="0" aria-valuetext="Off"><output id="smooth-value" for="smooth">Off</output></div>
+            </div>
+            <div class="window-controls" aria-label="Chart window">
+                <fieldset><legend>Window</legend><div class="segments">
+                    <label><input type="radio" name="window-mode" value="latest" checked><span>Latest</span></label>
+                    <label><input type="radio" name="window-mode" value="range"><span>Range</span></label>
+                    <label><input type="radio" name="window-mode" value="stage"><span>Stage</span></label>
+                    <label><input type="radio" name="window-mode" value="all"><span>All</span></label>
+                </div></fieldset>
+                <div id="window-latest-control" class="window-slider"><label for="window-size">Updates</label><input id="window-size" type="range" min="0" max="1000" step="1" value="0" aria-valuetext="0 updates" disabled><output id="window-size-value" for="window-size">0 updates</output></div>
+                <div id="window-range-control" class="window-range" hidden>
+                    <div class="window-range-bound"><label for="window-start">Start update</label><input id="window-start-slider" type="range" min="0" max="0" step="1" value="0" aria-label="Start update" disabled><input id="window-start" type="number" min="0" max="0" step="1" value="0" inputmode="numeric" disabled></div>
+                    <div class="window-range-bound"><label for="window-end">End update</label><input id="window-end-slider" type="range" min="0" max="0" step="1" value="0" aria-label="End update" disabled><input id="window-end" type="number" min="0" max="0" step="1" value="0" inputmode="numeric" disabled></div>
+                </div>
+                <label id="window-stage-control" class="chart-select" hidden>Curriculum stage<select id="window-stage" disabled><option value="">No curriculum stages</option></select></label>
                 <span id="window-info">No updates</span>
             </div>
+            <p class="section-note legend-help">Legends: click to toggle a series; right-click to show only that series. Right-click it again to show all. <a href="#recent-updates">Recent updates</a></p>
             <p id="empty" class="empty" hidden>No training runs found.</p>
-            <section class="chart-group" aria-labelledby="outcomes-title">
-                <h3 id="outcomes-title">Rewards &amp; duel outcomes</h3>
+            <section id="benchmark-performance" class="chart-group" aria-labelledby="performance-title">
+                <h3 id="performance-title">Benchmark performance</h3>
+                <p id="benchmark-status" class="section-note" role="status">Awaiting evaluation</p>
                 <div class="charts">
-                    <article class="chart"><h2>Mean reward / step <span>Per rollout</span></h2><div class="plot"><canvas id="reward-chart" role="img" aria-label="Mean reward per player step by PPO update"></canvas></div></article>
+                    <article class="chart"><h2>Benchmark win rate <span>Completed evaluation episodes</span></h2><div class="plot"><canvas id="benchmark-win-chart" role="img" aria-label="Benchmark win rate"></canvas></div></article>
+                    <article class="chart"><h2>Benchmark episode return <span>Reward per complete fight</span></h2><div class="plot"><canvas id="benchmark-return-chart" role="img" aria-label="Benchmark episode return"></canvas></div></article>
+                </div>
+            </section>
+            <section id="training-performance" class="chart-group" aria-labelledby="behavior-title" hidden>
+                <h3 id="behavior-title">Training behavior</h3>
+                <p id="episode-status" class="section-note" role="status">Episode metrics not recorded</p>
+                <div class="charts">
+                    <article class="chart"><h2>Training outcomes <span id="training-outcomes-window">This rollout</span></h2><div class="plot"><canvas id="training-outcomes-chart" role="img" aria-label="Training win, loss, timeout and draw rates"></canvas></div></article>
+                    <article class="chart"><h2>Training episode return <span id="training-return-window">This rollout</span></h2><div class="plot"><canvas id="training-return-chart" role="img" aria-label="Training episode return"></canvas></div></article>
+                    <article class="chart"><h2>Fight length <span>Simulation ticks</span></h2><div class="plot"><canvas id="training-length-chart" role="img" aria-label="Mean fight length and winning and losing fight lengths"></canvas></div></article>
+                    <article class="chart"><h2 id="explorer-title">Metric history</h2><label class="chart-select">Metric<select id="metric-select"></select></label><div class="plot"><canvas id="metric-chart" role="img" aria-label="Selected metric history"></canvas></div></article>
+                </div>
+                <details id="training-opponent-details" class="opponent-details">
+                    <summary>Per-opponent episode statistics</summary>
+                    <div class="table-scroll"><table><thead><tr><th>Opponent</th><th>Episodes</th><th>Win</th><th>Loss</th><th>Timeout</th><th>Draw</th><th>Return / episode</th><th>Ticks / episode</th></tr></thead><tbody id="training-opponents"></tbody></table></div>
+                </details>
+            </section>
+            <section id="reward-diagnostics" class="chart-group" aria-labelledby="outcomes-title" hidden>
+                <h3 id="outcomes-title">Training reward diagnostics</h3>
+                <div class="charts">
+                    <article class="chart"><h2>Training reward per tick <span>Latest: <strong id="stat-reward">--</strong></span></h2><div class="plot"><canvas id="reward-chart" role="img" aria-label="Mean training reward per learner tick"></canvas></div></article>
                     <article class="chart"><h2>Total reward <span>Per update</span></h2><div class="plot"><canvas id="total-reward-chart" role="img" aria-label="Total player reward by PPO update"></canvas></div></article>
-                    <article class="chart reward-breakdown"><h2>Reward breakdown <span>Per update</span></h2><div class="plot"><canvas id="reward-types-chart" role="img" aria-label="Reward contributions by type and PPO update"></canvas><p id="reward-types-empty" class="plot-empty">No per-type reward data recorded.</p></div></article>
+                    <article class="chart reward-breakdown"><h2>Reward breakdown <span>Weighted reward contributions, not raw damage</span></h2><div class="plot"><canvas id="reward-types-chart" role="img" aria-label="Weighted reward contributions by type"></canvas><p id="reward-types-empty" class="plot-empty">No per-type reward data recorded.</p></div></article>
                     <article class="chart reward-breakdown"><h2>Duel endings <span>Per update</span></h2><div class="plot"><canvas id="duels-chart" role="img" aria-label="Terminated duels and timeouts by PPO update"></canvas></div></article>
                 </div>
             </section>
@@ -109,13 +171,14 @@
             </section>
             <section class="chart-group" aria-labelledby="runtime-title">
                 <h3 id="runtime-title">Runtime &amp; throughput</h3>
+                <dl class="runtime-summary"><div><dt>Latest transitions / second</dt><dd id="stat-throughput">--</dd></div><div><dt>Completed rounds</dt><dd id="stat-rounds">--</dd></div><div><dt>Recorded timeouts</dt><dd id="stat-timeouts">--</dd></div></dl>
                 <div class="charts">
                     <article class="chart"><h2>Throughput <span>Player transitions / second</span></h2><div class="plot"><canvas id="throughput-chart" role="img" aria-label="Player transitions per second by PPO update"></canvas></div></article>
                     <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Collection, optimization, evaluation and replay seconds by PPO update"></canvas></div></article>
                 </div>
             </section>
         </section>
-        <section id="curriculum" class="dashboard-section curriculum" aria-labelledby="curriculum-section-title" hidden>
+        <section id="curriculum" class="dashboard-section curriculum" data-page="overview" data-available="false" aria-labelledby="curriculum-section-title" hidden>
             <div class="section-title"><h2 id="curriculum-section-title">Curriculum &amp; evaluation</h2></div>
             <h3 id="curriculum-title">Experiment stages</h3>
             <p id="curriculum-status" role="status"></p>
@@ -132,7 +195,7 @@
                 <div class="table-scroll"><table><thead><tr><th>Updates</th><th>Stage</th><th>Last budget progress</th><th>Boundary / completion</th></tr></thead><tbody id="stage-timeline"></tbody></table></div>
             </details>
         </section>
-        <section id="world" class="dashboard-section configuration" aria-labelledby="world-title">
+        <section id="world" class="dashboard-section configuration" data-page="replays" aria-labelledby="world-title" hidden>
             <div class="section-title"><h2 id="world-title">World &amp; recordings</h2><label class="live-control"><input type="checkbox" id="show-world" aria-controls="world-view" checked> Show world view</label></div>
             <h3 id="environment-name">Environment</h3><dl id="environment"></dl>
             <div id="world-view" class="duel-preview" aria-label="Environment and player equipment">
@@ -179,16 +242,25 @@
                 </section>
             </div>
         </section>
-        <section id="run-settings" class="dashboard-section configuration" aria-labelledby="settings-title">
+        <section id="run-settings" class="dashboard-section configuration" data-page="configuration" aria-labelledby="settings-title" hidden>
             <div class="section-title"><h2 id="settings-title">Run configuration</h2></div>
             <p id="run-path" class="run-path"></p>
+            <form id="run-label-form" class="run-label-form">
+                <h3>Display name &amp; notes</h3>
+                <p id="run-label-help" class="section-note">Saved only in this browser. Training files and directory names are never changed. Leave the name blank to use the recorded experiment name.</p>
+                <label for="run-display-name">Display name<input id="run-display-name" type="text" maxlength="160" aria-describedby="run-label-help" disabled></label>
+                <label for="run-notes">Notes<textarea id="run-notes" rows="3" maxlength="2000" placeholder="What changed? What did you learn?" disabled></textarea></label>
+                <div class="run-label-actions"><button id="run-label-save" type="submit" disabled>Save label</button><span id="run-label-status" role="status"></span></div>
+            </form>
             <details><summary>Training settings, loadouts &amp; rewards</summary><dl id="config"></dl></details>
             <details id="experiment-details" hidden><summary>Resolved experiment JSON (research details)</summary><pre id="experiment-json"></pre></details>
         </section>
-        <section id="recent-updates" class="dashboard-section updates" aria-labelledby="updates-title">
+        <section id="recent-updates" class="dashboard-section updates" data-page="results" aria-labelledby="updates-title" hidden>
             <div class="section-title"><h2 id="updates-title">Recent updates</h2><span id="row-count">0 recorded</span></div>
             <div class="table-scroll" tabindex="0" aria-label="Recent training updates"><table><thead><tr><th scope="col">Update</th><th scope="col">Samples</th><th scope="col">Reward / step</th><th scope="col">Policy loss</th><th scope="col">Value loss</th><th scope="col">Entropy</th><th scope="col">Rounds</th><th scope="col">Timeouts</th></tr></thead><tbody id="updates"><tr><td colspan="8">No updates recorded.</td></tr></tbody></table></div>
         </section>
+        </div>
+        </div>
     </main>
 </body>
 </html>

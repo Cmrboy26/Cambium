@@ -94,6 +94,13 @@ def load_library(library=None, device="cpu"):
     raise RuntimeError(f"{detail}\nBuild target minecraft_sim_training; use --library to select it explicitly.")
 
 
+def actor_lost(actor, scenario):
+    position = actor["position"]
+    lower, size = scenario["bounds"]["min"], scenario["bounds"]["size"]
+    return (actor["health"] <= 0 or position[0] < lower[0] or position[0] >= lower[0] + size[0]
+            or position[2] < lower[2] or position[2] >= lower[2] + size[2] or position[1] < lower[1] - 4)
+
+
 class Environment:
     """Explicit-reset batch; step returns final observations, never auto-reset states."""
 
@@ -279,6 +286,24 @@ class Environment:
         totals = np.empty(len(REWARD_NAMES), dtype=np.float64)
         self._check(function(self._handle, None if selected is None else selected.ctypes.data, totals.ctypes.data))
         return dict(zip(REWARD_NAMES, totals.tolist()))
+
+    def losses(self, mask):
+        self._require_open()
+        selected = np.asarray(mask)
+        if selected.shape != (self.count,) or selected.dtype.kind != "b":
+            raise ValueError("Loss mask must contain one boolean per environment")
+        result = np.zeros((self.count, 2), dtype=np.uint8)
+        function = getattr(self.native, "mcsim_losses", None)
+        if function is not None:
+            function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            function.restype = ctypes.c_int
+            self._check(function(self._handle, result.ctypes.data))
+        else:
+            for world in np.flatnonzero(selected):
+                scenario = self.episode_scenario(int(world))
+                frame = self.replay_frame(int(world))
+                result[world] = [actor_lost(actor, scenario) for actor in frame["actors"]]
+        return result.astype(bool)
 
     def replay_frame(self, environment=0):
         self._require_open()

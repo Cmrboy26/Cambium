@@ -60,10 +60,10 @@ In another terminal:
 .\scripts\serve-dashboard.ps1
 ```
 
-Open **http://127.0.0.1:8767** for live/saved charts, curriculum stages,
-environment/opponent mixtures and held-out evaluation results.
-It needs only Python, not PyTorch or a native library. Ctrl+C stops the server;
-use `-Port` if occupied. Missing historical reward breakdowns remain blank.
+Open **http://127.0.0.1:8767** for benchmarks, training outcomes and stage details.
+Metric, opponent and axis selectors match the [PNG metric catalog](AGENTS.md#performance-metrics).
+It needs only Python, not PyTorch or a native library; Ctrl+C stops it; use `-Port` if occupied.
+New episode metrics need restarted/resumed training. Missing historical metrics stay blank.
 
 For a concise text or JSON summary of a saved or live run:
 

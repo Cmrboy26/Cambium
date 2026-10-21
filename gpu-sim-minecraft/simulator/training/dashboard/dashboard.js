@@ -12,6 +12,16 @@ const rewardTypes = [
     ["extreme_pitch_penalty", "Extreme pitch", "#bc596c"],
 ];
 const definitions = [
+    ["benchmark-win-chart", [["win_rate", "Benchmark win rate", colors.green]]],
+    ["benchmark-return-chart", [["evaluation_reward", "Benchmark episode return", colors.blue]]],
+    ["training-outcomes-chart", [["training_win_rate", "Win", colors.green], ["training_loss_rate", "Loss", colors.red],
+        ["training_timeout_rate", "Timeout", colors.amber], ["training_draw_rate", "Draw", colors.gray],
+        [row => trainingSummary(row).source === "recovered_rewards" ? metricValue(row, "training_loss_or_draw_rate") : null,
+            "Loss or draw (recovered)", "#8f364c"]]],
+    ["training-return-chart", [["training_return", "Episode return", colors.green]]],
+    ["training-length-chart", [["training_length", "All fights", colors.blue], ["training_win_length", "Wins", colors.green],
+        ["training_loss_length", "Losses", colors.red]]],
+    ["metric-chart", [["training_return", "Episode return", colors.blue]]],
     ["reward-chart", [["reward_mean", "Mean reward", colors.green]]],
     ["total-reward-chart", [["reward_total", "Total reward", colors.blue]]],
     ["reward-types-chart", rewardTypes.map(([name, label, color]) => [(row) => row.reward_types?.[name], label, color])],
@@ -26,20 +36,524 @@ const definitions = [
 const charts = new Map();
 let records = [];
 let windowSize = 100;
+let windowMode = "latest";
+let windowStart = null;
+let windowEnd = null;
+let windowStage = "";
 let smoothing = 1;
 let requestNumber = 0;
 let pending;
 let runSignature = "";
+let runEntries = [];
+let runPreferences = {};
+let preferenceError = "";
+let labelRun = null;
+let activePage = "overview";
+const runPreferenceKey = "cambium.run-labels.v1";
 let displayedRun = "";
 let configuration = null;
 let milestoneIndex = null;
 let milestoneRun = "";
 const milestoneCharts = new Map();
 let milestoneChartSignature = "";
+let metricCatalog = {};
+let chartAxis = "update";
+let selectedSuite = "";
+let selectedOpponent = "";
+let performanceMode = "benchmark";
+const axisLabels = {elapsed_seconds: "Elapsed training time (seconds)", samples: "Learner transitions", update: "PPO update"};
 
-function sortRuns(runs) {
-    return [...runs].sort((left, right) => right.name.localeCompare(left.name, undefined, { numeric: true, sensitivity: "base" }) || left.id.localeCompare(right.id));
+function trainingSummary(row, opponent = selectedOpponent) {
+    const source = row.training_rollout ?? {};
+    return opponent ? source.training_opponents?.[opponent] ?? {} : source;
 }
+
+function renderPerformanceMode() {
+    for (const id of ["benchmark-performance", "benchmark-summary-win", "benchmark-summary-return", "benchmark-suite-control"]) {
+        element(id).hidden = performanceMode !== "benchmark";
+    }
+    for (const id of ["training-performance", "training-summary-win", "training-summary-return", "training-opponent-control",
+        "reward-diagnostics"]) {
+        element(id).hidden = performanceMode !== "training";
+    }
+    for (const input of document.querySelectorAll('input[name="performance-mode"]')) input.checked = input.value === performanceMode;
+}
+
+function metricValue(row, metric) {
+    const entry = metricCatalog[metric] ?? {};
+    const source = entry.scope === "evaluation" ? row.evaluations?.[selectedSuite]
+        : entry.scope === "episode" ? trainingSummary(row) : row;
+    let value = source?.[entry.field ?? metric];
+    if (!Number.isFinite(value) && metric === "training_loss_or_draw_rate"
+        && Number.isFinite(source?.training_loss_rate) && Number.isFinite(source?.training_draw_rate)) {
+        value = source.training_loss_rate + source.training_draw_rate;
+    }
+    return Number.isFinite(value) ? value * (entry.scale ?? 1) : null;
+}
+
+function chartRows() {
+    let elapsed = 0;
+    return records.map(row => {
+        if (Number.isFinite(row.elapsed_seconds)) elapsed = row.elapsed_seconds;
+        else {
+            const duration = row.iteration_seconds ?? (Number.isFinite(row.collection_seconds) && Number.isFinite(row.update_seconds)
+                ? row.collection_seconds + row.update_seconds : null);
+            elapsed = Number.isFinite(elapsed) && Number.isFinite(duration) ? elapsed + duration : null;
+        }
+        return {...row, elapsed_seconds: elapsed};
+    });
+}
+
+function windowRows(rows = records) {
+    if (windowMode === "range") {
+        return rows.filter(row => row.update >= (windowStart ?? rows[0]?.update)
+            && row.update <= (windowEnd ?? rows.at(-1)?.update));
+    }
+    if (windowMode === "stage") return rows.filter(row => String(row.stage_index ?? row.stage ?? "") === windowStage);
+    return windowMode === "all" || !windowSize ? rows : rows.slice(-windowSize);
+}
+
+function renderWindowControls() {
+    for (const input of document.querySelectorAll('input[name="window-mode"]')) input.checked = input.value === windowMode;
+    for (const mode of ["latest", "range", "stage"]) element(`window-${mode}-control`).hidden = windowMode !== mode;
+    const count = records.length;
+    const shown = Math.min(windowSize || count, count);
+    const slider = element("window-size");
+    slider.value = count > 1 ? Math.round(1000 * Math.log(Math.max(1, shown)) / Math.log(count)) : 0;
+    slider.disabled = count < 2;
+    slider.setAttribute("aria-valuetext", `${format(shown)} updates`);
+    element("window-size-value").textContent = `${format(shown)} updates`;
+    const minimum = records[0]?.update ?? 0;
+    const maximum = records.at(-1)?.update ?? 0;
+    if (count && windowMode === "range") {
+        windowStart ??= minimum;
+        windowEnd ??= maximum;
+    }
+    if (count && windowStart !== null) windowStart = Math.max(minimum, Math.min(maximum, windowStart));
+    if (count && windowEnd !== null) windowEnd = Math.max(windowStart ?? minimum, Math.min(maximum, windowEnd));
+    for (const [bound, value] of [["start", windowStart ?? minimum], ["end", windowEnd ?? maximum]]) {
+        for (const suffix of ["", "-slider"]) {
+            const input = element(`window-${bound}${suffix}`);
+            input.min = minimum;
+            input.max = maximum;
+            input.value = value;
+            input.disabled = !count;
+        }
+    }
+    const stages = new Map((resolvedExperiment(configuration)?.stages ?? []).map((stage, index) => [String(index), stage.name]));
+    const spans = new Map();
+    for (const row of records) {
+        const key = String(row.stage_index ?? row.stage ?? "");
+        if (!key) continue;
+        stages.set(key, row.stage ?? stages.get(key) ?? `Stage ${key}`);
+        const span = spans.get(key) ?? [row.update, row.update];
+        span[1] = row.update;
+        spans.set(key, span);
+    }
+    const entries = [...stages].map(([key, name]) => {
+        const span = spans.get(key);
+        return [key, `${name ?? `Stage ${key}`} / ${span ? `updates ${format(span[0])}-${format(span[1])}` : "No recorded updates"}`];
+    });
+    const stage = selectOptions("window-stage", entries.length ? entries : [["", "No curriculum stages"]], windowStage);
+    if (windowMode === "stage") windowStage = stage;
+    element("window-stage").disabled = !entries.length;
+}
+
+function updateWindowMode(mode) {
+    windowMode = mode;
+    if (mode === "range" && records.length) {
+        windowStart ??= records[0].update;
+        windowEnd ??= records.at(-1).update;
+    }
+    if (mode === "stage" && !windowStage) {
+        windowStage = String(records.at(-1)?.stage_index ?? records.at(-1)?.stage ?? "");
+        element("window-stage").value = windowStage;
+    }
+    redrawCharts();
+}
+
+function updateLatestWindow() {
+    const position = Math.max(0, Math.min(1000, Number(element("window-size").value)));
+    windowSize = Math.round(Math.max(1, records.length) ** (position / 1000));
+    redrawCharts();
+}
+
+function updateWindowRange(bound, rawValue) {
+    const value = Number(rawValue);
+    if (!records.length || String(rawValue).trim() === "" || !Number.isFinite(value)) {
+        renderWindowControls();
+        return;
+    }
+    const update = Math.max(records[0].update, Math.min(records.at(-1).update, Math.round(value)));
+    if (bound === "start") {
+        windowStart = update;
+        windowEnd = Math.max(update, windowEnd ?? records.at(-1).update);
+    } else {
+        windowEnd = update;
+        windowStart = Math.min(update, windowStart ?? records[0].update);
+    }
+    redrawCharts();
+}
+
+function metricPoints(key, derivative = false) {
+    const rows = chartRows();
+    const updates = new Map(rows.map(row => [row.update, row]));
+    const seen = new Set();
+    const entry = typeof key === "string" ? metricCatalog[key] : null;
+    const alpha = 2 / (smoothing + 1);
+    const visibleUpdates = new Set(windowRows(rows).map(row => row.update));
+    let previous = null;
+    let previousPoint = null;
+    let previousStage;
+    const points = [];
+    for (const row of rows) {
+        let anchor = row;
+        if (entry?.scope === "evaluation") {
+            const snapshot = row.evaluations?.[selectedSuite]?.snapshot_update;
+            if (!Number.isFinite(snapshot) || seen.has(snapshot) || !updates.has(snapshot)) continue;
+            seen.add(snapshot);
+            anchor = updates.get(snapshot);
+        }
+        const stage = anchor.stage_index ?? anchor.stage;
+        if (entry?.scope !== "evaluation" && stage !== previousStage) previous = previousPoint = null;
+        previousStage = stage;
+        const value = typeof key === "function" ? key(row) : metricValue(row, key);
+        const x = anchor[chartAxis];
+        let y = null;
+        if (Number.isFinite(value) && Number.isFinite(x)) {
+            previous = entry?.scope === "evaluation" || previous === null ? value : alpha * value + (1 - alpha) * previous;
+            y = derivative ? previousPoint && x > previousPoint.x ? (previous - previousPoint.y) / (x - previousPoint.x) : null : previous;
+            previousPoint = {x, y: previous};
+        } else previous = previousPoint = null;
+        if (visibleUpdates.has(anchor.update) && Number.isFinite(x)) points.push({x, y, stage, update: anchor.update});
+    }
+    return points;
+}
+
+const stageMarkers = {
+    id: "stageMarkers",
+    afterDraw(chart) {
+        const {ctx, chartArea, scales} = chart;
+        if (!chartArea || !scales.x) return;
+        let previous;
+        ctx.save();
+        ctx.strokeStyle = "#b4bdb7";
+        ctx.fillStyle = colors.gray;
+        ctx.font = '10px "Segoe UI", sans-serif';
+        ctx.setLineDash([3, 4]);
+        for (const row of windowRows(chartRows())) {
+            const stage = row.stage_index ?? row.stage;
+            const x = scales.x.getPixelForValue(row[chartAxis]);
+            if (previous !== undefined && stage !== previous && x >= chartArea.left && x <= chartArea.right) {
+                ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke();
+                const width = Math.min(130, chartArea.right - chartArea.left);
+                ctx.fillText(row.stage ?? String(stage), Math.min(x + 3, chartArea.right - width), chartArea.top + 12, width);
+            }
+            previous = stage;
+        }
+        ctx.restore();
+    },
+};
+
+function selectOptions(id, entries, preferred = "") {
+    const select = element(id);
+    const current = select.value;
+    const signature = JSON.stringify(entries);
+    if (select.dataset.options !== signature) {
+        select.replaceChildren(...entries.map(([value, label]) => new Option(label, value)));
+        select.dataset.options = signature;
+    }
+    select.value = entries.some(([value]) => value === current) ? current
+        : entries.some(([value]) => value === preferred) ? preferred : entries[0]?.[0] ?? "";
+    return select.value;
+}
+
+function renderPerformance() {
+    renderPerformanceMode();
+    const suiteNames = [...new Set(records.flatMap(row => Object.keys(row.evaluations ?? {})))].sort();
+    selectedSuite = selectOptions("benchmark-suite", suiteNames.length ? suiteNames.map(name => [name, name])
+        : [["", "No evaluations yet"]], "combined_benchmark");
+    const opponents = [...new Set(records.flatMap(row => Object.keys(trainingSummary(row, "").training_opponents ?? {})))].sort();
+    selectedOpponent = selectOptions("training-opponent", [["", "All opponents"], ...opponents.map(name => [name, name])]);
+    const metric = selectOptions("metric-select", Object.entries(metricCatalog).map(([key, entry]) =>
+        [key, `${entry.label} (${entry.unit})`]), "training_return");
+    if (metric) definitions.find(([id]) => id === "metric-chart")[1][0][0] = metric;
+    const latest = records.at(-1) ?? {};
+    const evaluation = records.map(row => row.evaluations?.[selectedSuite]).filter(Boolean).at(-1);
+    const snapshot = evaluation?.snapshot_update;
+    const freshness = Number.isFinite(snapshot) ? `Update ${format(snapshot)} / ${format(latest.update - snapshot)} updates ago` : "Snapshot age unavailable";
+    const detail = evaluation ? `${selectedSuite} / ${format(evaluation.episodes)} episodes` : "Awaiting evaluation";
+    element("stat-benchmark").textContent = evaluation ? `${format(evaluation.win_rate * 100, 2)}%` : "--";
+    element("stat-benchmark-return").textContent = format(evaluation?.reward_mean, 3);
+    element("stat-benchmark-detail").textContent = detail;
+    element("stat-benchmark-age").textContent = freshness;
+    const experiment = resolvedExperiment(configuration);
+    const suite = experiment?.evaluations?.[selectedSuite] ?? experiment?.stages?.[evaluation?.stage_index]?.evaluations?.[selectedSuite];
+    const moving = (suite?.opponents ?? []).some(({id}) => ["self_play", "frozen_self_play"].includes(experiment?.opponents?.[id]?.type));
+    element("benchmark-status").textContent = `${detail} / ${freshness}${moving ? " / Moving-opponent evaluation" : ""}${evaluation?.win_rate === 1 ? " / Benchmark ceiling reached" : ""}`;
+    const source = trainingSummary(latest, "");
+    const summary = trainingSummary(latest);
+    const count = summary.training_episodes ?? (selectedOpponent && source.source !== "recovered_rewards"
+        && Number.isFinite(source.training_episodes) ? 0 : undefined);
+    const episodeDetail = Number.isFinite(count) ? `${format(count)} completed episodes in this rollout`
+        : "Episode metrics not recorded";
+    const provenance = source.source === "recovered_rewards" ? " / Recovered reward counts; loss and draw combined; episode return and length unavailable" : "";
+    const trainingWin = metricValue(latest, "training_win_rate");
+    element("stat-training-win").textContent = trainingWin === null ? "--" : `${format(trainingWin, 2)}%`;
+    element("stat-training-return").textContent = format(metricValue(latest, "training_return"), 3);
+    element("stat-training-detail").textContent = episodeDetail + (source.source === "recovered_rewards" ? " / Recovered counts" : "");
+    element("stat-training-opponent").textContent = selectedOpponent || "All opponents";
+    element("episode-status").textContent = `${episodeDetail} / ${latest.stage ?? "Stage unavailable"} / ${selectedOpponent || "All opponents"}${provenance}`;
+    renderTable("training-opponents", Object.entries(source.training_opponents ?? {}).map(([name, result]) => [
+        name, format(result.training_episodes), ...["win", "loss", "timeout", "draw"].map(outcome =>
+            Number.isFinite(result[`training_${outcome}_rate`]) ? `${format(result[`training_${outcome}_rate`] * 100, 2)}%` : "--"),
+        format(result.training_return, 3), format(result.training_length, 1),
+    ]), 8, source.source === "recovered_rewards" ? "Per-opponent episode metrics not recorded; aggregate outcomes recovered." : "Episode metrics not recorded.");
+}
+
+function runLabel(run) {
+    return runPreferences[run.path] ?? {};
+}
+
+function runTitle(run) {
+    return runLabel(run).name || run.experiment_name || run.environment_name || run.name;
+}
+
+function sortRuns(runs, order = "modified") {
+    const compare = (left, right) => left.localeCompare(right, undefined, {numeric: true, sensitivity: "base"});
+    return [...runs].sort((left, right) => order === "name"
+        ? compare(runTitle(left), runTitle(right)) || compare(left.name, right.name) || compare(left.id, right.id)
+        : (right.modified ?? 0) - (left.modified ?? 0) || compare(right.name, left.name) || compare(left.id, right.id));
+}
+
+function runDetails(run) {
+    return [
+        run.experiment_name && run.experiment_name !== runTitle(run) ? run.experiment_name : null,
+        run.seed != null ? `Seed ${run.seed}` : null,
+        run.hidden_dim != null ? `Width ${run.hidden_dim}` : null,
+        run.lr != null ? `LR ${run.lr}` : null,
+        Number.isFinite(run.modified) ? `Updated ${new Date(run.modified * 1000).toLocaleString()}` : null,
+    ].filter(Boolean).join(" / ");
+}
+
+function searchRuns(runs, query) {
+    const terms = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+    return runs.filter(run => {
+        const text = [runTitle(run), run.name, run.path, run.experiment_name, run.environment_name,
+            run.policy_name, runDetails(run), runLabel(run).notes,
+            Number.isFinite(run.lr) ? run.lr.toExponential() : ""].join(" ").toLocaleLowerCase();
+        return terms.every(term => text.includes(term));
+    });
+}
+
+function currentRun() {
+    return runEntries.find(run => run.id === element("run").value);
+}
+
+function loadRunPreferences() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(runPreferenceKey) ?? "{}");
+        if (!saved || typeof saved !== "object" || Array.isArray(saved)
+            || Object.values(saved).some(label => !label || typeof label.name !== "string"
+                || typeof label.notes !== "string" || label.name.length > 160 || label.notes.length > 2000)) {
+            throw new Error("Saved labels have an invalid format.");
+        }
+        runPreferences = saved;
+    } catch (error) {
+        preferenceError = `Could not load saved run labels: ${error.message}`;
+        element("run-label-status").textContent = preferenceError;
+    }
+}
+
+function renderRunLabel() {
+    const run = currentRun();
+    for (const id of ["run-display-name", "run-notes", "run-label-save", "edit-run"]) element(id).disabled = !run;
+    if (labelRun === (run?.id ?? "")) return;
+    labelRun = run?.id ?? "";
+    element("run-display-name").value = run ? runLabel(run).name ?? "" : "";
+    element("run-display-name").placeholder = run ? run.experiment_name ?? run.name : "Select a training run";
+    element("run-notes").value = run ? runLabel(run).notes ?? "" : "";
+    element("run-label-status").textContent = preferenceError;
+}
+
+function selectRun(identity) {
+    element("run").value = identity;
+    element("run-picker").open = false;
+    element("run-picker-toggle").focus();
+    renderRunPicker();
+    refresh();
+}
+
+function renderRunPicker() {
+    const run = currentRun();
+    element("run-current").textContent = run ? runTitle(run) : "No training runs found";
+    element("run-current-meta").textContent = run ? runDetails(run) || run.name : "Runs will appear here when training starts.";
+    renderRunLabel();
+    const matches = searchRuns(sortRuns(runEntries, element("run-sort").value), element("run-search").value);
+    const signature = JSON.stringify([matches, runPreferences, element("run").value]);
+    if (signature === runSignature) return;
+    runSignature = signature;
+    const list = element("run-options");
+    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.runId : null;
+    const scroll = list.scrollTop;
+    const fragment = document.createDocumentFragment();
+    for (const entry of matches) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "run-option";
+        button.dataset.runId = entry.id;
+        button.setAttribute("aria-pressed", String(entry.id === run?.id));
+        const title = document.createElement("strong");
+        title.textContent = runTitle(entry);
+        const details = document.createElement("span");
+        details.textContent = runDetails(entry);
+        const directory = document.createElement("small");
+        directory.textContent = entry.name;
+        directory.title = entry.path;
+        button.append(title, details, directory);
+        if (runLabel(entry).notes) {
+            const notes = document.createElement("span");
+            notes.className = "run-option-notes";
+            notes.textContent = runLabel(entry).notes;
+            button.append(notes);
+        }
+        if (entry.warnings?.length) {
+            const warning = document.createElement("span");
+            warning.className = "run-option-warning";
+            warning.textContent = entry.warnings.join(" ");
+            button.append(warning);
+        }
+        button.addEventListener("click", () => selectRun(entry.id));
+        fragment.append(button);
+    }
+    if (!matches.length) {
+        const empty = document.createElement("p");
+        empty.className = "run-picker-empty";
+        empty.textContent = runEntries.length ? "No matching runs. Try a different search." : "No training runs found.";
+        fragment.append(empty);
+    }
+    list.replaceChildren(fragment);
+    element("run-count").textContent = `${matches.length} of ${runEntries.length} runs`;
+    if (focused) [...list.querySelectorAll("button")].find(button => button.dataset.runId === focused)?.focus({preventScroll: true});
+    list.scrollTop = scroll;
+}
+
+function saveRunLabel(event) {
+    event.preventDefault();
+    const run = currentRun();
+    if (!run) {
+        element("run-label-status").textContent = "Select a training run before saving a label.";
+        return;
+    }
+    const name = element("run-display-name").value.trim();
+    const notes = element("run-notes").value.trim();
+    if (name.length > 160 || notes.length > 2000) {
+        element("run-label-status").textContent = "Use at most 160 characters for the name and 2000 for notes.";
+        return;
+    }
+    const next = {...runPreferences};
+    if (name || notes) next[run.path] = {name, notes};
+    else delete next[run.path];
+    try {
+        localStorage.setItem(runPreferenceKey, JSON.stringify(next));
+    } catch (error) {
+        element("run-label-status").textContent = `Could not save run label: ${error.message}`;
+        return;
+    }
+    runPreferences = next;
+    preferenceError = "";
+    renderRunPicker();
+    element("run-title").textContent = runTitle(run);
+    element("run-label-status").textContent = "Saved in this browser.";
+}
+
+function showPage(page) {
+    activePage = page;
+    for (const section of document.querySelectorAll("[data-page]")) {
+        section.hidden = section.dataset.page !== page || section.dataset.available === "false";
+    }
+    for (const link of document.querySelectorAll("[data-view]")) {
+        if (link.dataset.view === page) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+    }
+    document.dispatchEvent(new CustomEvent("dashboard-page", {detail: {page}}));
+    for (const chart of charts.values()) chart.resize();
+    for (const entry of milestoneCharts.values()) entry.chart?.resize?.();
+}
+
+function navigateHash() {
+    const target = element(window.location.hash.slice(1) || "overview");
+    const section = target?.closest("[data-page]");
+    showPage(section?.dataset.page ?? "overview");
+}
+
+function initRunPicker() {
+    loadRunPreferences();
+    element("run-search").addEventListener("input", renderRunPicker);
+    element("run-sort").addEventListener("change", renderRunPicker);
+    element("run-label-form").addEventListener("submit", saveRunLabel);
+    element("run-picker").addEventListener("toggle", () => {
+        if (element("run-picker").open) element("run-search").focus();
+    });
+    element("run-picker").addEventListener("keydown", event => {
+        if (event.key === "Escape") {
+            event.preventDefault();
+            element("run-picker").open = false;
+            element("run-picker-toggle").focus();
+        } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            const buttons = [...element("run-options").querySelectorAll("button")];
+            if (!buttons.length || event.target === element("run-sort")) return;
+            event.preventDefault();
+            const index = buttons.indexOf(document.activeElement);
+            const next = index < 0 ? (event.key === "ArrowDown" ? 0 : buttons.length - 1)
+                : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+            buttons[next].focus();
+        }
+    });
+    document.addEventListener("click", event => {
+        if (!element("run-picker").contains(event.target)) element("run-picker").open = false;
+    });
+    element("edit-run").addEventListener("click", () => {
+        window.location.hash = "run-settings";
+        showPage("configuration");
+        element("run-display-name").focus();
+    });
+}
+
+function soloLegend(chart, index) {
+    if (chart.data.datasets.length < 2 || !Number.isInteger(index) || !chart.data.datasets[index]) return;
+    const visible = chart.data.datasets.map((_, dataset) => chart.isDatasetVisible(dataset));
+    const restore = visible[index] && visible.filter(Boolean).length === 1;
+    chart.data.datasets.forEach((_, dataset) => chart.setDatasetVisibility(dataset, restore || dataset === index));
+    chart.update("none");
+}
+
+const legendSoloHandlers = new WeakMap();
+const legendSolo = {
+    id: "legendSolo",
+    afterInit(chart) {
+        if (chart.data.datasets.length < 2) return;
+        chart.canvas.title = "Click a legend entry to toggle it. Right-click to solo; right-click the solo entry again to show all.";
+        const handler = event => {
+            const legend = chart.legend;
+            if (!legend || !legend.options.display) return;
+            const {x, y} = Chart.helpers.getRelativePosition(event, chart);
+            const hit = legend.legendHitBoxes.findIndex(box => x >= box.left && x <= box.left + box.width
+                && y >= box.top && y <= box.top + box.height);
+            const index = legend.legendItems[hit]?.datasetIndex;
+            if (!Number.isInteger(index)) return;
+            event.preventDefault();
+            soloLegend(chart, index);
+        };
+        legendSoloHandlers.set(chart, handler);
+        chart.canvas.addEventListener("contextmenu", handler);
+    },
+    afterDestroy(chart) {
+        const handler = legendSoloHandlers.get(chart);
+        if (handler) chart.canvas.removeEventListener("contextmenu", handler);
+        legendSoloHandlers.delete(chart);
+    },
+};
 
 function duration(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0) return "--";
@@ -103,10 +617,15 @@ function initCharts() {
         heading.after(controls);
         charts.set(id, new Chart(element(id), {
             type: stacked ? "bar" : "line",
+            plugins: [stageMarkers, legendSolo],
             data: { datasets: series.map(([, label, color]) => ({
                 label, data: [], borderColor: color, backgroundColor: color,
                 borderWidth: 1.8, pointRadius: 0, pointHitRadius: 8, pointHoverRadius: 3,
                 tension: 0, spanGaps: false,
+                segment: {borderColor: context => context.p0.raw.stage !== context.p1.raw.stage
+                    && !["benchmark-win-chart", "benchmark-return-chart"].includes(id)
+                    && !(id === "metric-chart" && metricCatalog[definitions.find(([name]) => name === id)[1][0][0]]?.scope === "evaluation")
+                    ? "transparent" : undefined},
             })) },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
@@ -114,7 +633,7 @@ function initCharts() {
                 plugins: {
                     legend: { display: series.length > 1, position: "bottom", labels: { boxWidth: 10, boxHeight: 3, font: { size: 10 } } },
                     decimation: { enabled: !stacked, algorithm: "min-max" },
-                    tooltip: { callbacks: { title: (items) => `Update ${items[0]?.parsed.x ?? ""}` } },
+                    tooltip: { callbacks: { title: items => `Update ${items[0]?.raw.update ?? ""}` } },
                 },
                 scales: {
                     x: { type: "linear", stacked, grid: { display: false }, ticks: { maxTicksLimit: 7, precision: 0, font: { size: 10 } } },
@@ -129,7 +648,11 @@ function smoothSeries(key, derivative = false) {
     const alpha = 2 / (smoothing + 1);
     let previous = null;
     let previousPoint = null;
+    let previousStage;
     return records.map((row) => {
+        const stage = row.stage_index ?? row.stage;
+        if (stage !== previousStage) previous = previousPoint = null;
+        previousStage = stage;
         const value = typeof key === "function" ? key(row) : row[key];
         if (!Number.isFinite(value)) {
             previous = previousPoint = null;
@@ -143,19 +666,40 @@ function smoothSeries(key, derivative = false) {
     });
 }
 
+function updateSmoothing() {
+    const position = Math.max(0, Math.min(1000, Number(element("smooth").value)));
+    smoothing = Math.round(500 ** (position / 1000));
+    const label = smoothing > 1 ? `EMA ${smoothing}` : "Off";
+    element("smooth-value").textContent = label;
+    element("smooth").setAttribute("aria-valuetext", label);
+    redrawCharts();
+}
+
 function redrawCharts() {
+    renderWindowControls();
+    const visible = windowRows(chartRows());
+    const domain = visible.map(row => row[chartAxis]).filter(Number.isFinite);
     for (const [id, series] of definitions) {
         const chart = charts.get(id);
+        if (!chart) continue;
         const derivative = document.querySelector(`input[name="${id}-mode"]:checked`)?.value === "derivative";
         series.forEach(([key], index) => {
-            const values = smoothSeries(key, derivative);
-            chart.data.datasets[index].data = windowSize ? values.slice(-windowSize) : values;
+            chart.data.datasets[index].data = metricPoints(key, derivative);
+            const entry = typeof key === "string" ? metricCatalog[key] : null;
+            if (entry && series.length === 1) chart.data.datasets[index].label = `${entry.label} (${entry.unit})`;
         });
-        chart.options.scales.y.title = { display: derivative, text: "Change / update" };
+        const entry = metricCatalog[series[0][0]];
+        chart.options.scales.x.min = domain[0];
+        chart.options.scales.x.max = domain.at(-1);
+        chart.options.scales.x.title = {display: true, text: axisLabels[chartAxis]};
+        chart.options.scales.y.title = { display: true, text: derivative ? `Change / ${axisLabels[chartAxis]}` : entry?.unit ?? "Weighted reward" };
+        chart.options.scales.y.min = entry?.unit === "%" && !derivative ? 0 : undefined;
+        chart.options.scales.y.max = entry?.unit === "%" && !derivative ? 100 : undefined;
         chart.update("none");
     }
-    const shown = windowSize ? Math.min(windowSize, records.length) : records.length;
-    element("window-info").textContent = `${format(shown)} of ${format(records.length)} updates${smoothing > 1 ? ` / EMA ${smoothing}` : ""}`;
+    const legacyClock = chartAxis === "elapsed_seconds" && windowRows().some(row => !Number.isFinite(row.elapsed_seconds));
+    const bounds = visible.length ? ` / Updates ${format(visible[0].update)}-${format(visible.at(-1).update)}` : "";
+    element("window-info").textContent = `${format(visible.length)} of ${format(records.length)} updates${bounds}${smoothing > 1 ? ` / EMA ${smoothing}` : ""}${legacyClock ? " / Estimated elapsed time; untimed points omitted" : ""}`;
 }
 
 function renderConfig(config) {
@@ -167,7 +711,7 @@ function renderConfig(config) {
     const learner = experiment?.learner ?? {};
     const policy = metadata.schema?.id ?? options.schema ?? (experiment?.policy ? "Custom layout" : "--");
     const width = metadata.hidden_dim ?? learner.hidden_dim ?? options.hidden_dim;
-    element("run-title").textContent = experiment?.name ?? environment.name ?? "Training overview";
+    element("run-title").textContent = currentRun() ? runTitle(currentRun()) : experiment?.name ?? environment.name ?? "Training overview";
     renderFields("run-identity", [
         ["Seed", experiment?.seed ?? options.seed],
         ["Compute", `${options.device ?? "--"} / ${format(options.envs)} worlds`],
@@ -381,6 +925,7 @@ function renderMilestoneMetricCharts(stage, experiment) {
         if (!entry.chart && typeof Chart !== "undefined") {
             entry.chart = new Chart(entry.canvas, {
                 type: "line",
+                plugins: [legendSolo],
                 data: {datasets: [
                     {label: entry.label, data: [], borderColor: colors.green, backgroundColor: colors.green,
                         borderWidth: 2, pointRadius: history.suite ? 3 : 0, pointHoverRadius: 5,
@@ -640,7 +1185,8 @@ function renderCurriculum() {
     renderMilestones();
     const hasResearchMetrics = records.some((row) => row.stage !== undefined || row.stage_index !== undefined
         || row.completed_curriculum !== undefined || row.evaluations !== undefined);
-    element("curriculum").hidden = !experiment && !hasResearchMetrics;
+    element("curriculum").dataset.available = String(Boolean(experiment || hasResearchMetrics));
+    element("curriculum").hidden = activePage !== "overview" || !experiment && !hasResearchMetrics;
     element("nav-curriculum").hidden = !experiment && !hasResearchMetrics;
     const stage = stageFor(latest, experiment);
     const initial = !latest ? experiment?.stages?.[0] : null;
@@ -721,6 +1267,7 @@ function renderFields(id, fields) {
 function renderRecords() {
     const latest = records.at(-1) ?? {};
     renderCurriculum();
+    renderPerformance();
     element("reward-types-empty").hidden = records.some((row) => row.reward_types && Object.keys(row.reward_types).length > 0);
     element("stat-update").textContent = format(latest.update);
     element("stat-total").textContent = `${format(records.length)} updates recorded`;
@@ -779,20 +1326,17 @@ async function refresh() {
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
         const dataRuns = await getJson("/api/runs", controller.signal);
-        const runs = sortRuns(dataRuns.runs);
         if (ticket !== requestNumber) return;
+        runEntries = dataRuns.runs;
+        const runs = sortRuns(runEntries, element("run-sort").value);
         const select = element("run");
-        const selected = select.value;
-        const signature = JSON.stringify(runs.map((run) => [run.id, run.name]));
-        if (signature !== runSignature) {
-            const options = runs.map((run) => new Option(run.name, run.id));
-            select.replaceChildren(...(options.length ? options : [new Option("No runs found", "")]));
-            select.value = runs.some((run) => run.id === selected) ? selected : runs[0]?.id ?? "";
-            runSignature = signature;
-        }
-        select.disabled = !runs.length;
+        if (!runs.some(run => run.id === select.value)) select.value = runs[0]?.id ?? "";
+        renderRunPicker();
         const identity = select.value;
         if (displayedRun !== identity) {
+            windowStart = windowEnd = null;
+            windowStage = "";
+            element("window-stage").value = "";
             records = [];
             renderConfig(null);
             renderRecords();
@@ -802,12 +1346,13 @@ async function refresh() {
             const data = await getJson(`/api/runs/${encodeURIComponent(identity)}/metrics`, controller.signal);
             if (ticket !== requestNumber || identity !== select.value) return;
             records = data.metrics;
+            metricCatalog = data.metric_catalog ?? {};
             element("run-path").textContent = data.path;
             element("empty").hidden = records.length > 0;
             element("empty").textContent = "Waiting for the first PPO update.";
             renderConfig(data.config);
             renderRecords();
-            notice(data.warnings.join(" "));
+            notice([...data.warnings, preferenceError].filter(Boolean).join(" "));
         } else {
             element("run-path").textContent = "";
             element("empty").textContent = "No training runs found.";
@@ -815,7 +1360,7 @@ async function refresh() {
             records = [];
             renderConfig(null);
             renderRecords();
-            notice("");
+            notice(preferenceError);
         }
         element("connection").textContent = element("live").checked ? "Connected" : "Paused";
         element("connection").dataset.state = "connected";
@@ -831,20 +1376,40 @@ async function refresh() {
 }
 
 try {
+    chartAxis = element("chart-axis").value in axisLabels ? element("chart-axis").value : "update";
     initCharts();
+    updateSmoothing();
+    initRunPicker();
+    window.addEventListener("hashchange", navigateHash);
+    navigateHash();
+    for (const input of document.querySelectorAll('input[name="performance-mode"]')) {
+        input.addEventListener("change", event => {
+            performanceMode = event.target.value;
+            renderPerformance();
+            for (const chart of charts.values()) chart.resize?.();
+            redrawCharts();
+        });
+    }
+    element("chart-axis").addEventListener("change", event => {chartAxis = event.target.value; redrawCharts();});
+    for (const id of ["benchmark-suite", "training-opponent", "metric-select"]) {
+        element(id).addEventListener("change", () => {renderPerformance(); redrawCharts();});
+    }
     element("run").addEventListener("change", refresh);
     element("refresh").addEventListener("click", refresh);
     element("live").addEventListener("change", () => {
         if (element("live").checked) refresh();
         else element("connection").textContent = "Paused";
     });
-    document.querySelectorAll('input[name="window"]').forEach((input) => {
-        input.addEventListener("change", () => { windowSize = Number(input.value); redrawCharts(); });
+    document.querySelectorAll('input[name="window-mode"]').forEach((input) => {
+        input.addEventListener("change", event => updateWindowMode(event.target.value));
     });
-    element("smooth").addEventListener("change", (event) => {
-        smoothing = Number(event.target.value);
-        redrawCharts();
-    });
+    element("window-size").addEventListener("input", updateLatestWindow);
+    for (const bound of ["start", "end"]) {
+        element(`window-${bound}`).addEventListener("change", event => updateWindowRange(bound, event.target.value));
+        element(`window-${bound}-slider`).addEventListener("input", event => updateWindowRange(bound, event.target.value));
+    }
+    element("window-stage").addEventListener("change", event => {windowStage = event.target.value; redrawCharts();});
+    element("smooth").addEventListener("input", updateSmoothing);
     refresh();
     setInterval(() => { if (element("live").checked && !document.hidden) refresh(); }, 3000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden && element("live").checked) refresh(); });
