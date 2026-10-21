@@ -54,6 +54,33 @@ final class DuelLibrary {
 				.toList();
 	}
 
+	List<JsonObject> environmentChoices(String selected) {
+		var choices = new java.util.LinkedHashMap<JsonObject, JsonObject>();
+		for (JsonObject entry : environments) {
+			JsonObject definition = entry.getAsJsonObject("environment").deepCopy();
+			definition.remove("name");
+			JsonObject key = new JsonObject();
+			key.add("contract_hash", entry.get("contract_hash"));
+			key.add("environment", definition);
+			if (!choices.containsKey(key) || entry.get("id").getAsString().equals(selected)) {
+				JsonObject choice = entry.deepCopy();
+				JsonObject environment = entry.getAsJsonObject("environment");
+				if (environment.has("name") && !environment.get("name").getAsString().isBlank()) {
+					choice.addProperty("name", environment.get("name").getAsString());
+				}
+				choices.put(key, choice);
+			}
+		}
+		var names = choices.values().stream().collect(java.util.stream.Collectors.groupingBy(
+				choice -> choice.get("name").getAsString(), java.util.stream.Collectors.counting()));
+		for (JsonObject choice : choices.values()) {
+			String name = choice.get("name").getAsString();
+			if (names.get(name) > 1) choice.addProperty("name", name + " / "
+					+ find(environments, choice.get("id").getAsString()).get("name").getAsString());
+		}
+		return List.copyOf(choices.values());
+	}
+
 	static String versionName(JsonObject entry) {
 		String identity = entry.get("id").getAsString();
 		String version = identity.endsWith(":latest.pt") ? "Latest" : identity.substring(identity.lastIndexOf('/') + 1).replace(".pt", "");

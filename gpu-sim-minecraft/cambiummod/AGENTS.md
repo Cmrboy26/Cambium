@@ -147,6 +147,10 @@ An in-memory snapshot cannot survive a crash; this is not a complete backup.
 
 Configure locally using `scripts/rosie-play.ps1 -Setup` and install the updated
 mod once. See [setup/authentication](../rosie/README.md#local-replays-and-duels).
+Remote commands request automatic session reuse. On Windows the helper opens a
+visible login terminal if needed; passwords/MFA stay there, never in Minecraft.
+An established login terminal remains open for reuse after an operation finishes;
+close it separately with Ctrl+C. Offline local commands never start SSH.
 `RosieLauncher` reads only local game `config/cambium-rosie.json` and invokes
 the configured Python module using literal `ProcessBuilder` arguments, never
 a shell. Configuration is trusted executable configuration, not server input.
@@ -162,12 +166,14 @@ and are guarded against superseded operations and changed worlds/owners.
 | `/simrosie duel [run]` | Download/cache weights, start local CPU policy on a free loopback port, start arena. |
 | `/simrosie sync [run]` | Cache policies/config only; panel offers latest/all replay scopes. |
 | `/simrosie status` | Current helper operation. |
-| `/simrosie stop` | Cancel helper; stop its live duel and restore participant state; retain cache. |
+| `/simrosie stop` | Stop the match and restore participant state; retain ready inference and cache. Cancel unfinished startup/downloads. |
+| `/simrosie shutdown` | Stop the match and terminate the owned helper; retain cache. |
 
 Omitted run/file means `latest` by modification time, never best. Only one helper
-operation runs at a time; stop it before switching. `/simduel join` remains the
+operation runs at a time; shut it down before switching to another remote helper.
+Local matches reuse retained inference. `/simduel join` remains the
 participation command. `/simduel stop` alone stops actors, not the helper-owned
-policy process; use `/simrosie stop` for both. Disconnect, client shutdown, world/
+policy process; use `/simrosie shutdown` for both. Disconnect, client shutdown, world/
 dimension change or opening to LAN cancels the owned helper and SSH descendants.
 Python stderr goes to game `logs/rosie-launcher.log`; readable errors appear in
 chat. Terminal-launched inference processes are not owned or terminated by the mod.
@@ -193,15 +199,23 @@ Opening the
 panel, browsing cached entries and starting a local duel never contact Rosie.
 Login still happens in the local terminal connection flow, never a password UI.
 Helpers retain generation/world/owner guards, literal process arguments and
-disconnect/LAN/shutdown cleanup. The Live Stop button cancels the owned helper
-and stops actors, including externally served actors without killing that server.
+disconnect/LAN/shutdown cleanup. Live Stop Match stops actors and keeps a ready
+owned inference process warm. Shutdown Inference on Live/Rosie also kills the
+owned helper. Externally served actors stop without killing their external server.
 
 Game `sim-rosie-cache/library.json` version 1 stores readable policy/environment
 entries. Policy IDs use `run:latest.pt` or `run:snapshots/<name>.pt`; each has a
 local checkpoint path, update/stage, semantic contract hash and policy descriptor.
 Environments include checkpoint scenes and every resolved stage/arena template
 from synced `config.json`. These are fixed templates, not distribution sampling
-or a live curriculum. Sync preserves other runs and existing policy aliases.
+or a live curriculum. The duel selector groups entries by contract hash and
+structurally equal environment data, ignoring only the environment's display name.
+Equivalent checkpoint/stage/cross-run copies appear once under their environment
+name; genuinely different geometry, loadouts, duration or policy layouts remain
+separate. Source labels disambiguate distinct setups with the same name. Grouping
+is a view over the existing cache: saved selection IDs and all indexed entries
+remain intact, with no re-sync or library migration required.
+Sync preserves other runs and existing policy aliases.
 Library rows select runs; the bottom selector chooses Latest or a retained policy
 version. Local run and per-version display names are independent of remote IDs,
 paths and files; sync preserves both. Renaming is disabled while the helper runs.
@@ -229,10 +243,17 @@ Online `/simrosie duel` still reads remote metadata; the library path never
 connects to SSH. Replacing a library duel keeps the owned Python process warm
 and POSTs `{}` to its authenticated `/reload` route. Only its configured local
 duel file is read. The new controllers are validated before swapping; failure
-keeps the prior service configuration. Stop/disconnect/LAN/shutdown still kills
-the helper. Warm-reload handoffs check generation, world, server and owner.
-Fresh launches after Stop still pay cold import cost; no startup speed is
-guaranteed across machines. Status reports cold-start or warm-reload timing.
+keeps the prior service configuration. Stop Match retains the process, reload
+port/token and lifecycle monitor, but invalidates in-flight reload handoffs so
+they cannot restart actors after Stop. The next local launch reloads fighters
+into that same warm process. Repeated Stop is safe; unfinished cold startup or
+downloads are canceled rather than retained. Shutdown Inference and disconnect,
+world/dimension changes, LAN sharing and client exit still kill the helper.
+Warm-reload handoffs check generation, reload generation, world, server and owner.
+The service occupies the helper slot until explicit shutdown, so remote sync/list
+operations require shutting it down first. Fresh launches after shutdown pay
+cold import cost; no startup speed is guaranteed across machines. Status reports
+cold-start or warm-reload timing.
 
 `DuelHud` publishes copied server-tick telemetry to a Fabric HUD layer: P1 at
 left, P2 at right, shared round/time/score/latency centrally. Health, absorption,

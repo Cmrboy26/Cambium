@@ -246,7 +246,7 @@ def session_response(session, request=None):
     port = session["port"]
     if type(port) is not int or not 1 <= port <= 65535 or not isinstance(session["token"], str):
         raise ValueError("Invalid terminal connection descriptor; run scripts/rosie-play.ps1 -Connect again")
-    connection = HTTPConnection("127.0.0.1", port, timeout=90)
+    connection = HTTPConnection("127.0.0.1", port, timeout=2 if request is None else 90)
     response = None
     try:
         headers = {"Authorization": "Bearer " + session["token"], "Content-Type": "application/json"}
@@ -336,6 +336,43 @@ def connect_terminal(game):
             saved = json.loads(descriptor.read_text(encoding="utf-8"))
             if saved.get("token") == token:
                 descriptor.unlink()
+
+
+def ensure_connection(game):
+    configuration = json.loads(config_path(game).read_text(encoding="utf-8-sig"))
+    descriptor = session_path(game)
+
+    def connected():
+        try:
+            session = json.loads(descriptor.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+        if session.get("connection_id") != connection_id(configuration):
+            raise ValueError("Rosie connection settings changed. Close the old connection and run setup again.")
+        try:
+            with session_response(session):
+                return True
+        except RuntimeError:
+            return False
+
+    if connected():
+        return
+    if sys.platform != "win32":
+        raise ValueError("Open scripts/rosie-play.ps1 -Connect in a local terminal, then retry this operation.")
+    process = subprocess.Popen(
+        [configuration["python"], "-u", "-B", "-m", "simulator.training.rosie", "connect",
+         "--minecraft-directory", str(Path(game).resolve())],
+        cwd=configuration["repository"], creationflags=subprocess.CREATE_NEW_CONSOLE)
+    deadline = time.monotonic() + 120
+    while not connected():
+        if process.poll() is not None:
+            raise RuntimeError("Rosie login terminal closed before connecting; retry and complete login in the terminal.")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Rosie login is still waiting. Finish login in the open terminal, then retry.")
+        try:
+            process.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def configure(game, host, user, runs_directory):
@@ -637,6 +674,7 @@ def main(argv=None):
     parser.add_argument("--user")
     parser.add_argument("--runs-directory", default=DEFAULT_RUNS)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--connect", dest="auto_connect", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     started = time.monotonic()
@@ -677,6 +715,9 @@ def main(argv=None):
                 emit("policy", run="Local duel", port=server.server_address[1], reload_token=reload_token, startup_seconds=time.monotonic() - started)
                 server.serve_forever()
             return 0
+        if args.auto_connect and not args.offline:
+            emit("startup", phase="Connecting to Rosie; complete any login in the terminal", seconds=time.monotonic() - started)
+            ensure_connection(args.minecraft_directory)
         rosie = Rosie(args.minecraft_directory, args.offline)
         if args.action == "runs":
             emit("runs", items=rosie.runs())

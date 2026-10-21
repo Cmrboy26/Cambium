@@ -42,11 +42,13 @@ final class RosieLauncher {
 	private static String reloadToken;
 	private static int reloadPort;
 	private static boolean reloading;
+	private static boolean matchStopped;
+	private static long reloadGeneration;
 
 	static void initialize() {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
 			var root = ClientCommands.literal("simrosie").executes(context -> message(context.getSource().getClient(),
-					"/simrosie runs, replays [run], replay [run] [file], duel [run], sync [run], status, stop"));
+					"/simrosie runs, replays [run], replay [run] [file], duel [run], sync [run], status, stop, shutdown"));
 			root.then(ClientCommands.literal("runs").executes(context -> start(context.getSource().getClient(), "runs", "latest", "latest")));
 			for (String action : List.of("replays", "replay", "duel", "sync")) {
 				var command = ClientCommands.literal(action)
@@ -65,10 +67,13 @@ final class RosieLauncher {
 			root.then(ClientCommands.literal("local").executes(context -> start(context.getSource().getClient(), "local", "latest", "latest")));
 			root.then(ClientCommands.literal("stop").executes(context -> {
 				Minecraft client = context.getSource().getClient();
-				boolean stopDuel = serving;
-				cancel();
-				if (stopDuel) LiveDuel.stop(client);
-				return message(client, "Rosie launcher stopped; cached files were kept.");
+				stopMatch(client);
+				return message(client, lastMessage);
+			}));
+			root.then(ClientCommands.literal("shutdown").executes(context -> {
+				Minecraft client = context.getSource().getClient();
+				stopOwned(client);
+				return message(client, lastMessage);
 			}));
 			dispatcher.register(root);
 		});
@@ -80,16 +85,34 @@ final class RosieLauncher {
 	}
 
 	static boolean isBusy() { return busy; }
-	static boolean isServing() { return serving && !reloading; }
-	static String status() { return busy ? operation + (isServing() ? "" : String.format(java.util.Locale.ROOT, " / %.1f s", (System.nanoTime() - startedAt) / 1.0e9)) : lastMessage; }
+	static boolean isServing() { return serving && !reloading && !matchStopped; }
+	static boolean hasInference() { return serving && worker != null && worker.isAlive(); }
+	static boolean canStartLocalMatch() { return !busy || hasInference() && !reloading; }
+	static String status() { return busy ? operation + (serving && !reloading ? "" : String.format(java.util.Locale.ROOT, " / %.1f s", (System.nanoTime() - startedAt) / 1.0e9)) : lastMessage; }
 	static List<JsonObject> remoteRuns() { return remoteRuns; }
 	static JsonObject progress() { return progress; }
+
+	static void stopMatch() {
+		reloadGeneration++;
+		reloading = false;
+		if (hasInference()) {
+			matchStopped = true;
+			operation = "Match stopped; inference ready";
+		} else cancel();
+	}
+
+	static void stopMatch(Minecraft client) {
+		stopMatch();
+		progress = null;
+		LiveDuel.stop(client);
+		lastMessage = hasInference() ? "Match stopped; inference kept warm" : "Stopped; local files kept";
+	}
 
 	static void stopOwned(Minecraft client) {
 		cancel();
 		progress = null;
 		LiveDuel.stop(client);
-		lastMessage = "Stopped; local files kept";
+		lastMessage = "Inference shut down; local files kept";
 	}
 
 	static int start(Minecraft client, String action, String run, String replay) {
@@ -105,7 +128,7 @@ final class RosieLauncher {
 			if (reloadToken != null && worker != null && worker.isAlive()) return reload(client, !action.equals("local-world"));
 			stopOwned(client);
 		}
-		if (busy) return message(client, "Rosie is busy: " + operation + ". Use /simrosie stop before switching.");
+		if (busy) return message(client, "Rosie is busy: " + operation + ". Use /simrosie shutdown before switching helpers.");
 		Path game = client.gameDirectory.toPath().toAbsolutePath();
 		Path configuration = game.resolve("config/cambium-rosie.json");
 		if (!Files.isRegularFile(configuration)) {
@@ -171,12 +194,14 @@ final class RosieLauncher {
 
 	private static int reload(Minecraft client, boolean arena) {
 		long selected = generation;
+		long selectedReload = ++reloadGeneration;
 		Object level = client.level;
 		var server = client.getSingleplayerServer();
 		UUID owner = client.player.getUUID();
 		int port = reloadPort;
 		String token = reloadToken;
 		reloading = true;
+		matchStopped = true;
 		startedAt = System.nanoTime();
 		operation = "Reloading fighters in warm local process";
 		LiveDuel.stop(client);
@@ -190,16 +215,17 @@ final class RosieLauncher {
 				JsonObject result = JsonParser.parseString(response.body()).getAsJsonObject();
 				if (!result.get("reloaded").getAsBoolean()) throw new IOException("Local service did not reload");
 				client.execute(() -> {
-					if (generation != selected || client.level != level || client.getSingleplayerServer() != server || server.isPublished()
+					if (generation != selected || reloadGeneration != selectedReload || client.level != level || client.getSingleplayerServer() != server || server.isPublished()
 							|| client.player == null || !owner.equals(client.player.getUUID())) return;
 					reloading = false;
+					matchStopped = false;
 					arenaMode = arena;
 					operation = String.format(java.util.Locale.ROOT, "Serving local duel / warm reload %.2f s", result.get("seconds").getAsDouble());
 					LiveDuel.connect(client, arena, port);
 				});
 			} catch (IOException | RuntimeException | InterruptedException error) {
 				client.execute(() -> {
-					if (generation != selected || client.level != level || client.getSingleplayerServer() != server || server.isPublished()
+					if (generation != selected || reloadGeneration != selectedReload || client.level != level || client.getSingleplayerServer() != server || server.isPublished()
 							|| client.player == null || !owner.equals(client.player.getUUID())) return;
 					reloading = false;
 					operation = "Local reload failed: " + error.getMessage();
@@ -220,6 +246,7 @@ final class RosieLauncher {
 				"simulator.training.rosie", local ? "local" : action, "--minecraft-directory", game.toString(),
 				"--run", run, "--replay", replay, "--json"));
 		if (local) arguments.addAll(List.of("--duel", game.resolve("sim-rosie-cache/duel.json").toString(), "--offline"));
+		else arguments.add("--connect");
 		if (action.equals("sync")) {
 			if (!List.of("policy", "latest", "all").contains(scope)) throw new IllegalArgumentException("Unknown sync scope");
 			arguments.addAll(List.of("--scope", scope, "--workers", "3"));
@@ -265,6 +292,7 @@ final class RosieLauncher {
 			case "replay" -> SimulationReplay.load(client, event.get("path").getAsString(), true);
 			case "policy" -> {
 				serving = true;
+				matchStopped = false;
 				if (event.has("reload_token")) {
 					reloadToken = event.get("reload_token").getAsString();
 					reloadPort = event.get("port").getAsInt();
@@ -295,11 +323,13 @@ final class RosieLauncher {
 
 	private static synchronized void cancel() {
 		generation++;
+		reloadGeneration++;
 		if (worker != null) terminate(worker);
 		worker = null;
 		busy = false;
 		serving = false;
 		reloading = false;
+		matchStopped = false;
 		reloadToken = null;
 		reloadPort = 0;
 		world = null;

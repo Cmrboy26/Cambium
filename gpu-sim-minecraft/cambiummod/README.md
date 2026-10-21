@@ -28,8 +28,9 @@ or all outputs, with transfer progress. **Library** groups policies by run, with
 a version selector and local-only run/policy display names.
 In **Duel**, choose an environment and independently select a policy or scripted
 controller for each fighter, set the round duration, then start. Synced setups
-run locally while offline; replacing a local duel reuses the warm Python process.
-**Live** provides pause/resume/reset/stop and join/leave controls. The debug
+run locally while offline. **Stop match** keeps Python/PyTorch warm for the next
+launch; **Shutdown inference** releases it. **Live** also has pause/resume/reset
+and join/leave controls. The debug
 HUD places P1 left, P2 right and match status centrally, with health/charge/time
 bars and gear icons. Toggle it there or with `/simduel hud`, never the action bar.
 Selections and aliases persist in the game folder. Existing commands still work.
@@ -59,7 +60,8 @@ Restart the service to load newer weights. [Full commands and limits](AGENTS.md#
 After [one-time local setup](../rosie/README.md#local-replays-and-duels), use
 `/simrosie runs`, `/simrosie replay <run>` or `/simrosie duel <run>` to fetch
 artifacts over SSH and play locally. `/simduel join` lets you fight the model;
-`/simrosie stop` stops its helper and duel. No remote inference server is needed.
+`/simrosie stop` stops the match but keeps ready inference warm;
+`/simrosie shutdown` also terminates the helper. No remote inference server is needed.
 
 ## Simulation Playback
 

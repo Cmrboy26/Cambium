@@ -351,9 +351,18 @@ setup after moving the checkout or changing interpreters. No SSH passwords are
 stored. Keep the config trusted:
 the mod executes its Python interpreter from its repository directory.
 
-Connect GlobalVPN. For password authentication, run
+Connect GlobalVPN. Minecraft remote operations pass `--connect` to the helper:
+it health-checks and reuses an existing matching session. On Windows, if none is
+working, it opens the configured Python `connect` command in a new visible console
+and waits up to two minutes for login. Closing that console before connection
+fails the operation; a timeout leaves it open so login can finish before retrying.
+The terminal stays open across completed operations and is separate from the
+inference process. Stop/disconnect does not close an already established terminal
+session. Close it explicitly with Ctrl+C when finished.
+On other platforms, open
 `scripts/rosie-play.ps1 -Connect -MinecraftDirectory <game>` in a **local terminal**
-and leave it open. Python starts interactive native SSH (`BatchMode=no`) with
+first. This manual command remains available on Windows too.
+Python starts interactive native SSH (`BatchMode=no`) with
 terminal stderr; SSH handles passwords, MFA, key passphrases and host-key prompts
 directly through the terminal. Never enter credentials in Minecraft or store them
 in the config. Ctrl+C or SSH disconnection ends this session.
@@ -369,9 +378,12 @@ protocol over the tunnel. The reader shuts down on SSH stdin EOF and only accept
 the three read-only artifact operations under the configured run root. Do not
 share the session descriptor; it grants temporary artifact access.
 
-Stale connections fail with `-Connect` instructions rather than silently trying
-password-less SSH again. Close the old connection before changing setup settings.
-With no descriptor, existing key/agent use still opens noninteractive SSH
+Launcher `--connect` operations reopen stale sessions in a visible Windows terminal,
+never as a hidden password prompt. A connection fingerprint mismatch fails rather
+than replacing another configuration's session. Close the old connection before
+changing setup settings. Direct CLI calls without `--connect` retain their existing
+behavior: stale connections fail with `-Connect` instructions, and with no descriptor,
+key/agent use still opens noninteractive SSH
 (`BatchMode=yes`) per request, with a ten-second connect timeout and keepalives.
 The SSH command/agent must then be available to Minecraft's process. Offline
 mode ignores the descriptor. Do not disable host-key checking.
@@ -390,6 +402,9 @@ before using this launcher.
 The helper is `python -B -m simulator.training.rosie <action>
 --minecraft-directory <game>`; actions are `setup`, `connect`, `runs`, `replays`,
 `replay`, `sync`, `duel`, `local`. `connect` requires a terminal, not `--json`/`--offline`.
+`--connect` enables automatic terminal startup/reuse for remote actions; offline
+and local actions never launch a connection. Health probes time out after two
+seconds; artifact requests retain their ninety-second timeout.
 `--run` and `--replay` default to `latest`; `--offline` uses only
 cached artifacts. `--json` emits newline-separated events for the mod. Run/replay
 basenames are limited to 120 ASCII letters, digits, dots, underscores or hyphens,

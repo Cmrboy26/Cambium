@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 
 from simulator.training.rosie import (
-    REMOTE_SCRIPT, SESSION_SCRIPT, Rosie, configure, connect_terminal, connection_id,
+    REMOTE_SCRIPT, SESSION_SCRIPT, Rosie, configure, connect_terminal, connection_id, ensure_connection,
     main, session_path, session_response, valid_name,
 )
 
@@ -1121,6 +1121,90 @@ class RosieTests(unittest.TestCase):
         payload = spawn.return_value.stdin.write.call_args.args[0]
         self.assertEqual(json.loads(base64.b64decode(payload))["token"], observed[0]["token"])
         self.assertFalse(session_path(self.game).exists())
+
+    def test_launcher_reuses_existing_terminal_connection(self):
+        descriptor = {"port": 12345, "token": "test-token",
+                      "connection_id": connection_id(self.rosie.configuration)}
+        session_path(self.game).write_text(json.dumps(descriptor), encoding="utf-8")
+        with patch("simulator.training.rosie.session_response", return_value=contextlib.nullcontext()), \
+                patch("simulator.training.rosie.subprocess.Popen") as spawn:
+            ensure_connection(self.game)
+        spawn.assert_not_called()
+
+    def test_launcher_opens_visible_terminal_and_waits_for_connection(self):
+        descriptor = {"port": 12345, "token": "test-token",
+                      "connection_id": connection_id(self.rosie.configuration)}
+
+        def ready(timeout):
+            session_path(self.game).write_text(json.dumps(descriptor), encoding="utf-8")
+            raise subprocess.TimeoutExpired("login", timeout)
+
+        with patch("simulator.training.rosie.sys.platform", "win32"), \
+                patch("simulator.training.rosie.subprocess.CREATE_NEW_CONSOLE", 16, create=True), \
+                patch("simulator.training.rosie.session_response", return_value=contextlib.nullcontext()), \
+                patch("simulator.training.rosie.subprocess.Popen") as spawn:
+            spawn.return_value.poll.return_value = None
+            spawn.return_value.wait.side_effect = ready
+            ensure_connection(self.game)
+        command = spawn.call_args.args[0]
+        self.assertEqual(command[0], self.rosie.configuration["python"])
+        self.assertIn("connect", command)
+        self.assertEqual(command[-1], str(self.game.resolve()))
+        self.assertEqual(spawn.call_args.kwargs, {"cwd": self.rosie.configuration["repository"], "creationflags": 16})
+
+    def test_launcher_reconnects_stale_terminal_session(self):
+        descriptor = {"port": 12345, "token": "expired",
+                      "connection_id": connection_id(self.rosie.configuration)}
+        session_path(self.game).write_text(json.dumps(descriptor), encoding="utf-8")
+        with patch("simulator.training.rosie.sys.platform", "win32"), \
+                patch("simulator.training.rosie.subprocess.CREATE_NEW_CONSOLE", 16, create=True), \
+                patch("simulator.training.rosie.session_response", side_effect=[RuntimeError("closed"), contextlib.nullcontext()]), \
+                patch("simulator.training.rosie.subprocess.Popen") as spawn:
+            ensure_connection(self.game)
+        spawn.assert_called_once()
+
+    def test_launcher_reports_closed_login_terminal(self):
+        with patch("simulator.training.rosie.sys.platform", "win32"), \
+                patch("simulator.training.rosie.subprocess.CREATE_NEW_CONSOLE", 16, create=True), \
+                patch("simulator.training.rosie.subprocess.Popen") as spawn:
+            spawn.return_value.poll.return_value = 1
+            with self.assertRaisesRegex(RuntimeError, "closed before connecting"):
+                ensure_connection(self.game)
+
+    def test_launcher_bounds_login_wait_without_closing_terminal(self):
+        with patch("simulator.training.rosie.sys.platform", "win32"), \
+                patch("simulator.training.rosie.subprocess.CREATE_NEW_CONSOLE", 16, create=True), \
+                patch("simulator.training.rosie.time.monotonic", side_effect=[0, 121]), \
+                patch("simulator.training.rosie.subprocess.Popen") as spawn:
+            spawn.return_value.poll.return_value = None
+            with self.assertRaisesRegex(RuntimeError, "Finish login"):
+                ensure_connection(self.game)
+        spawn.return_value.terminate.assert_not_called()
+
+    def test_cli_connects_before_remote_requests_and_skips_offline(self):
+        output = io.StringIO()
+        with patch("simulator.training.rosie.ensure_connection") as connect, \
+                patch.object(Rosie, "runs", return_value=[]), contextlib.redirect_stdout(output):
+            self.assertEqual(main(["runs", "--minecraft-directory", str(self.game), "--connect", "--json"]), 0)
+        connect.assert_called_once_with(str(self.game))
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([event["event"] for event in events], ["startup", "runs"])
+        with patch("simulator.training.rosie.ensure_connection") as connect, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["runs", "--minecraft-directory", str(self.game), "--connect", "--offline", "--json"]), 0)
+        connect.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "win32", "Requires Windows console creation")
+    def test_windows_login_console_has_terminal_handles_from_redirected_helper(self):
+        code = (
+            "import subprocess, sys\n"
+            "process = subprocess.Popen([sys.executable, '-c', "
+            "'import sys; sys.exit(0 if sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty() else 1)'], "
+            "creationflags=subprocess.CREATE_NEW_CONSOLE)\n"
+            "sys.exit(process.wait(timeout=10))\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
 
     def test_terminal_connect_rejects_nonterminal_invocation(self):
         with patch("sys.stdin.isatty", return_value=False):

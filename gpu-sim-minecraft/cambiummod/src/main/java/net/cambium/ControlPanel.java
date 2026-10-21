@@ -147,7 +147,7 @@ final class ControlPanel extends Screen {
 		JsonObject environment = environment();
 		label("Environment", left, 63, contentWidth, 0xFFB5C2BE);
 		button(environment == null ? "No local environments" : name(environment), left, 76, contentWidth - 100,
-				() -> choose("Environment", library == null ? List.of() : library.environments, entry -> { environmentId = identity(entry); persist(); }));
+				() -> choose("Environment", library == null ? List.of() : library.environmentChoices(environmentId), entry -> { environmentId = identity(entry); persist(); }));
 		addRenderableWidget(CycleButton.builder(value -> Component.literal(value ? "Arena" : "World"), arena)
 				.withValues(true, false).displayOnlyValue().create(left + contentWidth - 96, 76, 96, 20, Component.literal("Location"),
 						(widget, value) -> { arena = value; persist(); rebuildWidgets(); }));
@@ -173,7 +173,7 @@ final class ControlPanel extends Screen {
 			else if (modes[index].equals("Policy") && policy != null) label("Update " + policy.get("update").getAsLong() + " / " + policy.get("stage").getAsString(), column, 176, columnWidth, 0xFFACBDB5);
 		}
 		button(RosieLauncher.isServing() ? "Replace live duel" : "Start live duel", left, height - 30, contentWidth - 124, this::launch)
-				.active = environment != null && (!RosieLauncher.isBusy() || RosieLauncher.isServing());
+				.active = environment != null && RosieLauncher.canStartLocalMatch();
 		button(maxTicks == 0 ? "Duration: Default" : String.format(Locale.ROOT, "Duration: %.1f s", maxTicks / 20.0), left + contentWidth - 120, height - 30, 120,
 				() -> minecraft.gui.setScreen(new DurationScreen()));
 	}
@@ -245,7 +245,8 @@ final class ControlPanel extends Screen {
 		}
 		if (runs.isEmpty()) label("No remote run list loaded", left, 121, contentWidth, 0xFFACBDB5);
 		pager(runs.size(), rows, height - 96);
-		button("Cancel helper / stop local service", left, height - 30, contentWidth, () -> { RosieLauncher.stopOwned(minecraft); rebuildWidgets(); }).active = RosieLauncher.isBusy();
+		button(RosieLauncher.hasInference() ? "Shutdown inference" : "Cancel helper", left, height - 30, contentWidth,
+				() -> { RosieLauncher.stopOwned(minecraft); rebuildWidgets(); }).active = RosieLauncher.isBusy();
 	}
 
 	private void live() {
@@ -253,15 +254,17 @@ final class ControlPanel extends Screen {
 		int actionWidth = (contentWidth - 12) / 4;
 		for (int index = 0; index < commands.length; index++) {
 			String command = commands[index];
-			button(Character.toUpperCase(command.charAt(0)) + command.substring(1), left + index * (actionWidth + 4), 66, actionWidth,
-					() -> { if (command.equals("stop")) RosieLauncher.stopOwned(minecraft); else LiveDuel.command(minecraft, command); });
+			button(command.equals("stop") ? "Stop match" : Character.toUpperCase(command.charAt(0)) + command.substring(1), left + index * (actionWidth + 4), 66, actionWidth,
+					() -> { if (command.equals("stop")) RosieLauncher.stopMatch(minecraft); else LiveDuel.command(minecraft, command); });
 		}
 		button("Join A", left, 92, actionWidth, () -> LiveDuel.joinSide(minecraft, 0));
 		button("Join B", left + actionWidth + 4, 92, actionWidth, () -> LiveDuel.joinSide(minecraft, 1));
 		button("Leave", left + 2 * (actionWidth + 4), 92, actionWidth, () -> LiveDuel.command(minecraft, "leave"));
 		button("Sidebar: " + (DuelHud.enabled() ? "On" : "Off"), left + 3 * (actionWidth + 4), 92, actionWidth,
 				() -> { DuelHud.toggle(minecraft); rebuildWidgets(); });
-		button("Return to game", left, height - 30, contentWidth, () -> minecraft.gui.setScreen(null));
+		button("Return to game", left, height - 30, (contentWidth - 4) / 2, () -> minecraft.gui.setScreen(null));
+		button("Shutdown inference", left + (contentWidth + 4) / 2, height - 30, (contentWidth - 4) / 2,
+				() -> { RosieLauncher.stopOwned(minecraft); rebuildWidgets(); }).active = RosieLauncher.hasInference();
 	}
 
 	private void pager(int count, int rows) {
@@ -313,7 +316,7 @@ final class ControlPanel extends Screen {
 		minecraft.gui.setScreen(new ChoiceScreen(title, entries, entry -> { selected.accept(entry); status = ""; }));
 	}
 
-	private JsonObject environment() { return library == null ? null : library.find(library.environments, environmentId); }
+	private JsonObject environment() { return library == null ? null : library.find(library.environmentChoices(environmentId), environmentId); }
 	private static String identity(JsonObject entry) { return entry.get("id").getAsString(); }
 	private static String name(JsonObject entry) { return entry.get("name").getAsString(); }
 	private void label(String text, int position, int top, int limit, int color) { labels.add(new Label(text, position, top, limit, color)); }

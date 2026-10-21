@@ -34,6 +34,7 @@ public final class ReplayAnalysisChecks {
 		checkSprintInput();
 		checkMinorCollision();
 		checkRosieLauncher();
+		checkWarmInference();
 		checkDuelLibrary();
 		for (int width : new int[]{320, 426, 640, 960, 1280}) {
 			DuelHud.Layout layout = DuelHud.layout(width);
@@ -112,6 +113,7 @@ public final class ReplayAnalysisChecks {
 		require(builder.command().getFirst().equals(config.get("python").getAsString()), "Python executable must remain one argument");
 		require(builder.command().contains(root.toString()) && builder.command().contains("run;not-a-shell"), "Helper arguments must be literal, including spaces and shell metacharacters");
 		require(builder.command().contains("--json") && !builder.redirectErrorStream(), "Helper stdout must remain a separate JSON event stream");
+		require(builder.command().contains("--connect"), "Remote commands must automatically open or reuse the terminal connection");
 		require(builder.directory().toPath().equals(root.resolve("checkout with spaces")), "Module must start from configured repository");
 		for (String scope : java.util.List.of("policy", "latest", "all")) {
 			var sync = RosieLauncher.helper(config, root, "sync", "run", "latest", scope).command();
@@ -120,10 +122,69 @@ public final class ReplayAnalysisChecks {
 		for (String action : java.util.List.of("local", "local-world")) {
 			ProcessBuilder local = RosieLauncher.helper(config, root, action, "latest", "latest");
 			require(local.command().get(5).equals("local") && local.command().contains("--offline"), "Local launch must select offline mode, including world mode");
+			require(!local.command().contains("--connect"), "Offline launches must never open an SSH login terminal");
 			int argument = local.command().indexOf("--duel");
 			require(argument >= 0 && local.command().get(argument + 1).equals(root.resolve("sim-rosie-cache/duel.json").toString()), "Offline duel path must remain one literal argument");
 		}
 		System.out.println("PASS: Rosie helper uses literal arguments, configured repository and separate JSON output");
+	}
+
+	private static void checkWarmInference() throws Exception {
+		var fields = new java.util.HashMap<String, java.lang.reflect.Field>();
+		var previous = new java.util.LinkedHashMap<java.lang.reflect.Field, Object>();
+		for (String name : java.util.List.of("worker", "busy", "serving", "reloading", "matchStopped", "reloadGeneration",
+				"generation", "reloadToken", "reloadPort", "world", "operation")) {
+			var field = RosieLauncher.class.getDeclaredField(name);
+			field.setAccessible(true);
+			fields.put(name, field);
+			previous.put(field, field.get(null));
+		}
+		try {
+			LauncherProcess process = new LauncherProcess();
+			fields.get("worker").set(null, process);
+			fields.get("busy").set(null, true);
+			fields.get("serving").set(null, true);
+			fields.get("reloading").set(null, true);
+			fields.get("matchStopped").set(null, false);
+			fields.get("generation").set(null, 42L);
+			fields.get("reloadGeneration").set(null, 7L);
+			fields.get("reloadToken").set(null, "fixture-reload-token");
+			fields.get("reloadPort").set(null, 12345);
+			require(!RosieLauncher.canStartLocalMatch(), "A pending reload must disable starting another match");
+			RosieLauncher.stopMatch();
+			require(process.isAlive() && fields.get("worker").get(null) == process, "Stop match must retain the same ready inference process");
+			require(RosieLauncher.hasInference() && !RosieLauncher.isServing() && RosieLauncher.canStartLocalMatch(), "Stopped inference must be ready for another local match without reporting active actors");
+			require(fields.get("reloadGeneration").getLong(null) > 7 && fields.get("generation").getLong(null) == 42, "Stop match must invalidate pending reloads without invalidating the process monitor");
+			require(fields.get("reloadToken").get(null).equals("fixture-reload-token") && fields.get("reloadPort").getInt(null) == 12345, "Stop match must retain authenticated reload access");
+			RosieLauncher.stopMatch();
+			require(process.isAlive() && RosieLauncher.status().contains("inference ready"), "Repeated match stops must leave inference warm");
+			var shutdown = RosieLauncher.class.getDeclaredMethod("cancel");
+			shutdown.setAccessible(true);
+			shutdown.invoke(null);
+			require(!process.isAlive() && !RosieLauncher.isBusy() && !RosieLauncher.hasInference(), "Explicit shutdown and lifecycle cleanup must terminate owned inference");
+			require(fields.get("reloadToken").get(null) == null && fields.get("reloadPort").getInt(null) == 0, "Shutdown must clear inference credentials");
+			LauncherProcess loading = new LauncherProcess();
+			fields.get("worker").set(null, loading);
+			fields.get("busy").set(null, true);
+			RosieLauncher.stopMatch();
+			require(!loading.isAlive() && !RosieLauncher.isBusy(), "Stopping before inference is ready must cancel startup rather than retain an unusable helper");
+			System.out.println("PASS: warm inference retention, reload cancellation, restart readiness and explicit shutdown");
+		} finally {
+			for (var entry : previous.entrySet()) entry.getKey().set(null, entry.getValue());
+		}
+	}
+
+	private static final class LauncherProcess extends Process {
+		private boolean alive = true;
+		@Override public java.io.OutputStream getOutputStream() { return java.io.OutputStream.nullOutputStream(); }
+		@Override public java.io.InputStream getInputStream() { return java.io.InputStream.nullInputStream(); }
+		@Override public java.io.InputStream getErrorStream() { return java.io.InputStream.nullInputStream(); }
+		@Override public int waitFor() { alive = false; return 0; }
+		@Override public int exitValue() { if (alive) throw new IllegalThreadStateException(); return 0; }
+		@Override public void destroy() { alive = false; }
+		@Override public Process destroyForcibly() { destroy(); return this; }
+		@Override public boolean isAlive() { return alive; }
+		@Override public java.util.stream.Stream<ProcessHandle> descendants() { return java.util.stream.Stream.empty(); }
 	}
 
 	private static void checkDuelLibrary() throws Exception {
@@ -176,9 +237,39 @@ public final class ReplayAnalysisChecks {
 			snapshot.addProperty("update", 200);
 			entries.add(snapshot);
 			index.add("policies", entries);
-			index.add("environments", new JsonArray());
+			JsonArray environments = new JsonArray();
+			environment.addProperty("id", "fixture:latest.pt");
+			environment.addProperty("name", "Fixture / latest environment");
+			environment.add("environment", JsonParser.parseString("""
+				{"name":"Shared arena","max_ticks":200,"arena":{"width":5},"loadout":{"weapon":"sword"}}
+				"""));
+			environments.add(environment);
+			JsonObject duplicate = environment.deepCopy();
+			duplicate.addProperty("id", "another:snapshots/early.pt");
+			duplicate.addProperty("name", "Another policy / early environment");
+			duplicate.getAsJsonObject("environment").addProperty("name", "Another label");
+			environments.add(duplicate);
+			for (String field : java.util.List.of("max_ticks", "arena", "loadout", "contract_hash")) {
+				JsonObject different = environment.deepCopy();
+				different.addProperty("id", "fixture:" + field);
+				different.addProperty("name", "Fixture / " + field);
+				switch (field) {
+					case "max_ticks" -> different.getAsJsonObject("environment").addProperty("max_ticks", 400);
+					case "arena" -> different.getAsJsonObject("environment").getAsJsonObject("arena").addProperty("width", 9);
+					case "loadout" -> different.getAsJsonObject("environment").getAsJsonObject("loadout").addProperty("weapon", "axe");
+					case "contract_hash" -> different.addProperty("contract_hash", "b".repeat(64));
+				}
+				environments.add(different);
+			}
+			index.add("environments", environments);
 			DuelLibrary.write(library.root.resolve("library.json"), index);
 			DuelLibrary reopened = new DuelLibrary(game);
+			var choices = reopened.environmentChoices("another:snapshots/early.pt");
+			require(choices.size() == 5 && reopened.environments.size() == 6, "Environment choices must group policy copies without removing cached entries or distinct duration, geometry, loadout and contract variants");
+			require(choices.getFirst().get("id").getAsString().equals("another:snapshots/early.pt"), "Grouping must preserve an already selected duplicate's identity");
+			require(choices.getFirst().get("name").getAsString().equals("Another label"), "Environment choices must use environment names rather than checkpoint labels");
+			require(choices.stream().map(choice -> choice.get("name").getAsString()).distinct().count() == choices.size(), "Different setups sharing an environment name must retain distinguishable source labels");
+			require(reopened.environments.getFirst().get("name").getAsString().equals("Fixture / latest environment"), "Selector grouping must not modify cached display names");
 			require(reopened.runs.size() == 1 && reopened.versions("fixture").size() == 2, "Legacy libraries must group downloaded versions by run");
 			require(reopened.versions("fixture").getFirst().get("id").getAsString().endsWith(":latest.pt"), "Latest must appear before named policy versions");
 			reopened.rename(reopened.runs.getFirst(), "My local run");
