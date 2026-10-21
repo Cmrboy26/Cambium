@@ -34,6 +34,8 @@ int mcsim_step_reward_totals(void* handle, const uint8_t* mask, double* totals);
 /* Replace the episode timeout in 1..1000000 without rebuilding terrain.
    Call at a stage reset boundary; this does not reset worlds or counters. */
 int mcsim_set_max_ticks(void* handle, int max_ticks);
+int mcsim_set_profiling(void* handle, int enabled);
+const char* mcsim_profile(void* handle);
 
 /* json_utf8 is a world-count array. Selected entries are two concrete Scene
    player definitions; unselected entries must be null. A null mask selects all.

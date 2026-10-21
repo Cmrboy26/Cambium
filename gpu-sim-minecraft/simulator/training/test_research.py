@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from backend.fast_rl_model import ActorCritic
+from simulator.training.analyze_metrics import main as analyze_metrics
 from simulator.training._test_plans import example_plan
 from simulator.training.contract import from_legacy, resolve_scenario
 from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
@@ -22,6 +23,7 @@ from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.research import OpponentPool, SampledWorlds, collect, evaluate
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
+from simulator.training.timing import CollectionTimer
 
 
 def short_plan():
@@ -33,6 +35,24 @@ def short_plan():
 
 
 class PlanChecks(unittest.TestCase):
+    def test_collection_timer_cuda_events_are_opt_in(self):
+        with patch("torch.cuda.Event") as event, patch("torch.cuda.current_stream"), \
+                patch("torch.cuda.synchronize") as synchronize:
+            event.return_value.elapsed_time.return_value = 12.5
+            disabled = CollectionTimer("cuda")
+            with disabled.phase("compute", cuda=True):
+                pass
+            event.assert_not_called()
+            synchronize.assert_not_called()
+            enabled = CollectionTimer("cuda", True)
+            with enabled.phase("compute", cuda=True):
+                pass
+            synchronize.assert_not_called()
+            report = enabled.finish()
+            self.assertEqual(event.call_count, 2)
+            synchronize.assert_called_once_with(torch.device("cuda"))
+            self.assertEqual(report["cuda_stream_seconds"], {"compute": 0.0125})
+
     def test_legacy_exports_and_roundtrip(self):
         self.assertIs(SCHEMA, LEGACY_SCHEMA)
         self.assertIs(SCHEMA_V2, LEGACY_V2)
@@ -240,6 +260,114 @@ class SnapshotChecks(unittest.TestCase):
             header = json.loads(source.readline())
         self.assertEqual(header["training"]["opponent"]["controller"]["snapshot_update"], 0)
         self.assertEqual(aim_one["metadata"]["controls"], {"fixed": {"attack": False}})
+
+    def test_collection_profile_preserves_rollout_and_rng(self):
+        raw = deepcopy(self.raw)
+        raw["opponents"] = {"target": {"type": "scripted", "controller": "stationary_target"}}
+        raw["mixtures"] = {"past": [{"id": "target", "weight": 1}]}
+        raw["stages"][0]["spawns"] = {"sample": "episode",
+            "region": {"min": [-4, 1, -4], "max": [4, 1, 4]}, "minimum_separation": 1}
+        results = []
+        for profile in (False, True):
+            torch.manual_seed(123)
+            plan = resolve_plan(raw, self.directory)
+            worlds = SampledWorlds(plan["scenario"], plan["policy"], 4, "cpu", self.library, 2, 42)
+            try:
+                worlds.configure(plan["stages"][0])
+                pool = OpponentPool(plan["opponents"], plan["policy"], 4, "cpu", 42)
+                pool.configure(plan["stages"][0]["opponents"])
+                pool.reset(np.ones(4, dtype=bool))
+                model = ActorCritic(worlds.observation_dim, 8,
+                    action_sizes=dict(zip(worlds.action_names, plan["policy"]["action_sizes"])))
+                fixed = fixed_indices(plan["policy"], plan["stages"][0]["controls"])
+                result = collect(model, worlds, pool, worlds.observe(), 3, torch.device("cpu"), fixed,
+                                 profile=profile)
+                results.append((result, torch.get_rng_state(), worlds.sampler.state_dict(), pool.state_dict()))
+            finally:
+                worlds.close()
+        (plain, plain_rng, plain_sampler, plain_pool), (timed, timed_rng, timed_sampler, timed_pool) = results
+        self.assertNotIn("collection_profile", plain[0])
+        report = timed[0].pop("collection_profile")
+        for name, value in plain[0].items():
+            if isinstance(value, torch.Tensor):
+                self.assertTrue(torch.equal(value, timed[0][name]), name)
+            else:
+                self.assertEqual(value, timed[0][name])
+        np.testing.assert_array_equal(plain[1], timed[1])
+        self.assertEqual(plain[2:], timed[2:])
+        self.assertTrue(torch.equal(plain_rng, timed_rng))
+        self.assertEqual(plain_sampler, timed_sampler)
+        self.assertEqual(plain_pool, timed_pool)
+        self.assertEqual(report["counts"]["reset_worlds"], timed[2] + timed[3])
+        self.assertEqual(report["counts"]["reset_calls"], 1)
+        self.assertGreaterEqual(report["counts"]["spawn_attempts"], report["counts"]["reset_worlds"])
+        self.assertEqual(report["cuda_stream_seconds"], {})
+        self.assertGreater(report["seconds"]["environment_reset"], 0)
+        self.assertGreater(report["seconds"]["gae"], 0)
+        self.assertGreater(report["native_seconds"]["reset_validate"], 0)
+        self.assertGreater(report["native_seconds"]["step_decode"], 0)
+        self.assertEqual(report["counts"]["native_batches"], 1)
+        self.assertLessEqual(sum(value for name, value in report["seconds"].items() if "." not in name),
+                             report["total_seconds"])
+        for phase in ("sample", "payload", "json_encode", "native", "copy_outputs"):
+            self.assertGreater(report["seconds"][f"environment_reset.{phase}"], 0)
+
+    def test_collection_profile_cadence_and_training_parity(self):
+        self.assertEqual(arguments(["--plan", str(self.path)]).profile_every, 0)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            arguments(["--profile-every", "-1"])
+        checkpoints = []
+        for interval in (0, 2):
+            output = self.directory / f"profile-{interval}"
+            with contextlib.redirect_stdout(io.StringIO()):
+                main([*self.flags, "--updates", "2", "--output", str(output), "--profile-every", str(interval)])
+            rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([row["update"] for row in rows if "collection_profile" in row],
+                             [2] if interval else [])
+            checkpoints.append(torch.load(output / "latest.pt", weights_only=True))
+            self.assertEqual(json.loads((output / "config.json").read_text())["options"]["profile_every"], interval)
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                analyze_metrics([str(output), "--timings", "--skip-updates", "0", "--json"])
+            report = json.loads(captured.getvalue())
+            self.assertEqual(report["profiled_updates"], 1 if interval else 0)
+            self.assertEqual(report["groups"]["unprofiled"]["updates"], 1 if interval else 2)
+        for name, value in checkpoints[0]["model"].items():
+            self.assertTrue(torch.equal(value, checkpoints[1]["model"][name]), name)
+        self.assertTrue(torch.equal(checkpoints[0]["rng_state"], checkpoints[1]["rng_state"]))
+        self.assertEqual(checkpoints[0]["research"]["sampler"], checkpoints[1]["research"]["sampler"])
+        output = self.directory / "profile-2"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library, "--updates", "1",
+                  "--output", str(output), "--profile-every", "3"])
+        rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertIn("collection_profile", rows[-1])
+
+    def test_collection_profile_cleanup_on_error(self):
+        plan = resolve_plan(self.raw, self.directory)
+        worlds = SampledWorlds(plan["scenario"], plan["policy"], 4, "cpu", self.library, 2, 42)
+        self.addCleanup(worlds.close)
+        timer = CollectionTimer("cpu", True)
+        with self.assertRaisesRegex(RuntimeError, "probe"):
+            with worlds.profile_collection(timer):
+                worlds.observe()
+                raise RuntimeError("probe")
+        environment = worlds.groups[0][1]
+        saved = json.loads(environment.native.mcsim_profile(environment._handle))
+        worlds.observe()
+        self.assertEqual(saved, json.loads(environment.native.mcsim_profile(environment._handle)))
+        self.assertGreater(timer.native_seconds["observe"], 0)
+
+    def test_collection_profile_requires_new_native_api_only_when_enabled(self):
+        plan = resolve_plan(self.raw, self.directory)
+        worlds = SampledWorlds(plan["scenario"], plan["policy"], 4, "cpu", self.library, 2, 42)
+        self.addCleanup(worlds.close)
+        with patch.object(worlds.groups[0][1].native, "mcsim_set_profiling", None):
+            with worlds.profile_collection(CollectionTimer("cpu")):
+                worlds.observe()
+            with self.assertRaisesRegex(RuntimeError, "Rebuild minecraft_sim_training"):
+                with worlds.profile_collection(CollectionTimer("cpu", True)):
+                    self.fail("Old native libraries cannot produce native profiles")
 
     def test_retained_saves_are_opt_in_and_initialize_seeds_frozen_policy(self):
         output = self.directory / "source"

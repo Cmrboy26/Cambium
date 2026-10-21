@@ -1,6 +1,7 @@
 """Host-staged two-player training adapter over the shared C++/CUDA simulator."""
 
 import ctypes
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import numpy as np
 from simulator.training.contract import CATALOGUE_HASH, from_legacy, validate_contract
 from simulator.training.legacy import ACTION_NAMES, ACTION_SIZES, SCHEMA, SCHEMA_V2, SCHEMAS
+from simulator.training.timing import CollectionTimer
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MAX_TICKS = 300
@@ -207,6 +209,37 @@ class Environment:
         if not self._handle:
             raise RuntimeError("Environment is closed")
 
+    @contextmanager
+    def profile_collection(self, timer):
+        if not timer.enabled:
+            yield
+            return
+        self._require_open()
+        setter = getattr(self.native, "mcsim_set_profiling", None)
+        getter = getattr(self.native, "mcsim_profile", None)
+        if setter is None or getter is None:
+            raise RuntimeError("Rebuild minecraft_sim_training to enable collection profiling")
+        setter.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        setter.restype = ctypes.c_int
+        getter.argtypes = [ctypes.c_void_p]
+        getter.restype = ctypes.c_char_p
+        self._check(setter(self._handle, 1))
+        try:
+            yield
+        finally:
+            try:
+                encoded = getter(self._handle)
+                if encoded is None:
+                    raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
+                report = json.loads(encoded)
+                if report.get("version") != 1:
+                    raise RuntimeError("Unsupported native collection profile version")
+                for name, seconds in report["seconds"].items():
+                    timer.native_seconds[name] = timer.native_seconds.get(name, 0.0) + seconds
+                timer.count("native_batches")
+            finally:
+                self._check(setter(self._handle, 0))
+
     def observe(self):
         self._require_open()
         self._check(self.native.mcsim_observe(self._handle, self._observations.ctypes.data))
@@ -270,8 +303,9 @@ class Environment:
         self._check(self.native.mcsim_reset(self._handle, selected.ctypes.data, self._observations.ctypes.data))
         return self._observations.copy()
 
-    def reset_players(self, players, mask):
+    def reset_players(self, players, mask, timer=None):
         """Reset selected episodes without rebuilding their immutable terrain."""
+        timer = timer or CollectionTimer("cpu")
         self._require_open()
         raw = np.asarray(mask)
         if raw.shape != (self.count,) or raw.dtype.kind not in "bui" or not np.isin(raw, [0, 1]).all():
@@ -284,9 +318,12 @@ class Environment:
             raise RuntimeError("Rebuild minecraft_sim_training for sampled episode resets")
         function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
         function.restype = ctypes.c_int
-        self._check(function(self._handle, selected.ctypes.data,
-            json.dumps(players, allow_nan=False).encode("utf-8"), self._observations.ctypes.data))
-        return self._observations.copy()
+        with timer.phase("environment_reset.json_encode"):
+            payload = json.dumps(players, allow_nan=False).encode("utf-8")
+        with timer.phase("environment_reset.native"):
+            self._check(function(self._handle, selected.ctypes.data, payload, self._observations.ctypes.data))
+        with timer.phase("environment_reset.copy_outputs"):
+            return self._observations.copy()
 
     def episode_scenario(self, environment=0):
         self._require_open()

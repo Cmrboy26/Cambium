@@ -72,6 +72,12 @@ limits still determine whether eligible training jobs actually run concurrently.
 ### Interactive Submission
 
 Run `bash rosie/submit.sh` from any working directory using the script's path.
+Use `bash rosie/submit.sh --profile-every 10` to record collection profiles every
+ten global updates for all jobs in that invocation; combine with `--dry-run`
+to preview without submitting. Profiling defaults off, ignores inherited
+`SIM_PROFILE_EVERY` in the wizard, and does not add or shift prompts. Choose a
+unique baseline run name. See the [timing schema and report commands](../simulator/training/AGENTS.md#collection-profiling)
+before comparing profiled and ordinary update throughput.
 The wizard changes to the project root. Enter accepts each displayed default;
 submission requires an explicit `y` after the escaped command preview.
 `--dry-run` walks through the same prompts without calling `sbatch`.
@@ -147,6 +153,8 @@ Supported training environment variables:
 - `SIM_EPOCHS`, `SIM_MINIBATCH_SIZE`, `SIM_HIDDEN_DIM`, `SIM_LR`: optional
   overrides of the plan's learner settings; unset by default.
 - `SIM_THREADS`: CPU threads; default 4. The plan owns the seed.
+- `SIM_PROFILE_EVERY`: collection profiling interval in global updates; default
+  0 (off). Positive intervals add `collection_profile` to sampled metric rows.
 - `SIM_BUILD_DIR`: optional shared build cache override; defaults to the
   architecture-specific directory above. The same lock/snapshot rules apply.
 - `SIM_PLAN`: version-2 training plan path relative to `gpu-sim-minecraft` or

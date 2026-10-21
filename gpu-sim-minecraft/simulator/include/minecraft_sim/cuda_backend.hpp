@@ -21,6 +21,7 @@ public:
     void uploadControls(const Controls* controls, std::size_t count);
     void resetEnvironments(const int* ids, std::size_t count, const PlayerState* players);
     void step(int ticks = 1);
+    void synchronize() const;
     void download(BatchView destination) const;
 
 private:

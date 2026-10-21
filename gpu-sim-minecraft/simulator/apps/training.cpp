@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -24,6 +25,15 @@ constexpr std::array<float, 9> yaw_bins{-20, -10, -5, -2, 0, 2, 5, 10, 20};
 constexpr std::array<float, 5> pitch_bins{-5, -2, 0, 2, 5};
 constexpr std::array<int, 9> forward{0, 1, 1, 0, -1, -1, -1, 0, 1};
 constexpr std::array<int, 9> strafe{0, 0, -1, -1, -1, 0, 1, 1, 1};
+
+enum ProfilePhase : std::size_t {
+    StepDecode, ControlsUpload, Physics, StateDownload, Rewards, StepObserve,
+    ResetJson, ResetValidate, ResetApply, ResetObserve, Observe, ProfilePhaseCount
+};
+constexpr std::array<const char*, ProfilePhaseCount> profile_names{
+    "step_decode", "controls_upload", "physics", "state_download", "rewards", "step_observe",
+    "reset_json", "reset_validate", "reset_apply", "reset_observe", "observe"
+};
 
 double wrapYaw(double angle) {
     return angle - 360.0 * std::floor((angle + 180.0) / 360.0);
@@ -56,6 +66,8 @@ struct TrainingBatch {
     int schema_version;
     int features;
     int heads;
+    bool profiling = false;
+    std::array<double, ProfilePhaseCount> profiling_seconds{};
 #if defined(MCSIM_HAS_CUDA)
     std::unique_ptr<CudaBatch> gpu;
 #endif
@@ -109,12 +121,23 @@ struct TrainingBatch {
         }
     }
 
+    std::chrono::steady_clock::time_point profileStart() const {
+        return profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    }
+
+    void profileEnd(ProfilePhase phase, std::chrono::steady_clock::time_point start) {
+        if (profiling) {
+            profiling_seconds[phase] += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        }
+    }
+
     BatchView view() {
         return {players.data(), queued.data(), held.data(), worlds.data(),
                 static_cast<int>(worlds.size()), 2, blocks.data(), {terrain.sine.data()}};
     }
 
     void reset(const std::uint8_t* mask) {
+        const auto start = profileStart();
         std::vector<int> ids;
         std::vector<PlayerState> initial;
         for (int environment = 0; environment < static_cast<int>(worlds.size()); ++environment) {
@@ -141,11 +164,14 @@ struct TrainingBatch {
 #if defined(MCSIM_HAS_CUDA)
         if (gpu) {
             gpu->resetEnvironments(ids.data(), ids.size(), initial.data());
+            if (profiling) gpu->synchronize();
         }
 #endif
+        profileEnd(ResetApply, start);
     }
 
     void resetPlayers(const std::uint8_t* mask, const nlohmann::json& definitions) {
+        const auto start = profileStart();
         if (!definitions.is_array() || definitions.size() != worlds.size()) {
             throw std::invalid_argument("Reset players must be an array with one entry per world");
         }
@@ -177,6 +203,7 @@ struct TrainingBatch {
             pending.emplace_back(environment, std::move(parsed));
         }
         for (auto& [environment, parsed] : pending) episode_players[environment] = std::move(parsed);
+        profileEnd(ResetValidate, start);
         reset(mask);
     }
 
@@ -280,6 +307,7 @@ struct TrainingBatch {
 
     void step(const std::int32_t* actions, float* observations, float* rewards,
               std::uint8_t* terminated, std::uint8_t* truncated) {
+        const auto decode_start = profileStart();
         if (std::any_of(finished.begin(), finished.end(), [](auto value) { return value != 0; })) {
             throw std::invalid_argument("Reset finished environments before the next step");
         }
@@ -324,21 +352,32 @@ struct TrainingBatch {
             }
             queued[index] = controls;
         }
+            profileEnd(StepDecode, decode_start);
 #if defined(MCSIM_HAS_CUDA)
         if (gpu) {
+                const auto upload_start = profileStart();
             gpu->uploadControls(queued.data(), queued.size());
+                profileEnd(ControlsUpload, upload_start);
+                const auto physics_start = profileStart();
             gpu->step();
+                if (profiling) gpu->synchronize();
+                profileEnd(Physics, physics_start);
+                const auto download_start = profileStart();
             gpu->download(view());
+                profileEnd(StateDownload, download_start);
         } else
 #endif
         {
+                const auto physics_start = profileStart();
 #if defined(_OPENMP)
 #pragma omp parallel for
 #endif
             for (int environment = 0; environment < static_cast<int>(worlds.size()); ++environment) {
                 view().world(environment).processTick();
             }
+            profileEnd(Physics, physics_start);
         }
+        const auto rewards_start = profileStart();
         std::fill_n(rewards, players.size(), 0.0F);
         for (auto& totals : step_reward_totals) totals.fill(0.0);
         for (std::size_t environment = 0; environment < worlds.size(); ++environment) {
@@ -382,7 +421,10 @@ struct TrainingBatch {
                 }
             }
         }
+        profileEnd(Rewards, rewards_start);
+        const auto observation_start = profileStart();
         observe(observations);
+        profileEnd(StepObserve, observation_start);
     }
 };
 
@@ -490,6 +532,27 @@ MCSIM_EXPORT void* mcsim_create_schema(int environments, int use_cuda, const cha
     return result;
 }
 MCSIM_EXPORT void mcsim_destroy(void* handle) { delete static_cast<TrainingBatch*>(handle); }
+MCSIM_EXPORT int mcsim_set_profiling(void* handle, int enabled) {
+    return protect([&] {
+        if (!handle || (enabled != 0 && enabled != 1)) throw std::invalid_argument("Invalid profiling configuration");
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.profiling = enabled != 0;
+        if (enabled) batch.profiling_seconds.fill(0.0);
+    });
+}
+MCSIM_EXPORT const char* mcsim_profile(void* handle) {
+    static thread_local std::string description;
+    const auto result = protect([&] {
+        if (!handle) throw std::invalid_argument("Null profiling handle");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        nlohmann::json seconds = nlohmann::json::object();
+        for (std::size_t index = 0; index < profile_names.size(); ++index) {
+            seconds[profile_names[index]] = batch.profiling_seconds[index];
+        }
+        description = nlohmann::json{{"version", 1}, {"seconds", seconds}}.dump();
+    });
+    return result == 0 ? description.c_str() : nullptr;
+}
 MCSIM_EXPORT int mcsim_set_max_ticks(void* handle, int max_ticks) {
     return protect([&] {
         if (!handle || max_ticks < 1 || max_ticks > 1000000) {
@@ -541,7 +604,10 @@ MCSIM_EXPORT void* mcsim_create_contract(int environments, int use_cuda, const c
 MCSIM_EXPORT int mcsim_observe(void* handle, float* observations) {
     return protect([&] {
         if (!handle || !observations) { throw std::invalid_argument("Null observation argument"); }
-        static_cast<TrainingBatch*>(handle)->observe(observations);
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        const auto start = batch.profileStart();
+        batch.observe(observations);
+        batch.profileEnd(Observe, start);
     });
 }
 MCSIM_EXPORT int mcsim_reward_totals(void* handle, double* totals) {
@@ -592,8 +658,11 @@ MCSIM_EXPORT const char* mcsim_replay_frame(void* handle, int environment) {
 MCSIM_EXPORT int mcsim_reset(void* handle, const std::uint8_t* mask, float* observations) {
     return protect([&] {
         if (!handle || !observations) { throw std::invalid_argument("Null reset argument"); }
-        static_cast<TrainingBatch*>(handle)->reset(mask);
-        static_cast<TrainingBatch*>(handle)->observe(observations);
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.reset(mask);
+        const auto start = batch.profileStart();
+        batch.observe(observations);
+        batch.profileEnd(ResetObserve, start);
     });
 }
 MCSIM_EXPORT int mcsim_reset_players(void* handle, const std::uint8_t* mask,
@@ -601,8 +670,13 @@ MCSIM_EXPORT int mcsim_reset_players(void* handle, const std::uint8_t* mask,
     return protect([&] {
         if (!handle || !json_utf8 || !observations) throw std::invalid_argument("Null player reset argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
-        batch.resetPlayers(mask, nlohmann::json::parse(json_utf8));
+        const auto parse_start = batch.profileStart();
+        const auto definitions = nlohmann::json::parse(json_utf8);
+        batch.profileEnd(ResetJson, parse_start);
+        batch.resetPlayers(mask, definitions);
+        const auto observation_start = batch.profileStart();
         batch.observe(observations);
+        batch.profileEnd(ResetObserve, observation_start);
     });
 }
 MCSIM_EXPORT int mcsim_step(void* handle, const std::int32_t* actions, float* observations, float* rewards,

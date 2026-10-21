@@ -296,7 +296,7 @@ class EpisodeSampler:
                     cache[component] = None
         self.scenario = deepcopy(scenario)
 
-    def players(self, world):
+    def players(self, world, counters=None):
         base = self.scenario["arenas"][self.arenas[world]]["environment"]
         players = [{**player, "loadout": {**player["loadout"], "armor": dict(player["loadout"]["armor"])}}
                    for player in base["players"]]
@@ -320,6 +320,8 @@ class EpisodeSampler:
                 if "region" in spawn:
                     minimum = spawn.get("minimum_separation", 0.6)
                     for _ in range(256):
+                        if counters is not None:
+                            counters["spawn_attempts"] = counters.get("spawn_attempts", 0) + 1
                         positions = self.spawn_rng.uniform(spawn["region"]["min"], spawn["region"]["max"],
                                                            size=(2, 3)).tolist()
                         for pose, position in zip(poses, positions):
@@ -328,6 +330,8 @@ class EpisodeSampler:
                                 and all(self._valid_position(pose["position"], base) for pose in poses)):
                             break
                     else:
+                        if counters is not None:
+                            counters["spawn_fallbacks"] = counters.get("spawn_fallbacks", 0) + 1
                         axes = [sorted({low, high}) for low, high in zip(spawn["region"]["min"], spawn["region"]["max"])]
                         corners = [list(position) for position in product(*axes) if self._valid_position(position, base)]
                         pairs = [pair for pair in combinations(corners, 2) if self._separated(pair, minimum)]

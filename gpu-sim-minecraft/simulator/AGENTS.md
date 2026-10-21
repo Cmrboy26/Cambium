@@ -77,6 +77,16 @@ These checks protect the supported adapter, not arbitrary raw C callers.
 Selected library paths/device are recorded by Python; source/build identity is
 diagnostic, not a physics-parity or checkpoint-compatibility claim.
 
+The additive ABI 2 profiling calls are `mcsim_set_profiling(handle, enabled)`
+and `mcsim_profile(handle)`. The setter accepts only 0/1, returns 0/-1, defaults
+off and clears all counters whenever enabled. Disabling preserves the last
+counters. The getter returns a thread-local JSON string with `version: 1` and
+named wall-clock `seconds`, or null on error. It does not clear counters; the
+string lasts until the next getter call on that thread. Only profiled CUDA
+physics/reset calls wait for kernel completion. Profiling never draws random
+numbers or changes reset/physics ordering. See the
+[collection timing schema](training/AGENTS.md#collection-profiling).
+
 The additive ABI 2 `mcsim_set_max_ticks(handle, limit)` returns 0 on success,
 -1 on error, and accepts limits in 1..1,000,000. Apply it at a stage reset
 boundary; it changes the existing batch's timeout without resetting players,

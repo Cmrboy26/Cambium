@@ -1,6 +1,6 @@
 """Opponent-driven PPO, reusable scenes, curriculum stages and held-out evaluation."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from datetime import datetime
 import json
@@ -19,6 +19,7 @@ from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEM
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.ppo import compute_gae, metadata, optimize
+from simulator.training.timing import CollectionTimer
 
 
 def scene_key(scenario):
@@ -77,25 +78,39 @@ class SampledWorlds:
             environment.set_rewards(stage["rewards"]["weights"])
         self.max_ticks = max(environment.max_ticks for _, environment in self.groups)
 
+    @contextmanager
+    def profile_collection(self, timer):
+        with ExitStack() as stack:
+            if timer.enabled:
+                for _, environment in self.groups:
+                    stack.enter_context(environment.profile_collection(timer))
+            yield
+
     def observe(self):
         result = np.empty((self.count, 2, self.observation_dim), dtype=np.float32)
         for ids, environment in self.groups:
             result[ids] = environment.observe()
         return result
 
-    def reset(self, mask=None):
+    def reset(self, mask=None, timer=None):
+        timer = timer or CollectionTimer(self.device)
         mask = np.ones(self.count, dtype=bool) if mask is None else np.asarray(mask)
         if mask.shape != (self.count,) or mask.dtype.kind != "b":
             raise ValueError("Sampled reset mask must contain one boolean per world")
-        definitions = {int(world): self.sampler.players(int(world)) for world in np.flatnonzero(mask)}
+        with timer.phase("environment_reset.sample"):
+            definitions = {int(world): self.sampler.players(int(world), timer.counts if timer.enabled else None)
+                           for world in np.flatnonzero(mask)}
         observations = np.empty((self.count, 2, self.observation_dim), dtype=np.float32)
         for ids, environment in self.groups:
             selected = mask[ids]
             if selected.any():
-                observations[ids] = environment.reset_players([definitions[int(world)] if selected[index] else None
-                    for index, world in enumerate(ids)], selected)
+                with timer.phase("environment_reset.payload"):
+                    players = [definitions[int(world)] if selected[index] else None
+                               for index, world in enumerate(ids)]
+                observations[ids] = environment.reset_players(players, selected, timer=timer)
             else:
-                observations[ids] = environment.observe()
+                with timer.phase("environment_reset.unchanged_observe"):
+                    observations[ids] = environment.observe()
         return observations
 
     def step(self, actions):
@@ -209,47 +224,76 @@ class OpponentPool:
 
 
 @torch.no_grad()
-def collect(model, worlds, pool, observations, steps, device, fixed):
-    shape = (steps, worlds.count)
-    rollout = {name: torch.empty(shape, dtype=torch.bool if name in ("terminated", "truncated")
-                                else torch.float32, device=device)
-               for name in ("log_probs", "values", "next_values", "rewards", "terminated", "truncated")}
-    rollout["observations"] = torch.empty((*shape, worlds.observation_dim), device=device)
-    rollout["actions"] = torch.empty((*shape, worlds.action_count), dtype=torch.long, device=device)
-    rollout["fixed_actions"] = fixed.copy()
-    reward_types = worlds.step_reward_totals(pool.learner_slots)
-    if reward_types is not None:
-        reward_types = dict.fromkeys(reward_types, 0.0)
-    endings = timeouts = 0
-    ids = np.arange(worlds.count)
+def collect(model, worlds, pool, observations, steps, device, fixed, profile=False):
+    timer = CollectionTimer(device, profile)
+    timer.count("worlds", worlds.count)
+    timer.count("steps", steps)
+    with worlds.profile_collection(timer):
+        result = _collect(model, worlds, pool, observations, steps, device, fixed, timer)
+    if timer.enabled:
+        result[0]["collection_profile"] = timer.finish()
+    return result
+
+
+def _collect(model, worlds, pool, observations, steps, device, fixed, timer):
+    with timer.phase("setup"):
+        shape = (steps, worlds.count)
+        rollout = {name: torch.empty(shape, dtype=torch.bool if name in ("terminated", "truncated")
+                                    else torch.float32, device=device)
+                   for name in ("log_probs", "values", "next_values", "rewards", "terminated", "truncated")}
+        rollout["observations"] = torch.empty((*shape, worlds.observation_dim), device=device)
+        rollout["actions"] = torch.empty((*shape, worlds.action_count), dtype=torch.long, device=device)
+        rollout["fixed_actions"] = fixed.copy()
+        reward_types = worlds.step_reward_totals(pool.learner_slots)
+        if reward_types is not None:
+            reward_types = dict.fromkeys(reward_types, 0.0)
+        endings = timeouts = 0
+        ids = np.arange(worlds.count)
     for step in range(steps):
         slots = pool.learner_slots.copy()
-        current = torch.as_tensor(observations[ids, slots], device=device)
-        actions, log_probs, values, _ = policy_actions(model, current, worlds.action_names, fixed)
-        final, rewards, terminated, truncated = worlds.step(pool.act(observations, actions.cpu().numpy()))
-        if reward_types is not None:
-            contributions = worlds.step_reward_totals(slots)
-            if contributions is None:
-                raise RuntimeError("Native reward breakdown support changed during rollout")
-            for name, amount in contributions.items():
-                reward_types[name] += amount
-        _, next_values = model(torch.as_tensor(final[ids, slots], device=device))
-        rollout["observations"][step] = current
-        rollout["actions"][step] = actions
-        for name, value in (("log_probs", log_probs), ("values", values), ("next_values", next_values),
-                            ("rewards", rewards[ids, slots]), ("terminated", terminated), ("truncated", truncated)):
-            rollout[name][step] = torch.as_tensor(value, device=device)
-        done = terminated | truncated
-        endings += int(terminated.sum())
-        timeouts += int(truncated.sum())
+        with timer.phase("observation_transfer", cuda=True):
+            current = torch.as_tensor(observations[ids, slots], device=device)
+        with timer.phase("learner_inference", cuda=True):
+            actions, log_probs, values, _ = policy_actions(model, current, worlds.action_names, fixed)
+        with timer.phase("action_transfer", cuda=True):
+            learner_actions = actions.cpu().numpy()
+        with timer.phase("opponent_actions", cuda=True):
+            combined_actions = pool.act(observations, learner_actions)
+        with timer.phase("environment_step"):
+            final, rewards, terminated, truncated = worlds.step(combined_actions)
+        with timer.phase("reward_breakdown"):
+            if reward_types is not None:
+                contributions = worlds.step_reward_totals(slots)
+                if contributions is None:
+                    raise RuntimeError("Native reward breakdown support changed during rollout")
+                for name, amount in contributions.items():
+                    reward_types[name] += amount
+        with timer.phase("next_value", cuda=True):
+            _, next_values = model(torch.as_tensor(final[ids, slots], device=device))
+        with timer.phase("rollout_storage", cuda=True):
+            rollout["observations"][step] = current
+            rollout["actions"][step] = actions
+            for name, value in (("log_probs", log_probs), ("values", values), ("next_values", next_values),
+                                ("rewards", rewards[ids, slots]), ("terminated", terminated), ("truncated", truncated)):
+                rollout[name][step] = torch.as_tensor(value, device=device)
+        with timer.phase("episode_bookkeeping"):
+            done = terminated | truncated
+            endings += int(terminated.sum())
+            timeouts += int(truncated.sum())
         if done.any():
-            observations = worlds.reset(done)
-            pool.reset(done)
+            if timer.enabled:
+                timer.count("reset_calls")
+                timer.count("reset_worlds", done.sum())
+            with timer.phase("environment_reset"):
+                observations = worlds.reset(done, timer=timer)
+            with timer.phase("opponent_reset"):
+                pool.reset(done)
         else:
             observations = final
-    rollout["advantages"], rollout["returns"] = compute_gae(
-        rollout["rewards"], rollout["values"], rollout["next_values"], rollout["terminated"],
-        rollout["truncated"], FastRLAgent.GAMMA, FastRLAgent.GAE_LAMBDA)
+    with timer.phase("gae", cuda=True):
+        rollout["advantages"], rollout["returns"] = compute_gae(
+            rollout["rewards"], rollout["values"], rollout["next_values"], rollout["terminated"],
+            rollout["truncated"], FastRLAgent.GAMMA, FastRLAgent.GAE_LAMBDA)
     if reward_types is not None:
         rollout["reward_types"] = reward_types
     return rollout, observations, endings, timeouts
@@ -478,13 +522,16 @@ def run(options, checkpoint=None):
                 torch.cuda.reset_peak_memory_stats(device)
             fixed = fixed_indices(plan["policy"], stage["controls"])
             rollout, observations, endings, timeouts = collect(
-                model, worlds, pool, observations, options.rollout_steps, device, fixed)
+                model, worlds, pool, observations, options.rollout_steps, device, fixed,
+                profile=options.profile_every > 0 and update % options.profile_every == 0)
             collection_seconds = time.perf_counter() - start
             optimization_start = time.perf_counter()
             statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs, options.minibatch_size))
             optimization_seconds = time.perf_counter() - optimization_start
             if "reward_types" in rollout:
                 statistics["reward_types"] = rollout["reward_types"]
+            if "collection_profile" in rollout:
+                statistics["collection_profile"] = rollout["collection_profile"]
             transitions = options.envs * options.rollout_steps
             samples += transitions
             previous_rounds = rounds

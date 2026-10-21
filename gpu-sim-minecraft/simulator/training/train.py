@@ -24,6 +24,8 @@ def arguments(argv=None):
     parser.add_argument("--updates", type=positive, default=100, help="Maximum additional PPO updates")
     parser.add_argument("--rollout-steps", type=positive, help="Ticks per rollout: default 128; restored on resume")
     parser.add_argument("--threads", type=positive, default=4)
+    parser.add_argument("--profile-every", type=int, default=0,
+                        help="Profile collection every N global updates; 0 disables profiling")
     parser.add_argument("--library", help="Explicit native training DLL/SO")
     parser.add_argument("--output", help="Run directory; default timestamp or resumed checkpoint directory")
     parser.add_argument("--save-every", type=positive, default=10)
@@ -35,6 +37,8 @@ def arguments(argv=None):
     parser.add_argument("--lr", type=float, help="Override plan learner learning rate")
     parser.add_argument("--max-ticks", type=positive, help="Explicit override of all episode limits for smoke checks")
     options = parser.parse_args(argv)
+    if options.profile_every < 0:
+        parser.error("profile-every must be nonnegative")
     if options.envs is not None and options.envs > 65536:
         parser.error("envs must be <=65536")
     if options.hidden_dim is not None and options.hidden_dim > 4096:

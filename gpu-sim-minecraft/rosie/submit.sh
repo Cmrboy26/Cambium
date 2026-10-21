@@ -4,18 +4,23 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 DRY_RUN=false
-case "${1:-}" in
-    --dry-run) DRY_RUN=true ;;
-    -h|--help)
-        printf 'Usage: bash rosie/submit.sh [--dry-run]\nInteractive training submission; Enter accepts each default.\nType multiple at one training/resource setting to submit a single-variable sweep.\n'
-        exit 0 ;;
-    '') ;;
-    *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
-esac
-if (( $# > 1 )); then
-    printf 'Expected at most one option.\n' >&2
-    exit 1
-fi
+PROFILE_EVERY=0
+while (( $# )); do
+    case "$1" in
+        --dry-run) DRY_RUN=true; shift ;;
+        --profile-every)
+            if [[ ! "${2:-}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+                printf 'Expected a nonnegative integer after --profile-every.\n' >&2
+                exit 1
+            fi
+            PROFILE_EVERY="$2"
+            shift 2 ;;
+        -h|--help)
+            printf 'Usage: bash rosie/submit.sh [--dry-run] [--profile-every N]\nInteractive training submission; Enter accepts each default.\nType multiple at one training/resource setting to submit a single-variable sweep.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
+            exit 0 ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
+    esac
+done
 
 SWEEP_VARIABLE=""
 SWEEP_LABEL=""
@@ -199,7 +204,7 @@ prepare_command() {
         printf -v "$SWEEP_VARIABLE" '%s' "${SWEEP_VALUES[index]}"
     fi
     RUN_OUTPUT="simulator/training/runs/${RUN_NAMES[index]}"
-    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY"
+    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY,SIM_PROFILE_EVERY=$PROFILE_EVERY"
     COMMAND=(sbatch --parsable "--job-name=${RUN_NAMES[index]}" "--partition=$PARTITION" "--gres=$GRES"
         "--time=$TIME" "--cpus-per-gpu=$CPUS" "--mem=$MEMORY" "--export=$EXPORTS")
     if [[ "$dependency" != none ]]; then

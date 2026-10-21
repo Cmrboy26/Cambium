@@ -19,7 +19,59 @@ The native library exposes a small C ABI through `ctypes`, without pybind11 or
 Python development headers. CPU worlds use OpenMP when available, sequential
 execution otherwise. CUDA training still stages controls/state through host
 memory; observations/rays/rewards run on CPU. Do not present physics benchmark
-rates as full PPO rates. Collection time includes enabled replay sampling.
+rates as full PPO rates. Research collection covers rollout setup, decisions,
+physics, rewards, episode resets and GAE; replay is timed separately.
+
+## Collection Profiling
+
+Profiling is opt-in and does not change the experiment/checkpoint contract.
+From the project root, use `--profile-every N` with the Python trainer, or:
+
+```sh
+bash rosie/submit.sh --profile-every 10
+python -B -m simulator.training.analyze_metrics simulator/training/runs/<run-name> --timings
+python -B -m simulator.training.analyze_metrics simulator/training/runs/<run-name> --timings --stage <stage-name> --json
+```
+
+Zero (the default) disables profiling. Positive intervals select global update
+multiples, including after resume; profiling settings are invocation options,
+not inherited checkpoint constraints. Direct batch jobs use `SIM_PROFILE_EVERY`.
+The batch launcher rebuilds the native library; direct Python runs must rebuild
+`minecraft_sim_training` first. Older libraries still work with profiling off;
+requesting profiles without the additive native API fails explicitly.
+
+Sampled metric rows carry `collection_profile`, version 1:
+
+- `seconds`: cumulative wall seconds for setup, observation/action transfers,
+  learner/opponent inference, native step, reward breakdown, next-value pass,
+  rollout storage, episode bookkeeping, environment/opponent resets and GAE.
+  Dot-named reset children split sampling, payload assembly, JSON encoding,
+  native application, output copies and unchanged-group observations. Children
+  are included in their parent, not additional collection time.
+- `native_seconds`: summed across arena batches, splitting action decoding,
+  controls upload, physics, state download, rewards, step observations, reset
+  JSON parsing/validation/application/observations, and explicit observation
+  calls. These are included in Python/native-call wall timings, not additive.
+- `cuda_stream_seconds`: CUDA-event spans on PyTorch's current stream for
+  transfers, inference, storage and GAE. Spans may include host submission gaps;
+  they are not pure kernel-time or GPU-utilization measurements. Native timings
+  use wall clocks, with a CUDA wait after physics and reset kernels only while
+  profiling. The Python timer also synchronizes once at collection end.
+- `counts`: worlds, rollout steps, reset calls/worlds, spawn rejection attempts,
+  corner fallbacks and native arena batches. Spawn counts cover collection
+  resets only, not initial construction, evaluation or curriculum boundaries.
+- `total_seconds`, `synchronize_seconds`, `unaccounted_seconds`: collection
+  profiler duration, final CUDA wait, and residual outside top-level phases.
+
+The timing report excludes the first five recorded updates by default
+(`--skip-updates N`), separates profiled/unprofiled weighted training throughput,
+and groups rates by stage. `--stage NAME` also filters phase averages. Use
+unprofiled updates for performance comparisons: sampled updates include event,
+clock, serialization and synchronization overhead. Compare matching stages and
+similar reset counts with the same plan, seed, world/rollout/model sizes, CPU
+allocation/thread count and replay/evaluation cadence. Keep each job's config,
+metrics and Slurm log as its baseline provenance. Timing instrumentation itself
+does not draw RNG or alter the order of sampling, policy actions or updates.
 
 ## Research Training Plans
 

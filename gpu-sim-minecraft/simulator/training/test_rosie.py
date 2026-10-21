@@ -182,6 +182,20 @@ class TrainingJobTests(unittest.TestCase):
         for removed in ("--schema", "--environment", "--seed", "--epochs", "--hidden-dim", "--minibatch-size"):
             self.assertNotIn(removed, arguments)
 
+    def test_collection_profiling_reaches_trainer(self):
+        result = self.launch(SIM_PROFILE_EVERY="10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertEqual(arguments[arguments.index("--profile-every") + 1], "10")
+
+    def test_invalid_collection_profiling_fails_before_build(self):
+        for value in ("-1", "abc", "1.5"):
+            with self.subTest(value=value):
+                result = self.launch(SIM_PROFILE_EVERY=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SIM_PROFILE_EVERY", result.stdout)
+                self.assertFalse(self.log.exists())
+
     def test_resume_does_not_override_checkpoint_settings(self):
         checkpoint = self.root / "latest.pt"
         checkpoint.touch()
@@ -380,11 +394,13 @@ print(f"{12345 + count};test-cluster")
             "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
         }))
 
-    def launch(self, answers=None, dry_run=True, **settings):
+    def launch(self, answers=None, dry_run=True, profile_every=None, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
         arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
+        if profile_every is not None:
+            arguments.extend(["--profile-every", str(profile_every)])
         return subprocess.run(arguments, input="\n".join(answers or [""] * 17) + "\n",
                               cwd=self.temporary.name, env=environment,
                               capture_output=True, text=True, timeout=10)
@@ -397,6 +413,18 @@ print(f"{12345 + count};test-cluster")
                          "SIM_HIDDEN_DIM=512", "SIM_EPOCHS=2", "SIM_MINIBATCH_SIZE=16384",
                          "SIM_LR=0.0003", "Validated 1 plan(s); 0 failed", "Dry run: nothing submitted"):
             self.assertIn(expected, result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_collection_profile_interval_is_explicit(self):
+        result = self.launch(profile_every=10, SIM_PROFILE_EVERY="99")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SIM_PROFILE_EVERY=10", result.stdout)
+        self.assertNotIn("SIM_PROFILE_EVERY=99", result.stdout)
+        default = self.launch(SIM_PROFILE_EVERY="99")
+        self.assertIn("SIM_PROFILE_EVERY=0", default.stdout)
+        invalid = self.launch(profile_every=-1)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("nonnegative integer", invalid.stderr)
         self.assertFalse(self.log.exists())
 
     def test_invalid_advancement_blocks_preview_and_submission(self):

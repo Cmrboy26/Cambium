@@ -188,6 +188,10 @@ void CudaBatch::step(int ticks) {
     checkCuda(cudaGetLastError());
 }
 
+void CudaBatch::synchronize() const {
+    checkCuda(cudaDeviceSynchronize());
+}
+
 void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const PlayerState* players) {
     if (count == 0) {
         return;

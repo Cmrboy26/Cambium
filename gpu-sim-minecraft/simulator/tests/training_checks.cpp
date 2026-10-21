@@ -45,6 +45,10 @@ void checkResetPlayers(const char* environment, int cuda) {
     Handle handle(mcsim_create_contract(3, cuda, environment, 100, 123, weights.data(), descriptor.c_str()), mcsim_destroy);
     require(handle != nullptr, "create all-equipment descriptor batch using a two-slot environment");
     require(mcsim_api_version() == 2, "additive functions preserve ABI 2");
+    require(mcsim_set_profiling(nullptr, 1) == -1, "profiling rejects null handles");
+    require(mcsim_set_profiling(handle.get(), 2) == -1, "profiling requires a boolean flag");
+    require(mcsim_profile(nullptr) == nullptr, "profile rejects null handles");
+    require(mcsim_set_profiling(handle.get(), 1) == 0, "enable native profiling");
     const auto baseline = scenario(handle.get(), 0);
     require(!baseline.contains("policy"), "resolved scenarios never advertise a stale embedded policy");
     auto own = baseline["players"];
@@ -113,6 +117,18 @@ void checkResetPlayers(const char* environment, int cuda) {
     require(frame(handle.get(), 0)["actors"][0]["position"].is_array()
         && frame(handle.get(), 0)["actors"][0]["position"].size() == 3,
         "replay positions use three-element coordinate arrays");
+    const auto profile = json::parse(mcsim_profile(handle.get()));
+    require(profile["version"] == 1 && profile["seconds"]["step_decode"] > 0
+        && profile["seconds"]["physics"] > 0 && profile["seconds"]["reset_validate"] > 0
+        && profile["seconds"]["reset_apply"] > 0 && profile["seconds"]["reset_observe"] > 0,
+        "native profile records separate step and reset phases");
+    require(mcsim_set_profiling(handle.get(), 0) == 0, "disable native profiling");
+    require(mcsim_observe(handle.get(), observations.data()) == 0, "observe with profiling disabled");
+    require(json::parse(mcsim_profile(handle.get())) == profile, "disabled profiling leaves counters unchanged");
+    require(mcsim_set_profiling(handle.get(), 1) == 0, "restart native profile");
+    const auto cleared = json::parse(mcsim_profile(handle.get()));
+    for (const auto& value : cleared["seconds"]) require(value == 0, "new profile clears all native counters");
+    require(mcsim_set_profiling(handle.get(), 0) == 0, "leave profiling disabled");
 
     const std::array<json, 3> before{frame(handle.get(), 0), frame(handle.get(), 1), frame(handle.get(), 2)};
     const auto rejects = [&](const json& invalid) {

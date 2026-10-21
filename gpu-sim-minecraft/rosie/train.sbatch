@@ -25,6 +25,7 @@ SIM_MINIBATCH_SIZE="${SIM_MINIBATCH_SIZE:-}"
 SIM_HIDDEN_DIM="${SIM_HIDDEN_DIM:-}"
 SIM_LR="${SIM_LR:-}"
 SIM_THREADS="${SIM_THREADS:-4}"
+SIM_PROFILE_EVERY="${SIM_PROFILE_EVERY:-0}"
 SIM_PLAN="${SIM_PLAN:-}"
 SIM_RESUME="${SIM_RESUME:-}"
 SIM_INITIALIZE="${SIM_INITIALIZE:-}"
@@ -65,6 +66,10 @@ for checkpoint in "$SIM_RESUME" "$SIM_INITIALIZE"; do
         exit 1
     fi
 done
+if [[ ! "$SIM_PROFILE_EVERY" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "ERROR: SIM_PROFILE_EVERY must be a nonnegative integer."
+    exit 1
+fi
 if [[ "$SIM_REPLAY_EVERY" -lt 0 ]]; then
     echo "ERROR: SIM_REPLAY_EVERY must be zero or greater."
     exit 1
@@ -144,6 +149,7 @@ TRAIN_ARGS=(
     --device cuda \
     --updates "$SIM_UPDATES" \
     --threads "$SIM_THREADS" \
+    --profile-every "$SIM_PROFILE_EVERY" \
     --library "$LIBRARY" \
     --output "$SIM_OUTPUT"
 )
