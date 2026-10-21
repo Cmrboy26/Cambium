@@ -1,6 +1,7 @@
 """Opponent-driven PPO, reusable scenes, curriculum stages and held-out evaluation."""
 
 from contextlib import ExitStack, contextmanager
+from collections import deque
 from copy import deepcopy
 from datetime import datetime
 import json
@@ -15,7 +16,7 @@ import torch
 from backend.fast_rl_model import ActorCritic, FastRLAgent
 from simulator.training.contract import fingerprint
 from simulator.training.controllers import FrozenSelfPlayController, SelfPlayController, create_controller
-from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT
+from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, actor_lost as _lost
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.ppo import compute_gae, metadata, optimize
@@ -33,12 +34,90 @@ def deployment_summary(plan, stage, stage_index):
             "controllers": "shared_learner", "sampling": "fixed_checkpoint_episode"}
 
 
+class EpisodeMetrics:
+    def __init__(self, count, history=(), window=1000):
+        self.returns = np.zeros(count, dtype=np.float64)
+        self.lengths = np.zeros(count, dtype=np.int64)
+        self.history = deque(history, maxlen=window)
+        self.begin_rollout()
+
+    def begin_rollout(self):
+        self.rollout_totals = {}
+        self.opponent_totals = {}
+
+    @staticmethod
+    def accumulate(totals, episode):
+        for name, value in (("count", 1), ("return", episode["return"]), ("length", episode["length"]),
+                            (episode["outcome"], 1), (episode["outcome"] + "_length", episode["length"])):
+            totals[name] = totals.get(name, 0) + value
+
+    @staticmethod
+    def summarize_totals(totals):
+        count = totals.get("count", 0)
+        result = {"training_episodes": count}
+        if count:
+            result.update(training_return=totals["return"] / count, training_length=totals["length"] / count)
+            for outcome in ("win", "loss", "timeout", "draw"):
+                amount = totals.get(outcome, 0)
+                result[f"training_{outcome}_rate"] = amount / count
+                if amount and outcome in ("win", "loss"):
+                    result[f"training_{outcome}_length"] = totals[outcome + "_length"] / amount
+        return result
+
+    def rollout_snapshot(self):
+        return {**self.summarize_totals(self.rollout_totals), "source": "recorded",
+                "training_opponents": {name: self.summarize_totals(totals)
+                                       for name, totals in sorted(self.opponent_totals.items())}}
+
+    def reset(self):
+        self.returns.fill(0)
+        self.lengths.fill(0)
+        self.history.clear()
+        self.begin_rollout()
+
+    def step(self, rewards, done, outcomes, opponents):
+        self.returns += rewards
+        self.lengths += 1
+        for world, outcome, opponent in zip(np.flatnonzero(done), outcomes, opponents, strict=True):
+            episode = {"return": float(self.returns[world]), "length": int(self.lengths[world]),
+                       "outcome": outcome, "opponent": opponent}
+            self.history.append(episode)
+            self.accumulate(self.rollout_totals, episode)
+            self.accumulate(self.opponent_totals.setdefault(opponent, {}), episode)
+        self.returns[done] = 0
+        self.lengths[done] = 0
+
+    @staticmethod
+    def summarize(episodes):
+        result = {"training_episodes": len(episodes)}
+        if not episodes:
+            return result
+        result.update(training_return=sum(episode["return"] for episode in episodes) / len(episodes),
+                      training_length=sum(episode["length"] for episode in episodes) / len(episodes))
+        for outcome in ("win", "loss", "timeout", "draw"):
+            selected = [episode for episode in episodes if episode["outcome"] == outcome]
+            result[f"training_{outcome}_rate"] = len(selected) / len(episodes)
+            if selected and outcome in ("win", "loss"):
+                result[f"training_{outcome}_length"] = sum(episode["length"] for episode in selected) / len(selected)
+        return result
+
+    def snapshot(self):
+        episodes = list(self.history)
+        result = self.summarize(episodes)
+        result["training_episode_window"] = self.history.maxlen
+        result["training_opponents"] = {
+            name: self.summarize([episode for episode in episodes if episode["opponent"] == name])
+            for name in sorted({episode["opponent"] for episode in episodes})}
+        return result
+
+
 class SampledWorlds:
     """Group worlds by immutable scene; changing players never recreates terrain."""
 
     def __init__(self, scenario, contract, count, device, library, max_ticks, seed, state=None):
         self.resources = ExitStack()
         self.count, self.device, self.contract = count, device, contract
+        self.episode_metrics = EpisodeMetrics(count)
         self.max_ticks_override = max_ticks
         self.schema = contract
         self.observation_dim = contract["observation_dim"]
@@ -68,6 +147,7 @@ class SampledWorlds:
             raise
 
     def configure(self, stage):
+        self.episode_metrics.reset()
         self.sampler.configure(stage["scenario"])
         for ids, environment in self.groups:
             arena_id = self.sampler.arenas[int(ids[0])]
@@ -133,6 +213,13 @@ class SampledWorlds:
             for name, amount in contributions.items():
                 totals[name] += amount
         return totals
+
+    def losses(self, mask):
+        result = np.zeros((self.count, 2), dtype=bool)
+        for ids, environment in self.groups:
+            if mask[ids].any():
+                result[ids] = environment.losses(mask[ids])
+        return result
 
     def episode(self, world):
         for ids, environment in self.groups:
@@ -237,6 +324,7 @@ def collect(model, worlds, pool, observations, steps, device, fixed, profile=Fal
 
 def _collect(model, worlds, pool, observations, steps, device, fixed, timer):
     with timer.phase("setup"):
+        worlds.episode_metrics.begin_rollout()
         shape = (steps, worlds.count)
         rollout = {name: torch.empty(shape, dtype=torch.bool if name in ("terminated", "truncated")
                                     else torch.float32, device=device)
@@ -280,6 +368,13 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer):
             done = terminated | truncated
             endings += int(terminated.sum())
             timeouts += int(truncated.sum())
+            selected = np.flatnonzero(done)
+            losses = worlds.losses(done) if len(selected) else None
+            outcomes = ["timeout" if not terminated[world] else
+                        "draw" if losses[world, 0] == losses[world, 1] else
+                        "loss" if losses[world, slots[world]] else "win" for world in selected]
+            opponents = [pool.names[int(pool.assignments[world])] for world in selected]
+            worlds.episode_metrics.step(rewards[ids, slots], done, outcomes, opponents)
         if done.any():
             if timer.enabled:
                 timer.count("reset_calls")
@@ -296,14 +391,9 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer):
             rollout["truncated"], FastRLAgent.GAMMA, FastRLAgent.GAE_LAMBDA)
     if reward_types is not None:
         rollout["reward_types"] = reward_types
+    rollout["episode_metrics"] = {**worlds.episode_metrics.snapshot(),
+                                  "training_rollout": worlds.episode_metrics.rollout_snapshot()}
     return rollout, observations, endings, timeouts
-
-
-def _lost(actor, scenario):
-    position = actor["position"]
-    lower, size = scenario["bounds"]["min"], scenario["bounds"]["size"]
-    return (actor["health"] <= 0 or position[0] < lower[0] or position[0] >= lower[0] + size[0]
-            or position[2] < lower[2] or position[2] >= lower[2] + size[2] or position[1] < lower[1] - 4)
 
 
 @torch.no_grad()
@@ -497,6 +587,7 @@ def run(options, checkpoint=None):
         if checkpoint is None:
             pool.capture(model, 0, stage["controls"], force=True)
         worlds.configure(stage)
+        worlds.episode_metrics = EpisodeMetrics(options.envs, saved.get("episode_history", ()))
         observations = worlds.observe()
         pool.reset(np.ones(options.envs, dtype=bool))
         if worlds.step_reward_totals(pool.learner_slots) is None:
@@ -531,6 +622,7 @@ def run(options, checkpoint=None):
             optimization_seconds = time.perf_counter() - optimization_start
             if "reward_types" in rollout:
                 statistics["reward_types"] = rollout["reward_types"]
+            statistics.update(rollout["episode_metrics"])
             if "collection_profile" in rollout:
                 statistics["collection_profile"] = rollout["collection_profile"]
             transitions = options.envs * options.rollout_steps
@@ -643,6 +735,7 @@ def run(options, checkpoint=None):
                             "world_count": options.envs, "rollout_steps": options.rollout_steps,
                             "max_ticks_override": options.max_ticks,
                             "resume_mode": "fresh_episodes",
+                            "episode_history": list(worlds.episode_metrics.history),
                             "elapsed_seconds": saved.get("elapsed_seconds", 0.0) + time.perf_counter() - run_started}
                 temporary = output / "latest.tmp"
                 torch.save({"format": "minecraft_sim_ppo", "version": 1, "metadata": manifest,

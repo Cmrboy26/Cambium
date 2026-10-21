@@ -136,6 +136,50 @@ raise SystemExit(3 if output.name.endswith("0.0001") else 0)
         image = plot(path)
         self.assertTrue(image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_episode_plot_catalog_percentages_opponents_and_missing_history(self):
+        manifest = self.prepare()
+        for trial in manifest["trials"]:
+            output = Path(trial["output"])
+            output.mkdir(parents=True)
+            rows = [{"update": 1, "samples": 4, "elapsed_seconds": 10, "stage": "aim", "stage_index": 0},
+                    {"update": 2, "samples": 8, "elapsed_seconds": 20, "stage": "combat", "stage_index": 1,
+                     "training_win_rate": .5, "training_return": -3, "training_episodes": 10,
+                     "training_opponents": {"past": {"training_win_rate": .25, "training_episodes": 4}},
+                     "training_rollout": {"training_win_rate": .75, "training_return": -5, "training_episodes": 2000,
+                         "training_opponents": {"past": {"training_win_rate": .4, "training_episodes": 1000}}}}]
+            (output / "metrics.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        path = self.directory / "sweep.json"
+        self.assertEqual(series(path, "training_win_rate")["curves"][0]["points"], [(20, 75)])
+        self.assertEqual(series(path, "training_win_rate", opponent="past")["curves"][0]["points"], [(20, 40)])
+        self.assertEqual(series(path, "training_return")["curves"][0]["points"], [(20, -5)])
+        self.assertEqual(series(path, "training_win_rate", aggregation="recent")["curves"][0]["points"], [(20, 50)])
+        self.assertEqual(series(path, "training_win_rate", opponent="past", aggregation="recent")["curves"][0]["points"], [(20, 25)])
+        self.assertEqual(series(path, "training_win_rate")["curves"][0]["boundaries"], [{"x": 20, "stage": "combat"}])
+        missing = series(path, "training_win_rate", opponent="missing")
+        self.assertEqual(missing["curves"][0]["points"], [])
+        self.assertTrue(missing["warnings"])
+        self.assertTrue(plot(path, metric="training_win_rate", opponent="past").is_file())
+
+    def test_plot_recovers_historical_training_outcomes_without_episode_returns(self):
+        manifest = self.prepare()
+        for trial in manifest["trials"]:
+            output = Path(trial["output"])
+            output.mkdir(parents=True)
+            config = {"metadata": {"learner": "opponent_pool"}, "experiment": {"stages": [
+                {"name": "combat", "rewards": {"weights": {"won_duel": 20, "death": -20}}}]}}
+            (output / "config.json").write_text(json.dumps(config))
+            row = {"update": 1, "samples": 4, "elapsed_seconds": 10, "stage_index": 0, "stage": "combat",
+                   "terminated_duels": 8, "timeouts": 2, "reward_types": {"won_duel": 120, "death": -40}}
+            (output / "metrics.jsonl").write_text(json.dumps(row) + "\n")
+        path = self.directory / "sweep.json"
+        report = series(path, "training_win_rate")
+        self.assertEqual(report["curves"][0]["points"], [(10, 60)])
+        self.assertTrue(any("recovered" in warning for warning in report["warnings"]))
+        self.assertEqual(series(path, "training_return")["curves"][0]["points"], [])
+        self.assertEqual(series(path, "training_loss_rate")["curves"][0]["points"], [])
+        self.assertEqual(series(path, "training_loss_or_draw_rate")["curves"][0]["points"], [(10, 20)])
+        self.assertEqual(series(path, "training_win_rate", aggregation="recent")["curves"][0]["points"], [])
+
     def test_plot_handles_pending_trials_and_explicit_run_selection(self):
         manifest = self.prepare()
         self.assertTrue(plot(self.directory / "sweep.json").is_file())
@@ -146,6 +190,16 @@ raise SystemExit(3 if output.name.endswith("0.0001") else 0)
         report = series(self.directory / "sweep.json", metric="loss")
         self.assertEqual([curve["points"] for curve in report["curves"]], [[(3, 1)], [(3, 2)]])
         self.assertIn("Legacy elapsed", report["warnings"][0])
+
+    def test_untimed_history_is_not_plotted_at_zero_elapsed(self):
+        manifest = self.prepare()
+        for trial in manifest["trials"]:
+            output = Path(trial["output"])
+            output.mkdir(parents=True)
+            (output / "metrics.jsonl").write_text(json.dumps({"update": 1, "samples": 4, "loss": 2}) + "\n")
+        path = self.directory / "sweep.json"
+        self.assertEqual(series(path, "loss")["curves"][0]["points"], [])
+        self.assertEqual(series(path, "loss", axis="samples")["curves"][0]["points"], [(4, 2)])
 
     @unittest.skipUnless(os.name == "posix", "Process-group cancellation requires POSIX")
     def test_cancel_stops_running_worker_and_does_not_start_pending_trial(self):

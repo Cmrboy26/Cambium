@@ -87,6 +87,13 @@ physics/reset calls wait for kernel completion. Profiling never draws random
 numbers or changes reset/physics ordering. See the
 [collection timing schema](training/AGENTS.md#collection-profiling).
 
+The additive ABI 2 `mcsim_losses(handle, uint8_t* losses)` fills one loss flag per
+player in world-major order (`[world_count, 2]`), returning 0 or -1. It reads current
+host player state with the same alive/outside predicate as terminal rewards,
+independently of reward weights; it neither steps nor resets worlds. Call after
+step and before reset to classify fight outcomes. Python uses this bulk path for
+completed-episode metrics and a terminal-snapshot fallback for older libraries.
+
 The additive ABI 2 `mcsim_set_max_ticks(handle, limit)` returns 0 on success,
 -1 on error, and accepts limits in 1..1,000,000. Apply it at a stage reset
 boundary; it changes the existing batch's timeout without resetting players,

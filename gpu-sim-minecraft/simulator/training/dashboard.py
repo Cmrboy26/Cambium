@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from simulator.training.metrics import CATALOG, EPISODE_FIELDS, recover_rollout
+
 
 RUNS = Path(__file__).resolve().parent / "runs"
 ASSETS = Path(__file__).resolve().parent / "dashboard"
@@ -15,9 +17,10 @@ METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "timeout
            "replays_exported", "reward_mean", "reward_total", "loss", "policy_loss", "value_loss", "entropy",
            "collection_seconds", "update_seconds", "evaluation_seconds", "evaluation_episodes",
            "replay_seconds", "iteration_seconds", "elapsed_seconds", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",
-           "player_transitions_per_second")
+           "player_transitions_per_second", "training_episode_window", *EPISODE_FIELDS)
 COUNTS = {"update", "samples", "completed_rounds", "terminated_duels", "timeouts", "replays_exported",
-          "evaluation_episodes", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes"}
+          "evaluation_episodes", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",
+          "training_episodes", "training_episode_window"}
 MAX_REPLAY_BYTES = 64 * 1024 * 1024
 MAX_REPLAY_FRAMES = 100001
 
@@ -36,6 +39,33 @@ def finite(value):
 
 def metric_metadata(record):
     result = {}
+    if "training_rollout" in record:
+        summary = record["training_rollout"]
+        if not isinstance(summary, dict):
+            raise ValueError("Expected rollout episode metrics")
+        clean = {name: count(value) if name in COUNTS else finite(value)
+                 for name, value in summary.items() if name in EPISODE_FIELDS}
+        clean.update(metric_metadata({name: value for name, value in summary.items() if name in (
+            "training_opponents", *EPISODE_FIELDS)}))
+        source = summary.get("source", "recorded")
+        if source not in ("recorded", "recovered_rewards"):
+            raise ValueError("Expected known rollout metric provenance")
+        result["training_rollout"] = {**clean, "source": source}
+    if "training_opponents" in record:
+        opponents = record["training_opponents"]
+        if not isinstance(opponents, dict):
+            raise ValueError("Expected per-opponent episode metrics")
+        result["training_opponents"] = {}
+        for name, summary in opponents.items():
+            if not isinstance(name, str) or not name or not isinstance(summary, dict):
+                raise ValueError("Expected a named opponent summary")
+            result["training_opponents"][name] = {
+                key: count(value) if key in COUNTS else finite(value)
+                for key, value in summary.items() if key in EPISODE_FIELDS}
+    for summary in [record, *result.get("training_opponents", {}).values()]:
+        for name in EPISODE_FIELDS:
+            if name in summary and CATALOG[name]["unit"] == "%" and not 0 <= finite(summary[name]) <= 1:
+                raise ValueError("Expected an episode rate between zero and one")
     if "stage" in record:
         if not isinstance(record["stage"], str) or not record["stage"]:
             raise ValueError("Expected a stage name")
@@ -93,6 +123,7 @@ class RunStore:
     def __init__(self, directory=RUNS, runs=()):
         self.directory = Path(directory).resolve()
         self.explicit = tuple(Path(run).resolve() for run in runs)
+        self.summaries = {}
 
     def paths(self):
         candidates = list(self.explicit)
@@ -112,12 +143,64 @@ class RunStore:
             raise ValueError("Run files must stay inside their run directory")
         return result
 
+    def read_config(self, path):
+        config_path = self.file(path, "config.json")
+        if not config_path.is_file():
+            return None, []
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError("Expected a configuration object")
+            json.dumps(config, allow_nan=False)
+            return config, []
+        except (ValueError, UnicodeError):
+            return None, ["Configuration is not valid JSON yet."]
+
+    def summary(self, path):
+        config_path = self.file(path, "config.json")
+        stat = config_path.stat() if config_path.is_file() else None
+        signature = (stat.st_mtime_ns, stat.st_size) if stat else None
+        cached = self.summaries.get(path)
+        if cached and cached[0] == signature:
+            return cached[1]
+        config, warnings = self.read_config(path)
+        result = {"warnings": warnings}
+        if config is not None:
+            try:
+                experiment = config.get("experiment", config.get("plan", config.get("metadata", {}).get("plan", {})))
+                options = config.get("options", {})
+                metadata = config.get("metadata", {})
+                learner = experiment.get("learner", {})
+                environment = metadata.get("scenario", metadata.get("environment", {}))
+                schema = metadata.get("schema", {})
+                if not all(isinstance(value, dict) for value in
+                           (experiment, options, metadata, learner, environment, schema)):
+                    raise ValueError("Expected configuration metadata objects")
+                for key, value in (
+                    ("experiment_name", experiment.get("name")),
+                    ("environment_name", environment.get("name")),
+                    ("policy_name", schema.get("id", options.get("schema"))),
+                    ("seed", experiment.get("seed", options.get("seed"))),
+                    ("hidden_dim", metadata.get("hidden_dim", learner.get("hidden_dim", options.get("hidden_dim")))),
+                    ("lr", learner.get("lr", options.get("lr"))),
+                ):
+                    if isinstance(value, str) or type(value) in (int, float) and math.isfinite(value):
+                        result[key] = value
+            except (AttributeError, TypeError, ValueError):
+                warnings.append("Configuration metadata is incomplete or invalid.")
+        self.summaries[path] = (signature, result)
+        return result
+
     def list_runs(self):
         result = []
-        for identity, path in self.paths().items():
+        paths = self.paths()
+        active_paths = set(paths.values())
+        self.summaries = {path: summary for path, summary in self.summaries.items() if path in active_paths}
+        for identity, path in paths.items():
             modified = max(self.file(path, name).stat().st_mtime
                            for name in ("config.json", "metrics.jsonl") if self.file(path, name).is_file())
-            result.append({"id": identity, "name": path.name, "path": str(path), "modified": modified})
+            result.append({"id": identity, "name": path.name, "path": str(path), "modified": modified,
+                           **self.summary(path)})
         return sorted(result, key=lambda run: (run["modified"], run["name"]), reverse=True)
 
     def replay_paths(self, identity):
@@ -202,17 +285,8 @@ class RunStore:
         if path is None:
             raise FileNotFoundError("Run not found")
         warnings = []
-        config = None
-        config_path = self.file(path, "config.json")
-        if config_path.is_file():
-            try:
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-                if not isinstance(config, dict):
-                    raise ValueError("Expected a configuration object")
-                json.dumps(config, allow_nan=False)
-            except (ValueError, UnicodeError):
-                config = None
-                warnings.append("Configuration is not valid JSON yet.")
+        config, config_warnings = self.read_config(path)
+        warnings.extend(config_warnings)
         metrics = []
         invalid = 0
         metrics_path = self.file(path, "metrics.jsonl")
@@ -249,6 +323,10 @@ class RunStore:
             warnings.append(f"Skipped {invalid} invalid metric record(s).")
         previous = {"update": 0, "samples": 0}
         for row in metrics:
+            if "training_rollout" not in row:
+                recovered = recover_rollout(row, config)
+                if recovered is not None:
+                    row["training_rollout"] = recovered
             if ("reward_total" not in row and "reward_mean" in row
                     and row["update"] == previous["update"] + 1
                     and "samples" in row and "samples" in previous):
@@ -257,7 +335,7 @@ class RunStore:
                 if transitions > 0 and math.isfinite(total):
                     row["reward_total"] = total
             previous = row
-        return {"id": identity, "name": path.name, "path": str(path), "config": config,
+        return {"id": identity, "name": path.name, "path": str(path), "config": config, "metric_catalog": CATALOG,
                 "metrics": metrics, "warnings": warnings}
 
 

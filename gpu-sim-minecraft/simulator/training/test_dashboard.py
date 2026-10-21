@@ -1,4 +1,5 @@
 import json
+import os
 from html.parser import HTMLParser
 from pathlib import Path
 import shutil
@@ -11,6 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from simulator.training.dashboard import RunStore, make_server
+from simulator.training.metrics import CATALOG
 
 
 class DashboardChecks(unittest.TestCase):
@@ -21,15 +23,39 @@ class DashboardChecks(unittest.TestCase):
                 self.ids = []
                 self.links = []
                 self.disclosures = []
+                self.active_disclosures = []
+                self.opponent_disclosure = None
+                self.smoothing_control = None
+                self.window_modes = []
+                self.window_controls = {}
+                self.pages = {}
+                self.navigation = {}
 
             def handle_starttag(self, tag, attrs):
                 attributes = dict(attrs)
                 if "id" in attributes:
                     self.ids.append(attributes["id"])
+                if "data-page" in attributes:
+                    self.pages[attributes["id"]] = attributes
+                if "data-view" in attributes:
+                    self.navigation[attributes["data-view"]] = attributes
+                if attributes.get("id") == "smooth":
+                    self.smoothing_control = (tag, attributes)
+                if attributes.get("name") == "window-mode":
+                    self.window_modes.append(attributes["value"])
+                if attributes.get("id", "").startswith("window-"):
+                    self.window_controls[attributes["id"]] = (tag, attributes)
                 if tag == "a":
                     self.links.append(attributes.get("href", ""))
                 if tag == "details":
                     self.disclosures.append(attributes)
+                    self.active_disclosures.append(attributes)
+                if attributes.get("id") == "training-opponents" and self.active_disclosures:
+                    self.opponent_disclosure = self.active_disclosures[-1]
+
+            def handle_endtag(self, tag):
+                if tag == "details":
+                    self.active_disclosures.pop()
 
         page = PageStructure()
         page.feed(Path(__file__).with_name("dashboard").joinpath("index.html").read_text(encoding="utf-8"))
@@ -42,8 +68,25 @@ class DashboardChecks(unittest.TestCase):
         self.assertEqual(positions, sorted(positions), "Run identity and metrics must precede detailed sections")
         for target in ("results", "curriculum", "world", "run-settings", "recent-updates"):
             self.assertIn(f"#{target}", page.links)
+        self.assertEqual(list(page.navigation), ["overview", "results", "replays", "configuration"])
+        self.assertEqual(page.navigation["overview"]["aria-current"], "page")
+        for identity in ("results", "world", "run-settings", "recent-updates"):
+            self.assertIn("hidden", page.pages[identity], "Only overview is visible on initial load")
+        self.assertEqual(page.pages["curriculum"]["data-page"], "overview")
+        self.assertEqual(page.pages["recent-updates"]["data-page"], "results")
         self.assertTrue(page.disclosures)
         self.assertTrue(all("open" not in attrs for attrs in page.disclosures), "Detailed configuration starts collapsed")
+        self.assertEqual(page.opponent_disclosure, {"id": "training-opponent-details", "class": "opponent-details"},
+                 "Opponent statistics must be inside a collapsed, user-toggleable disclosure")
+        self.assertEqual(page.smoothing_control, ("input", {"id": "smooth", "type": "range", "min": "0",
+                 "max": "1000", "step": "1", "value": "0", "aria-valuetext": "Off"}))
+        self.assertIn("smooth-value", page.ids)
+        self.assertEqual(page.window_modes, ["latest", "range", "stage", "all"])
+        self.assertEqual(page.window_controls["window-size"][1]["type"], "range")
+        for bound in ("start", "end"):
+            self.assertEqual(page.window_controls[f"window-{bound}"][1]["type"], "number")
+            self.assertEqual(page.window_controls[f"window-{bound}-slider"][1]["type"], "range")
+        self.assertEqual(page.window_controls["window-stage"][0], "select")
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for curriculum DOM checks")
     def test_experiment_stage_evaluation_and_replay_dom(self):
@@ -71,7 +114,7 @@ const context = vm.createContext({document, Intl, CustomEvent:class {}, setInter
 vm.runInContext(fs.readFileSync(path.join(process.argv[1],'dashboard.js'),'utf8'), context);
 const conditionCharts=[];
 context.Chart=class {
-    constructor(canvas,config) {this.canvas=canvas; this.data=config.data; this.options=config.options; this.destroyed=false; conditionCharts.push(this);}
+    constructor(canvas,config) {this.canvas=canvas; this.data=config.data; this.options=config.options; this.plugins=config.plugins; this.destroyed=false; conditionCharts.push(this);}
     update() {}
     destroy() {this.destroyed=true;}
 };
@@ -123,6 +166,8 @@ assert.match(text('milestone-rewards-inactive'),/Win.*0/);
 assert.doesNotMatch(text('milestone-rewards'),/Damage dealt/,'Never use deployment rewards for a stage');
 document.getElementById('milestone-next').onclick();
 assert.equal(conditionCharts.length,2,'Nested conditions omit updates but retain episode and transition charts');
+assert.ok(conditionCharts.every(chart=>chart.plugins.some(plugin=>plugin.id==='legendSolo')),
+    'Milestone value/threshold legends must support soloing too');
 assert.doesNotMatch(text('milestone-metric-charts'),/Completed updates/);
 assert.equal(text('milestone-name'),'fight');
 assert.equal(text('milestone-position'),'Stage 2 of 2');
@@ -461,6 +506,149 @@ assert.deepEqual(evaluate('advancementMetrics({all:[{updates:2},{any:[{episodes:
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard chart checks")
+    def test_run_picker_labels_navigation_and_legend_solo(self):
+        script = Path(__file__).with_name("dashboard") / "dashboard.js"
+        result = subprocess.run(["node", "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+class Node {
+    constructor(tag='div') {this.tag=tag;this.children=[];this.dataset={};this.attributes={};this.listeners={};this.value='';this.scrollTop=0;}
+    set textContent(value) {this.text=String(value);this.children=[];}
+    get textContent() {return this.text ?? this.children.map(child=>child.textContent).join(' ');}
+    set innerHTML(value) {throw new Error('Unsafe HTML');}
+    append(...children) {this.text=undefined;this.children.push(...children);}
+    replaceChildren(...children) {this.text=undefined;this.children=children.flatMap(child=>child.tag==='fragment'?child.children:[child]);}
+    addEventListener(name,fn) {this.listeners[name]=fn;}
+    removeEventListener(name,fn) {assert.equal(this.listeners[name],fn);delete this.listeners[name];}
+    setAttribute(name,value) {this.attributes[name]=value;}
+    removeAttribute(name) {delete this.attributes[name];}
+    contains(node) {return node===this || this.children.some(child=>child.contains(node));}
+    querySelectorAll(tag) {return this.children.flatMap(child=>[...(child.tag===tag?[child]:[]),...child.querySelectorAll(tag)]);}
+    closest() {return this.dataset.page?this:null;}
+    focus() {document.activeElement=this;}
+}
+const nodes=new Map();
+const pages=['overview','results','world','run-settings','curriculum','recent-updates'].map((id,index)=>{
+    const node=new Node();node.dataset.page=['overview','results','replays','configuration','overview','results'][index];
+    nodes.set(id,node);return node;
+});
+nodes.get('curriculum').dataset.available='false';
+const links=['overview','results','replays','configuration'].map(view=>{
+    const node=new Node('a');node.dataset.view=view;return node;
+});
+const document={activeElement:null,events:[],
+    getElementById(id){if(!nodes.has(id))nodes.set(id,new Node());return nodes.get(id);},
+    createElement:tag=>new Node(tag),createDocumentFragment:()=>new Node('fragment'),
+    querySelectorAll(selector){return selector==='[data-page]'?pages:selector==='[data-view]'?links:[];},
+    addEventListener(){},dispatchEvent(event){this.events.push(event);}};
+const saved=new Map();
+const localStorage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
+const context=vm.createContext({document,Intl,localStorage,window:{location:{hash:''},addEventListener(){}},
+    CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}}});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);
+const evaluate=code=>JSON.parse(JSON.stringify(vm.runInContext(code,context)));
+const get=id=>document.getElementById(id);
+vm.runInContext(`runEntries=[
+    {id:'a',name:'job-20',path:'/runs/a',modified:100,experiment_name:'Shield axe',seed:42,hidden_dim:512,lr:.0003},
+    {id:'b',name:'job-9',path:'/runs/b',modified:200,experiment_name:'Baseline',seed:7,hidden_dim:256,lr:.001}
+]; element('run').value='a'; initRunPicker(); renderRunPicker();`,context);
+assert.deepEqual(evaluate('sortRuns(runEntries).map(run=>run.id)'),['b','a'],'Activity date must override directory name');
+assert.deepEqual(evaluate("searchRuns(runEntries,'WIDTH 512 seed 42 3e-4').map(run=>run.id)"),['a']);
+assert.deepEqual(evaluate("searchRuns(runEntries,'unknown').map(run=>run.id)"),[]);
+assert.match(get('run-current').textContent,/Shield axe/);
+assert.match(get('run-current-meta').textContent,/Width 512.*LR 0.0003.*Updated/);
+get('run-search').value='missing';
+vm.runInContext('renderRunPicker();',context);
+assert.match(get('run-options').textContent,/No matching runs/);
+assert.equal(get('run').value,'a','Filtering must never change the selected run');
+get('run-search').value='';
+vm.runInContext('renderRunPicker();',context);
+get('run-display-name').value='<img src=x onerror=alert(1)>';
+get('run-notes').value='Wider network experiment';
+vm.runInContext('saveRunLabel({preventDefault(){}});',context);
+assert.equal(get('run-title').textContent,'<img src=x onerror=alert(1)>','Labels must remain literal text');
+assert.match(get('run-label-status').textContent,/Saved in this browser/);
+assert.deepEqual(evaluate("searchRuns(runEntries,'wider network').map(run=>run.id)"),['a']);
+assert.equal(JSON.parse([...saved.values()][0])['/runs/a'].notes,'Wider network experiment');
+vm.runInContext('runPreferences={};loadRunPreferences();',context);
+assert.equal(evaluate("runTitle(runEntries[0])"),'<img src=x onerror=alert(1)>','Labels must survive a reload');
+get('run-display-name').value='Unsaved draft';
+vm.runInContext('renderRunPicker();',context);
+assert.equal(get('run-display-name').value,'Unsaved draft','Polling must not overwrite an in-progress label edit');
+context.localStorage.setItem=()=>{throw new Error('quota exceeded');};
+vm.runInContext('saveRunLabel({preventDefault(){}});',context);
+assert.match(get('run-label-status').textContent,/Could not save.*quota exceeded/);
+assert.notEqual(evaluate("runTitle(runEntries[0])"),'Unsaved draft','Failed writes must not look saved');
+context.localStorage.setItem=(key,value)=>saved.set(key,value);
+get('run-display-name').value='';
+get('run-notes').value='';
+vm.runInContext('saveRunLabel({preventDefault(){}});',context);
+assert.equal(evaluate("runTitle(runEntries[0])"),'Shield axe','Clearing the label restores the recorded name');
+saved.set('cambium.run-labels.v1','[]');
+vm.runInContext('loadRunPreferences();',context);
+assert.match(get('run-label-status').textContent,/Could not load.*invalid format/);
+vm.runInContext('showPage("results");',context);
+assert.equal(get('results').hidden,false);
+assert.equal(get('recent-updates').hidden,false);
+assert.equal(get('overview').hidden,true);
+assert.equal(get('world').hidden,true);
+assert.equal(links[1].attributes['aria-current'],'page');
+assert.equal(links[0].attributes['aria-current'],undefined);
+assert.equal(document.events.at(-1).detail.page,'results');
+vm.runInContext('showPage("overview");',context);
+assert.equal(get('curriculum').hidden,true,'Unavailable curriculum must not be exposed by navigation');
+context.window.location.hash='#run-settings';
+vm.runInContext('navigateHash();',context);
+assert.equal(get('run-settings').hidden,false,'Direct links must activate the correct page');
+context.window.location.hash='#unknown';
+vm.runInContext('navigateHash();',context);
+assert.equal(get('overview').hidden,false);
+vm.runInContext('let refreshCount=0; refresh=()=>{refreshCount++;};',context);
+get('run-options').children[0].focus();
+const focused=document.activeElement.dataset.runId;
+vm.runInContext('runEntries[0].modified++; renderRunPicker();',context);
+assert.equal(document.activeElement.dataset.runId,focused,'Polling must preserve keyboard focus in the picker');
+get('run-picker').listeners.keydown({key:'Escape',preventDefault(){},target:get('run-search')});
+assert.equal(get('run-picker').open,false);
+assert.equal(document.activeElement,get('run-picker-toggle'));
+vm.runInContext('selectRun("b");',context);
+assert.equal(get('run').value,'b');
+assert.equal(get('run-display-name').value,'');
+assert.equal(evaluate('refreshCount'),1);
+context.Chart={helpers:{getRelativePosition:event=>({x:event.x,y:event.y})}};
+const chart={canvas:new Node('canvas'),data:{datasets:[{},{},{}]},visible:[true,true,true],updates:0,
+    isDatasetVisible(index){return this.visible[index];},setDatasetVisibility(index,visible){this.visible[index]=visible;},
+    update(){this.updates++;},legend:{options:{display:true},
+        legendHitBoxes:[{left:0,top:50,width:30,height:10},{left:40,top:50,width:30,height:10},{left:0,top:70,width:30,height:10}],
+        legendItems:[{datasetIndex:0},{datasetIndex:1},{datasetIndex:2}]}};
+context.chart=chart;
+vm.runInContext('legendSolo.afterInit(chart);',context);
+let prevented=0;
+chart.canvas.listeners.contextmenu({x:45,y:55,preventDefault(){prevented++;}});
+assert.deepEqual(chart.visible,[false,true,false]);
+chart.canvas.listeners.contextmenu({x:45,y:55,preventDefault(){prevented++;}});
+assert.deepEqual(chart.visible,[true,true,true],'Right-clicking the sole visible entry must restore all');
+chart.visible=[true,false,true];
+chart.canvas.listeners.contextmenu({x:5,y:75,preventDefault(){prevented++;}});
+assert.deepEqual(chart.visible,[false,false,true],'Wrapped legend rows must work');
+chart.canvas.listeners.contextmenu({x:5,y:55,preventDefault(){prevented++;}});
+assert.deepEqual(chart.visible,[true,false,false],'Right-clicking another hidden entry switches the solo');
+chart.canvas.listeners.contextmenu({x:300,y:20,preventDefault(){prevented++;}});
+assert.equal(prevented,4,'Right-clicks outside the legend must retain the native menu');
+chart.visible=[false,false,false];
+vm.runInContext('soloLegend(chart,1);',context);
+assert.deepEqual(chart.visible,[false,true,false],'Soloing must also work when every series is hidden');
+vm.runInContext('soloLegend(chart,20); legendSolo.afterDestroy(chart);',context);
+assert.equal(chart.canvas.listeners.contextmenu,undefined,'Destroyed charts must release their handler');
+chart.data.datasets=[{}];chart.visible=[true];
+vm.runInContext('soloLegend(chart,0);legendSolo.afterInit(chart);',context);
+assert.deepEqual(chart.visible,[true]);
+assert.equal(chart.canvas.listeners.contextmenu,undefined,'Single-series charts retain normal context menus');
+""", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard chart checks")
     def test_chart_math_and_training_estimates(self):
         script = Path(__file__).with_name("dashboard") / "dashboard.js"
         result = subprocess.run(["node", "-e", r"""
@@ -511,6 +699,268 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
 """, str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for performance chart checks")
+    def test_performance_metrics_and_selection_dom(self):
+        script = Path(__file__).with_name("dashboard") / "dashboard.js"
+        self.assertNotIn('id="training-aggregation', script.with_name("index.html").read_text())
+        result = subprocess.run(["node", "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+class Node {
+    constructor() {this.children=[]; this.dataset={}; this.value='';}
+    set textContent(value) {this.text=String(value); this.children=[];}
+    get textContent() {return this.text ?? this.children.map(child=>child.textContent).join(' ');}
+    set innerHTML(value) {throw new Error('Unsafe HTML');}
+    replaceChildren(...children) {this.text=undefined; this.children=children; this.value=children[0]?.value ?? '';}
+    append(...children) {this.children.push(...children);}
+    addEventListener() {}
+    setAttribute(name,value) {this[name]=value;}
+    closest() {return {querySelector:()=>({firstChild:{textContent:'Metric'},after(){}})};}
+}
+const nodes=new Map();
+const document={getElementById(id) {if(!nodes.has(id)) nodes.set(id,new Node()); return nodes.get(id);},
+    createElement:()=>new Node(),createDocumentFragment:()=>new Node(),querySelector:()=>null,querySelectorAll:()=>[]};
+const context=vm.createContext({document,Intl,Option:class extends Node {constructor(label,value){super();this.textContent=label;this.value=value;}}});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);
+context.catalog=JSON.parse(process.argv[2]);
+const evaluate=code=>JSON.parse(JSON.stringify(vm.runInContext(code,context)));
+vm.runInContext(`metricCatalog=catalog; chartAxis='samples'; windowSize=0; smoothing=10;
+records=[
+    {update:1,samples:10,stage:'aim',stage_index:0,training_rollout:{training_return:2}},
+    {update:2,samples:20,stage:'aim',stage_index:0,training_rollout:{training_return:4},
+     evaluations:{combined_benchmark:{snapshot_update:2,win_rate:.75,reward_mean:9,episodes:40}}},
+    {update:3,samples:30,stage:'combat',stage_index:1,training_return:-99,training_win_rate:.1,
+     training_episodes:1000,training_episode_window:1000,
+     training_opponents:{past:{training_win_rate:.05,training_return:-50,training_episodes:20}},
+     training_rollout:{training_return:100,training_win_rate:.5,training_episodes:2000,source:'recorded',
+         training_opponents:{past:{training_win_rate:.25,training_loss_rate:.75,training_return:-3,training_length:25,training_episodes:20}}},
+     evaluations:{combined_benchmark:{snapshot_update:2,win_rate:.75,reward_mean:9,episodes:40}}}
+]; renderPerformance();`,context);
+assert.equal(document.getElementById('stat-benchmark').textContent,'75%');
+assert.match(document.getElementById('stat-benchmark-detail').textContent,/40 episodes/);
+assert.match(document.getElementById('stat-benchmark-age').textContent,/1 updates ago/);
+assert.equal(document.getElementById('stat-training-win').textContent,'50%');
+assert.deepEqual(evaluate("metricPoints('win_rate').map(({x,y})=>({x,y}))"),[{x:20,y:75}]);
+assert.deepEqual(evaluate("metricPoints('evaluation_reward').map(point=>point.y)"),[9]);
+assert.equal(evaluate("metricPoints('training_return').at(-1).y"),100,'EMA must restart at stage boundary');
+assert.equal(evaluate("metricPoints('training_return',true).at(-1).y"),null,'Derivative must restart at stage boundary');
+document.getElementById('training-opponent').value='past';
+vm.runInContext('renderPerformance();',context);
+assert.equal(document.getElementById('stat-training-win').textContent,'25%');
+assert.equal(document.getElementById('stat-training-return').textContent,'-3');
+assert.deepEqual(evaluate("metricPoints('training_win_rate').map(point=>point.y)"),[null,null,25]);
+assert.equal(document.getElementById('metric-select').children.length,Object.keys(context.catalog).length);
+assert.equal(document.getElementById('benchmark-performance').hidden,false);
+assert.equal(document.getElementById('training-performance').hidden,true);
+vm.runInContext(`performanceMode='training';
+records.at(-1).training_rollout={training_episodes:2000,training_win_rate:.6,training_return:7,source:'recorded',
+    training_opponents:{past:{training_episodes:1200,training_win_rate:.7,training_return:8}}}; renderPerformance();`,context);
+assert.equal(document.getElementById('benchmark-performance').hidden,true);
+assert.equal(document.getElementById('training-performance').hidden,false);
+assert.equal(document.getElementById('reward-diagnostics').hidden,false);
+assert.equal(document.getElementById('optimization-title').hidden,undefined);
+assert.equal(document.getElementById('runtime-title').hidden,undefined);
+assert.equal(document.getElementById('stat-training-win').textContent,'70%');
+assert.match(document.getElementById('episode-status').textContent,/1,200 completed episodes in this rollout/);
+context.Chart=class {static defaults={font:{}};constructor(canvas,config){this.data=config.data;this.options=config.options;this.plugins=config.plugins;}update(){}};
+vm.runInContext('initCharts(); redrawCharts();',context);
+assert.equal(evaluate("[...charts.values()].every(chart=>chart.plugins.some(plugin=>plugin.id==='legendSolo'))"),true);
+assert.equal(evaluate("charts.get('training-outcomes-chart').data.datasets[0].data.at(-1).y"),70);
+assert.equal(evaluate("charts.get('training-outcomes-chart').options.scales.y.max"),100);
+assert.equal(evaluate("charts.get('training-outcomes-chart').options.scales.x.title.text"),'Learner transitions');
+vm.runInContext('windowSize=1;',context);
+assert.deepEqual(evaluate("metricPoints('win_rate')"),[],'Cached evaluations must not move into the latest update window');
+vm.runInContext('windowSize=0;',context);
+vm.runInContext(`records=[{update:1,reward_mean:.5,training_return:99,training_win_rate:1,
+    training_opponents:{past:{training_return:50,training_win_rate:.9}}}]; renderPerformance();`,context);
+assert.equal(document.getElementById('stat-training-return').textContent,'--');
+assert.equal(document.getElementById('stat-training-win').textContent,'--','Recent history must not substitute for missing rollout data');
+assert.match(document.getElementById('episode-status').textContent,/not recorded/);
+assert.equal(document.getElementById('stat-benchmark').textContent,'--');
+assert.deepEqual(evaluate("metricPoints('training_return').map(point=>point.y)"),[],'Missing samples must not fabricate points');
+vm.runInContext(`chartAxis='elapsed_seconds'; records=[{update:1,loss:2},
+    {update:2,loss:3,iteration_seconds:10},{update:3,loss:4,elapsed_seconds:50}];`,context);
+assert.deepEqual(evaluate("metricPoints('loss').map(({x,y})=>({x,y}))"),[{x:50,y:4}]);
+vm.runInContext(`records=[{update:4,samples:40,stage:'combat',training_rollout:{
+    training_episodes:100,training_win_rate:.6,training_timeout_rate:.2,training_loss_or_draw_rate:.2,
+    training_opponents:{},source:'recovered_rewards'}}]; renderPerformance();`,context);
+assert.match(document.getElementById('episode-status').textContent,/Recovered reward counts/);
+assert.match(document.getElementById('episode-status').textContent,/loss and draw combined/);
+assert.equal(document.getElementById('stat-training-win').textContent,'60%');
+assert.equal(document.getElementById('stat-training-return').textContent,'--');
+assert.equal(evaluate("metricValue(records[0],'training_loss_rate')"),null);
+assert.equal(evaluate("metricValue(records[0],'training_loss_or_draw_rate')"),20);
+assert.equal(document.getElementById('benchmark-performance').hidden,true,'Refresh must preserve training mode');
+assert.equal(document.getElementById('training-performance').hidden,false);
+vm.runInContext(`performanceMode='benchmark'; renderPerformance();`,context);
+assert.equal(document.getElementById('benchmark-performance').hidden,false);
+assert.equal(document.getElementById('training-performance').hidden,true);
+assert.equal(document.getElementById('reward-diagnostics').hidden,true);
+assert.equal(evaluate('chartAxis'),'elapsed_seconds');
+vm.runInContext(`chartAxis='update'; windowSize=0; records=[{update:1,loss:0},{update:2,loss:100}];`,context);
+const slider=document.getElementById('smooth');
+const smoothingValues=[0,250,500,750,1000].map(position=>{
+    slider.value=String(position);
+    vm.runInContext('updateSmoothing();',context);
+    const value=evaluate('smoothing');
+    assert.equal(document.getElementById('smooth-value').textContent,value===1?'Off':`EMA ${value}`);
+    assert.equal(slider['aria-valuetext'],document.getElementById('smooth-value').textContent);
+    return value;
+});
+assert.deepEqual(smoothingValues,[1,5,22,106,500],'Slider scale must increase exponentially from Off to EMA 500');
+assert.ok(Math.abs(evaluate("charts.get('loss-chart').data.datasets[1].data.at(-1).y")-200/501)<1e-12,
+    'Slider must redraw with the selected EMA');
+vm.runInContext('renderPerformance();',context);
+assert.equal(evaluate('smoothing'),500,'Refreshing performance must preserve smoothing');
+slider.value='0';
+vm.runInContext('updateSmoothing();',context);
+assert.equal(evaluate("charts.get('loss-chart').data.datasets[1].data.at(-1).y"),100,'Off must restore unsmoothed values');
+assert.equal(document.getElementById('smooth-value').textContent,'Off');
+vm.runInContext(`smoothing=1; selectedSuite='combined_benchmark';
+records=[
+    {update:10,samples:100,elapsed_seconds:1,stage:'aim',stage_index:0,loss:0},
+    {update:20,samples:200,elapsed_seconds:2,stage:'aim',stage_index:0,loss:10,
+        evaluations:{combined_benchmark:{snapshot_update:20,win_rate:.5}}},
+    {update:30,samples:300,elapsed_seconds:3,stage:'fight',stage_index:1,loss:30,
+        evaluations:{combined_benchmark:{snapshot_update:20,win_rate:.5}}},
+    {update:40,samples:400,elapsed_seconds:4,stage:'fight',stage_index:1,loss:50,
+        evaluations:{combined_benchmark:{snapshot_update:40,win_rate:.8}}},
+    {update:50,samples:500,elapsed_seconds:5,stage:'fight',stage_index:1,loss:70,
+        evaluations:{combined_benchmark:{snapshot_update:40,win_rate:.8}}},
+    {update:60,samples:600,elapsed_seconds:6,stage:'mixed',stage_index:2,loss:99}
+]; windowMode='latest'; windowSize=2;`,context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[50,60]);
+vm.runInContext("windowMode='range'; windowStart=20; windowEnd=40;",context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[20,30,40]);
+vm.runInContext("windowMode='stage'; windowStage='1';",context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[30,40,50]);
+assert.deepEqual(evaluate("metricPoints('win_rate').map(point=>point.update)"),[40],
+    'Stage filtering must use benchmark snapshot stages, not rows carrying cached results');
+for (const [axis,expected] of [['update',[30,40,50]],['samples',[300,400,500]],['elapsed_seconds',[3,4,5]]]) {
+    context.axis=axis;
+    vm.runInContext('chartAxis=axis;',context);
+    assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.x)"),expected);
+}
+vm.runInContext("windowMode='range'; windowStart=40; windowEnd=50; smoothing=3;",context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.y)"),[40,55],
+    'Cropping must preserve preceding EMA context within the stage');
+vm.runInContext("windowMode='stage'; windowStage='3';",context);
+assert.deepEqual(evaluate("metricPoints('loss')"),[],'An unrecorded stage must not show another stage');
+vm.runInContext("windowMode='all';",context);
+assert.equal(evaluate("metricPoints('loss').length"),6);
+vm.runInContext(`configuration={experiment:{stages:[{name:'aim'},{name:'fight'},{name:'mixed'},{name:'final'}]}};
+    chartAxis='update'; smoothing=1; windowSize=2; updateWindowMode('latest');`,context);
+assert.equal(document.getElementById('window-latest-control').hidden,false);
+assert.equal(document.getElementById('window-range-control').hidden,true);
+assert.equal(document.getElementById('window-size-value').textContent,'2 updates');
+assert.equal(document.getElementById('window-size')['aria-valuetext'],'2 updates');
+for (const [position,expected] of [[0,1],[500,2],[1000,6]]) {
+    document.getElementById('window-size').value=String(position);
+    vm.runInContext('updateLatestWindow();',context);
+    assert.equal(evaluate('windowSize'),expected);
+}
+vm.runInContext(`windowStart=windowEnd=null; updateWindowMode('range');
+    updateWindowRange('start','25'); updateWindowRange('end','45');`,context);
+assert.equal(document.getElementById('window-range-control').hidden,false);
+assert.equal(document.getElementById('window-latest-control').hidden,true);
+assert.equal(Number(document.getElementById('window-start').value),25);
+assert.equal(Number(document.getElementById('window-start-slider').value),25);
+assert.equal(Number(document.getElementById('window-end').value),45);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[30,40]);
+assert.match(document.getElementById('window-info').textContent,/2 of 6 updates.*Updates 30-40/);
+vm.runInContext("updateWindowRange('end','');",context);
+assert.equal(evaluate('windowEnd'),45,'An unfinished numeric edit must not become update zero');
+vm.runInContext("updateWindowRange('start','10000');",context);
+assert.deepEqual(evaluate('[windowStart,windowEnd]'),[60,60],'Crossing handles must keep bounds ordered and clamp to the run');
+vm.runInContext("updateWindowRange('end','-10');",context);
+assert.deepEqual(evaluate('[windowStart,windowEnd]'),[10,10]);
+vm.runInContext("updateWindowRange('end','45'); updateWindowRange('start','25'); redrawCharts();",context);
+assert.deepEqual(evaluate('[windowStart,windowEnd]'),[25,45],'Refresh must preserve explicit endpoints');
+vm.runInContext("windowStage=''; updateWindowMode('stage');",context);
+assert.equal(evaluate('windowStage'),'2','First stage selection should use the latest recorded stage');
+assert.equal(document.getElementById('window-stage-control').hidden,false);
+assert.match(document.getElementById('window-stage').children[1].textContent,/fight.*updates 30-50/);
+document.getElementById('window-stage').value='3';
+vm.runInContext("windowStage='3'; redrawCharts();",context);
+assert.deepEqual(evaluate("metricPoints('loss')"),[],'A configured future stage must remain empty');
+assert.match(document.getElementById('window-info').textContent,/0 of 6 updates/);
+document.getElementById('window-stage').value='2';
+vm.runInContext("windowStage='2'; records.push({update:70,samples:700,elapsed_seconds:7,stage:'mixed',stage_index:2,loss:110}); redrawCharts();",context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[60,70],'Stage windows must include new updates in that stage');
+vm.runInContext("records.push({update:80,samples:800,elapsed_seconds:8,stage:'final',stage_index:3,loss:120}); redrawCharts();",context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[60,70],'Stage windows must not follow training into the next stage');
+vm.runInContext("chartAxis='samples'; redrawCharts();",context);
+assert.equal(evaluate("charts.get('loss-chart').options.scales.x.min"),600);
+assert.equal(evaluate("charts.get('loss-chart').options.scales.x.max"),700);
+vm.runInContext("updateWindowMode('range');",context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[30,40],'Range must remain fixed as training grows');
+vm.runInContext("windowSize=2; updateWindowMode('latest');",context);
+assert.deepEqual(evaluate("metricPoints('loss').map(point=>point.update)"),[70,80]);
+vm.runInContext("updateWindowMode('all');",context);
+assert.equal(evaluate("metricPoints('loss').length"),8);
+vm.runInContext("configuration=null; chartAxis='update'; records=[{update:1,stage:'legacy',loss:2}]; windowStage=''; updateWindowMode('stage');",context);
+assert.equal(evaluate('windowStage'),'legacy','Historical stage names must work without indexed config');
+assert.equal(evaluate("metricPoints('loss').length"),1);
+vm.runInContext("records=[]; redrawCharts();",context);
+assert.equal(document.getElementById('window-size').disabled,true);
+assert.equal(document.getElementById('window-start').disabled,true);
+assert.equal(document.getElementById('window-stage').disabled,true);
+assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/);
+""", str(script), json.dumps(CATALOG)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_episode_metrics_are_sanitized_and_catalog_is_shared(self):
+        row = {"update": 1, "training_win_rate": .25, "training_return": -2, "training_episodes": 8,
+               "training_opponents": {"<past>": {"training_win_rate": .5, "training_return": -3,
+                                                   "training_episodes": 2, "ignored": "unused"}}}
+        invalid = {**row, "update": 2, "training_opponents": {"past": {"training_win_rate": 25}}}
+        self.metrics.write_text(json.dumps(row) + "\n" + json.dumps(invalid) + "\n")
+        result = self.store.read(self.store.list_runs()[0]["id"])
+        self.assertEqual(result["metric_catalog"], CATALOG)
+        self.assertEqual(len(result["metrics"]), 1)
+        opponent = result["metrics"][0]["training_opponents"]["<past>"]
+        self.assertEqual(opponent["training_win_rate"], .5)
+        self.assertNotIn("ignored", opponent)
+        self.assertIn("Skipped 1", result["warnings"][0])
+
+    def test_historical_rollout_recovery_is_conservative_and_read_only(self):
+        config = {"metadata": {"learner": "opponent_pool"}, "experiment": {"stages": [
+            {"name": "combat", "rewards": {"weights": {"won_duel": 20, "death": -20}}}]}}
+        (self.run_dir / "config.json").write_text(json.dumps(config))
+        row = {"update": 1, "stage_index": 0, "stage": "combat", "terminated_duels": 8, "timeouts": 2,
+               "reward_types": {"won_duel": 120, "death": -40}}
+        self.metrics.write_text(json.dumps(row) + "\n")
+        before = self.metrics.read_bytes()
+        result = self.store.read(self.store.list_runs()[0]["id"])["metrics"][0]["training_rollout"]
+        self.assertEqual(result["training_episodes"], 10)
+        self.assertEqual(result["training_win_rate"], .6)
+        self.assertEqual(result["training_timeout_rate"], .2)
+        self.assertEqual(result["training_loss_or_draw_rate"], .2)
+        self.assertEqual(result["source"], "recovered_rewards")
+        for field in ("training_return", "training_length", "training_loss_rate", "training_draw_rate"):
+            self.assertNotIn(field, result)
+        self.assertEqual(self.metrics.read_bytes(), before)
+        for changes in ({"reward_types": {"won_duel": 123, "death": -40}}, {"terminated_duels": 9},
+                        {"stage": "other"}, {"stage_index": 5}):
+            self.metrics.write_text(json.dumps({**row, **changes}) + "\n")
+            self.assertNotIn("training_rollout", self.store.read(self.store.list_runs()[0]["id"])["metrics"][0])
+        config["experiment"]["stages"][0]["rewards"]["weights"]["won_duel"] = 0
+        (self.run_dir / "config.json").write_text(json.dumps(config))
+        self.metrics.write_text(json.dumps(row) + "\n")
+        self.assertNotIn("training_rollout", self.store.read(self.store.list_runs()[0]["id"])["metrics"][0])
+
+    def test_recorded_rollout_takes_precedence_and_is_sanitized(self):
+        row = {"update": 1, "training_rollout": {"training_episodes": 2000, "training_win_rate": .75,
+               "training_return": -3, "training_opponents": {"past": {"training_episodes": 100,
+               "training_win_rate": .5}}, "source": "recorded"}}
+        self.metrics.write_text(json.dumps(row) + "\n")
+        result = self.store.read(self.store.list_runs()[0]["id"])["metrics"][0]
+        self.assertEqual(result["training_rollout"], row["training_rollout"])
+        row["training_rollout"]["training_opponents"]["past"]["training_win_rate"] = 50
+        self.metrics.write_text(json.dumps(row) + "\n")
+        self.assertEqual(self.store.read(self.store.list_runs()[0]["id"])["metrics"], [])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix=".dashboard-tests-", dir=".")
         self.addCleanup(self.directory.cleanup)
@@ -546,6 +996,52 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         self.assertEqual([row["update"] for row in self.store.read(identity)["metrics"]], [1, 2, 3])
         self.metrics.write_bytes(b'{"update":1,"reward_mean":-1}\n')
         self.assertEqual(self.store.read(identity)["metrics"][0]["reward_mean"], -1)
+
+    def test_run_summaries_are_searchable_cached_and_read_only(self):
+        config_path = self.run_dir / "config.json"
+        config = {"options": {"seed": 7, "lr": 0.1},
+                  "metadata": {"schema": {"id": "equipment"}, "environment": {"name": "Armored duel"}},
+                  "experiment": {"name": "Width experiment", "seed": 42, "learner": {"hidden_dim": 512, "lr": 0.0003}}}
+        original = json.dumps(config).encode()
+        config_path.write_bytes(original)
+        metrics = self.metrics.read_bytes()
+        with mock.patch.object(self.store, "read_config", wraps=self.store.read_config) as read:
+            first = self.store.list_runs()[0]
+            self.assertEqual(first["experiment_name"], "Width experiment")
+            self.assertEqual(first["environment_name"], "Armored duel")
+            self.assertEqual(first["policy_name"], "equipment")
+            self.assertEqual(first["seed"], 42)
+            self.assertEqual(first["hidden_dim"], 512)
+            self.assertEqual(first["lr"], 0.0003)
+            self.assertEqual(first["warnings"], [])
+            self.assertEqual(self.store.list_runs()[0], first)
+            self.assertEqual(read.call_count, 1, "Polling must reuse unchanged configuration summaries")
+            config["experiment"]["name"] = "Updated experiment name"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            self.assertEqual(self.store.list_runs()[0]["experiment_name"], "Updated experiment name")
+            self.assertEqual(read.call_count, 2)
+        self.assertEqual(self.metrics.read_bytes(), metrics)
+        self.assertEqual(json.loads(config_path.read_bytes()), config, "Discovery must never write training files")
+        config_path.write_text('{"options":', encoding="utf-8")
+        self.assertIn("Configuration is not valid JSON yet.", self.store.list_runs()[0]["warnings"])
+        for malformed in ({"metadata": []}, {"experiment": None}, {"options": {"lr": float("nan")}}):
+            config_path.write_text(json.dumps(malformed), encoding="utf-8")
+            self.assertTrue(self.store.list_runs()[0]["warnings"], "Bad metadata must be visible, not silently hidden")
+        config_path.unlink()
+        self.assertEqual(self.store.list_runs()[0]["warnings"], [])
+        self.assertNotIn("experiment_name", self.store.list_runs()[0])
+
+    def test_run_order_uses_activity_dates_not_names(self):
+        for path in (self.metrics, self.run_dir / "config.json"):
+            os.utime(path, (100, 100))
+        newer = self.root / "runs" / "aaa"
+        newer.mkdir()
+        config = newer / "config.json"
+        config.write_text("{}", encoding="utf-8")
+        os.utime(config, (200, 200))
+        runs = self.store.list_runs()
+        self.assertEqual([run["name"] for run in runs], ["aaa", "first"])
+        self.assertEqual([run["modified"] for run in runs], [200, 100])
 
     def test_invalid_records_and_config_only_run(self):
         identity = self.store.list_runs()[0]["id"]
