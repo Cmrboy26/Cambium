@@ -15,6 +15,15 @@ ACTION_KINDS = {action["name"]: action["kind"] for action in CATALOGUE["actions"
 CAPABILITIES = tuple(CATALOGUE["capabilities"])
 LIMITS = CATALOGUE["limits"]
 RULES = {"simulate_food": False, "natural_regeneration": False}
+_EQUIPMENT_MATERIALS = ("leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite")
+_WEAPONS = frozenset({"minecraft:air", *(f"minecraft:{material}_{kind}" for material in _EQUIPMENT_MATERIALS
+    if material not in ("leather", "chainmail") for kind in ("sword", "axe")),
+    "minecraft:wooden_sword", "minecraft:wooden_axe", "minecraft:stone_sword", "minecraft:stone_axe"})
+_LOADOUT_FIELDS = frozenset(("weapons", "selected", "offhand", "armor"))
+_ARMOR_SLOTS = tuple(CATALOGUE["armor_slots"])
+_ARMOR_ITEMS = {slot: frozenset({"minecraft:air", *(f"minecraft:{material}_{slot}"
+    for material in _EQUIPMENT_MATERIALS), *(["minecraft:turtle_helmet"] if slot == "helmet" else [])})
+    for slot in _ARMOR_SLOTS}
 
 
 def validate_contract(value):
@@ -96,20 +105,16 @@ def resolve_players(players, profile="configured"):
         raise ValueError("Environment needs two players")
     if profile not in ("configured", "unarmored_diamond_sword", "unarmored_sword_axe_shield"):
         raise ValueError("Unsupported environment profile")
-    materials = ("leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite")
-    weapons = {"minecraft:air", *(f"minecraft:{material}_{kind}" for material in materials
-                                 if material not in ("leather", "chainmail") for kind in ("sword", "axe")),
-               "minecraft:wooden_sword", "minecraft:wooden_axe", "minecraft:stone_sword", "minecraft:stone_axe"}
     default = {"weapons": ["minecraft:diamond_sword"], "offhand": "minecraft:air"}
     if profile == "unarmored_sword_axe_shield":
         default = {"weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"], "offhand": "minecraft:shield"}
     for player in players:
-        loadout = deepcopy(player.get("loadout", default))
-        if not isinstance(loadout, dict) or set(loadout) - {"weapons", "selected", "offhand", "armor"}:
+        loadout = player.get("loadout", default)
+        if not isinstance(loadout, dict) or set(loadout) - _LOADOUT_FIELDS:
             raise ValueError("Unsupported loadout fields")
         slots = loadout.get("weapons", ["minecraft:diamond_sword"])
         selected = loadout.get("selected", 0)
-        if (not isinstance(slots, list) or not 1 <= len(slots) <= 9 or any(not isinstance(item, str) or item not in weapons for item in slots)
+        if (not isinstance(slots, list) or not 1 <= len(slots) <= 9 or any(not isinstance(item, str) or item not in _WEAPONS for item in slots)
                 or len({item for item in slots if item != "minecraft:air"}) != sum(item != "minecraft:air" for item in slots)
                 or type(selected) is not int or not 0 <= selected < len(slots)):
             raise ValueError("Unsupported weapon loadout or selected slot")
@@ -117,17 +122,13 @@ def resolve_players(players, profile="configured"):
         if offhand not in ("minecraft:air", "minecraft:shield"):
             raise ValueError("Unsupported offhand item")
         armor = loadout.get("armor", {})
-        names = tuple(CATALOGUE["armor_slots"])
-        if not isinstance(armor, dict) or set(armor) - set(names):
+        if not isinstance(armor, dict) or set(armor) - _ARMOR_ITEMS.keys():
             raise ValueError("Unsupported armor slot")
-        armor = {slot: armor.get(slot, "minecraft:air") for slot in names}
+        armor = {slot: armor.get(slot, "minecraft:air") for slot in _ARMOR_SLOTS}
         for slot, item in armor.items():
-            allowed = {"minecraft:air", *(f"minecraft:{material}_{slot}" for material in materials)}
-            if slot == "helmet":
-                allowed.add("minecraft:turtle_helmet")
-            if item not in allowed:
+            if item not in _ARMOR_ITEMS[slot]:
                 raise ValueError(f"Unsupported armor item: {item}")
-        player["loadout"] = {"weapons": slots, "selected": selected, "offhand": offhand, "armor": armor}
+        player["loadout"] = {"weapons": list(slots), "selected": selected, "offhand": offhand, "armor": armor}
     json.dumps(players, allow_nan=False)
     return players
 

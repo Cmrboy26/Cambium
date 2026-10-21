@@ -149,6 +149,11 @@ actual initial scenario, not a sampling distribution. Ordinary native reset
 restores the world's most recently assigned players. Initial scene templates
 are validated when the sampler is constructed or reconfigured, not per episode;
 sampled players still undergo loadout normalization and finite-value checks.
+Item whitelists are immutable and built once at module import. `resolve_players`
+defensively copies the input players once, then creates fresh weapons/armor
+containers without deep-copying each loadout again. Returned values must remain
+isolated from caller inputs, sampler templates and cached equipment; cached
+samples still undergo the same validation on every reset.
 The reset hot path draws both candidate positions in one NumPy call and uses
 scalar separation checks, retaining six uniform draws per rejection attempt,
 the 256-attempt limit and the existing corner fallback. Player assembly copies

@@ -14,7 +14,7 @@ import torch
 from backend.fast_rl_model import ActorCritic
 from simulator.training.analyze_metrics import main as analyze_metrics
 from simulator.training._test_plans import example_plan
-from simulator.training.contract import from_legacy, resolve_scenario
+from simulator.training.contract import from_legacy, resolve_players, resolve_scenario
 from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
@@ -35,6 +35,45 @@ def short_plan():
 
 
 class PlanChecks(unittest.TestCase):
+    def test_resolve_players_keeps_independent_mutable_outputs(self):
+        shared = {"weapons": ["minecraft:iron_sword", "minecraft:air", "minecraft:air"],
+                  "armor": {"helmet": "minecraft:turtle_helmet"}}
+        players = [{"position": [-2, 1, 0], "loadout": shared}, {"position": [2, 1, 0], "loadout": shared}]
+        before = deepcopy(players)
+        resolved = resolve_players(players)
+        self.assertEqual(players, before)
+        self.assertEqual(resolved[0]["loadout"], resolved[1]["loadout"])
+        resolved[0]["loadout"]["weapons"][0] = "minecraft:diamond_axe"
+        resolved[0]["loadout"]["armor"]["helmet"] = "minecraft:air"
+        resolved[0]["position"][0] = 99
+        self.assertEqual(players, before)
+        self.assertEqual(resolved[1]["loadout"]["weapons"][0], "minecraft:iron_sword")
+        self.assertEqual(resolved[1]["loadout"]["armor"]["helmet"], "minecraft:turtle_helmet")
+        for profile in ("configured", "unarmored_diamond_sword", "unarmored_sword_axe_shield"):
+            defaults = resolve_players([{}, {}], profile)
+            defaults[0]["loadout"]["weapons"][0] = "minecraft:air"
+            self.assertEqual(defaults[1]["loadout"]["weapons"][0], "minecraft:diamond_sword")
+
+    def test_resolve_players_preserves_equipment_validation(self):
+        for material in ("wooden", "stone", "copper", "iron", "golden", "diamond", "netherite"):
+            for kind in ("sword", "axe"):
+                item = f"minecraft:{material}_{kind}"
+                resolved = resolve_players([{"loadout": {"weapons": [item]}}, {}])
+                self.assertEqual(resolved[0]["loadout"]["weapons"], [item])
+        for material in ("leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite"):
+            armor = {slot: f"minecraft:{material}_{slot}" for slot in ("helmet", "chestplate", "leggings", "boots")}
+            resolved = resolve_players([{"loadout": {"armor": armor}}, {}])
+            self.assertEqual(resolved[0]["loadout"]["armor"], armor)
+        invalid = [None, {"weapons": ["minecraft:banana"]}, {"weapons": ["minecraft:iron_sword"] * 2},
+                   {"weapons": []}, {"weapons": ["minecraft:air"] * 10}, {"selected": True}, {"selected": 1},
+                   {"offhand": "minecraft:banana"}, {"armor": {"head": "minecraft:air"}},
+                   {"armor": {"boots": "minecraft:turtle_helmet"}}, {"unknown": True}]
+        for loadout in invalid:
+            with self.subTest(loadout=loadout), self.assertRaises(ValueError):
+                resolve_players([{"loadout": loadout}, {}])
+        with self.assertRaises(ValueError):
+            resolve_players([{"position": [float("nan"), 1, 0]}, {}])
+
     def test_collection_timer_cuda_events_are_opt_in(self):
         with patch("torch.cuda.Event") as event, patch("torch.cuda.current_stream"), \
                 patch("torch.cuda.synchronize") as synchronize:
@@ -213,6 +252,33 @@ class SnapshotChecks(unittest.TestCase):
         self.library = str(ROOT / "simulator/build-research/minecraft_sim_training.so")
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4", "--hidden-dim", "8",
                       "--rollout-steps", "3", "--epochs", "1", "--minibatch-size", "8", "--save-every", "1"]
+
+    def test_sampler_validation_keeps_cache_and_template_ownership(self):
+        scenario = resolve_plan(self.raw, self.directory)["scenario"]
+        scenario["spawns"] = {"sample": "world", "region": {"min": [-4, 1, -4], "max": [4, 1, 4]},
+                              "minimum_separation": 1, "yaw": {"uniform": [-180, 180]}}
+        scenario["equipment"] = {"sample": "world", "players": "independent",
+            "loadout": {"weapons": ["minecraft:iron_sword", "minecraft:iron_axe"],
+                        "offhand": "minecraft:shield", "armor": {"helmet": "minecraft:turtle_helmet"}}}
+        sampler = EpisodeSampler(scenario, 2, 42)
+        players = sampler.players(0)
+        before = sampler.state_dict()
+        template = deepcopy(sampler.scenario)
+        players[0]["position"][0] = 99
+        players[0]["loadout"]["weapons"][0] = "minecraft:diamond_axe"
+        players[0]["loadout"]["armor"]["helmet"] = "minecraft:air"
+        self.assertEqual(sampler.state_dict(), before)
+        self.assertEqual(sampler.scenario, template)
+        repeated = sampler.players(0)
+        self.assertEqual(repeated[0]["loadout"]["weapons"][0], "minecraft:iron_sword")
+        self.assertEqual(repeated[0]["loadout"]["armor"]["helmet"], "minecraft:turtle_helmet")
+        sampler.cache[0]["equipment"][0]["offhand"] = "minecraft:banana"
+        with self.assertRaisesRegex(ValueError, "offhand"):
+            sampler.players(0)
+        sampler.load_state_dict(before)
+        sampler.cache[0]["spawns"][0]["yaw"] = float("nan")
+        with self.assertRaises(ValueError):
+            sampler.players(0)
 
     def test_named_saves_rolling_opponent_resume_evaluation_and_replay(self):
         self.raw["snapshots"] = [{"name": "final", "on_completion": True}]
