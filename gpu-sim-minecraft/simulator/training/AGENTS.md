@@ -73,6 +73,34 @@ allocation/thread count and replay/evaluation cadence. Keep each job's config,
 metrics and Slurm log as its baseline provenance. Timing instrumentation itself
 does not draw RNG or alter the order of sampling, policy actions or updates.
 
+## Sweep Metrics And PNG Comparisons
+
+The [shared-GPU runner](../../rosie/AGENTS.md#shared-gpu-sweeps) starts independent
+trainers from frozen compiled experiments. Normal trainer CLI/checkpoint formats
+are retained. `sweep.prepare` uses the compiler and trainer option validation;
+trial names include normalized values and equivalent numeric values are rejected.
+The supervisor uses bounded asynchronous subprocesses rather than Python threads
+for training, with separate RNG/CUDA contexts, stdout/stderr and output folders.
+Default concurrency is all trials; the optional cap is not a hardware predictor.
+
+New metric rows include `elapsed_seconds`: cumulative time from entry to training,
+including initialization and prior iteration checkpoint/stage work. It excludes
+interpreter import, queue/build time and the current row's subsequent checkpoint;
+supervisor trial durations additionally include process startup/final checkpoint.
+Checkpoints preserve elapsed time across resume; legacy checkpoints start a new
+elapsed segment. This clock is separate from iteration_seconds and is included
+in the dashboard's sanitized metric fields.
+
+`plot_sweep.series` reads the exact trial paths through `analyze_metrics.read_run`;
+explicit run selection must not choose the newest sibling. Readers ignore an
+incomplete trailing JSONL record. Cached evaluations are deduplicated by suite
+and snapshot_update and anchored to the matching training row. Missing/pending
+trials contribute no points, not zeros. Old metrics estimate elapsed time by
+summing iteration_seconds and display a warning. Charts share one metric/x-axis
+and never mix reward scales or pretend updates are equal experience budgets.
+Matplotlib uses the Agg canvas directly, without a display/server, and atomically
+replaces the PNG. Rendering is separate from training and can run at any time.
+
 ## Research Training Plans
 
 Pass `--plan simulator/setups/curricula/shield-axe-curriculum.json` (PowerShell

@@ -143,6 +143,77 @@ dependency chains and are not migrated automatically. Direct `sbatch` submission
 No jobs are submitted by the mocked checks:
 `python -B -m unittest simulator.training.test_rosie.SubmitTests -v`.
 
+### Shared-GPU Sweeps
+
+`bash rosie/submit.sh --shared-gpu` keeps the existing prompts and `multiple`
+entry but submits exactly one allocation. All selected trial values launch
+concurrently by default; `--max-parallel N` optionally queues excess trials
+inside the job (`0` means all). Ordinary submissions remain separate jobs.
+Only training settings may be swept: worlds, update cap, rollout length, width,
+PPO epochs, minibatch size, learning rate, trainer threads or replay interval.
+Allocation CPU cores, host RAM and wall-time remain single-valued. One seed and
+one allocated GPU are supported; this is independent training, not multi-GPU PPO.
+
+Allocated CPUs/RAM are totals for the entire job. The wizard defaults trainer
+threads to at most `allocated CPUs / active trials`, bounded by four. It checks
+the sum of the largest simultaneously active thread counts before submission;
+the runner repeats the check against Slurm's allocation. Leave headroom for
+Python, native and evaluation overhead. RAM/VRAM demand is not predicted or
+partitioned: concurrent optimization/evaluation can exhaust memory. Every child
+inherits Slurm's GPU visibility and explicitly bounded OpenMP/BLAS threads.
+Use only sharing permitted by the cluster. No CUDA MPS or automatic packing is
+enabled, and a job-count limit does not override resource/account limits.
+
+After confirmation, preparation freezes resolved experiments and a version-1
+`minecraft_sim_sweep` manifest under `simulator/training/sweeps/<name>`. Dry-run
+and cancellation create no artifacts. Existing sweep/trial paths or equivalent
+numeric values abort preparation. Submission failure retains the prepared files
+and prints their location. `SIM_SWEEP=<absolute-path>/sweep.json` selects this
+mode in `train.sbatch`; do not combine it with plan/resume/initialize settings.
+
+The batch script builds once under the existing lock, snapshots the native
+library once, then runs `python -B -m simulator.training.sweep run <manifest>
+--library <private-library>`. Python sources run from the checkout; revision and
+source digests are recorded at preparation and launch, not archived. Do not edit
+training code while queued trials still need to launch. Each trial's plan is
+frozen, including referenced scenes/policy; external checkpoint files referenced
+by opponents are not copied. Treat those checkpoints as immutable.
+
+Trials remain ordinary flat `runs/<name>-<value>` directories for existing
+dashboard/artifact discovery. The sweep directory contains frozen plans,
+`sweep.json`, atomic `status.json`, separate `logs/<trial>.out/.err`, and
+`comparison.png`. Status records pending/running/succeeded/failed/interrupted,
+exit codes, launch/end times, commands and source/library provenance. Failure
+of one trial does not stop siblings; any failed trial makes the job fail. TERM/INT
+stops active process groups and prevents pending trials from starting; five
+seconds later remaining workers are killed. SIGKILL cannot save final status.
+Automatic retries/resume and memory scheduling are not implemented.
+
+After the supervisor completes (including normal trial failures), the job renders
+one headless Matplotlib PNG with all trial curves overlaid on the same axes.
+Regenerate it during or after training without starting a server:
+
+```sh
+.venv-rosie/bin/python -B -m simulator.training.plot_sweep simulator/training/sweeps/<name>/sweep.json
+.venv-rosie/bin/python -B -m simulator.training.plot_sweep simulator/training/sweeps/<name>/sweep.json --suite combined_benchmark --x samples
+```
+
+`--metric` selects win_rate (default), evaluation_reward, reward_mean, entropy,
+loss, player_transitions_per_second, collection_seconds or update_seconds.
+`--x` selects elapsed_seconds (default), samples or update. Default evaluation is
+combined_benchmark if available, otherwise the first named suite. With no results
+yet, the PNG retains labeled empty curves; no fake zero scores are introduced.
+`--output` chooses another PNG. Copying the manifest/config/metrics to a local
+machine is sufficient; use `--runs <local-cache-root>` to remap run paths. The
+existing artifact client does not automatically fetch sweep manifests or plots.
+Re-run setup once to install Matplotlib and its dependencies. Plot errors are
+reported separately; a successful training sweep with a failed plot exits nonzero.
+
+Compare fixed evaluation scores rather than raw rewards across reward sweeps.
+For world-count sweeps, update-based curriculum budgets also change experience
+per stage; stage progression and GPU/CPU contention remain comparison confounds.
+Measure total sweep completion time as well as per-trial learning speed.
+
 ### Batch Environment
 
 Supported training environment variables:

@@ -30,7 +30,10 @@ def read_run(path=None, include_profiles=False):
     runs = store.list_runs()
     if not runs:
         raise FileNotFoundError(f"No run config or metrics found under {selected}")
-    run = store.read(runs[0]["id"])
+    selected_run = next((run for run in runs if Path(run["path"]).resolve() == selected.resolve()), None)
+    if selected_run is None:
+        raise FileNotFoundError(f"No run config or metrics found under {selected}")
+    run = store.read(selected_run["id"])
     if include_profiles:
         profiles = {}
         metrics_path = selected / "metrics.jsonl"

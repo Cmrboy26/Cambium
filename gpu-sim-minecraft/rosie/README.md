@@ -26,6 +26,7 @@ The selected plan is validated; `bash rosie/submit.sh --dry-run` previews withou
 The job/run name appears in the dashboard. Sweep one setting with `multiple`, then
 values one per line and an empty line. Jobs get `-<value>` suffixes and train
 concurrently with locked builds and private libraries. [Options](AGENTS.md#interactive-submission).
+Use `--shared-gpu` for one job and an overlaid PNG; `--max-parallel N` caps concurrency. [Details](AGENTS.md#shared-gpu-sweeps).
 For a one-update CUDA smoke test, use `sbatch rosie/train.sbatch` instead.
 
 ## Local Replays And Duels

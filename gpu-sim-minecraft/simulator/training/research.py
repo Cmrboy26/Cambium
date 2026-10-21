@@ -415,6 +415,7 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
 
 
 def run(options, checkpoint=None):
+    run_started = time.perf_counter()
     if options.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA training requested but unavailable")
     os.environ["OMP_NUM_THREADS"] = str(options.threads)
@@ -626,6 +627,7 @@ def run(options, checkpoint=None):
                     progress = {"updates": 0, "episodes": 0, "transitions": 0}
                     evaluations = {}
             statistics["completed_curriculum"] = completed
+            statistics["elapsed_seconds"] = saved.get("elapsed_seconds", 0.0) + time.perf_counter() - run_started
             print(json.dumps(statistics, allow_nan=False))
             with (output / "metrics.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps(statistics, allow_nan=False) + "\n")
@@ -640,7 +642,8 @@ def run(options, checkpoint=None):
                             "sampler": worlds.sampler.state_dict(), "pool": pool.state_dict(),
                             "world_count": options.envs, "rollout_steps": options.rollout_steps,
                             "max_ticks_override": options.max_ticks,
-                            "resume_mode": "fresh_episodes"}
+                            "resume_mode": "fresh_episodes",
+                            "elapsed_seconds": saved.get("elapsed_seconds", 0.0) + time.perf_counter() - run_started}
                 temporary = output / "latest.tmp"
                 torch.save({"format": "minecraft_sim_ppo", "version": 1, "metadata": manifest,
                     "model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": config,

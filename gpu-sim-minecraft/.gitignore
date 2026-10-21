@@ -6,4 +6,5 @@
 /rosie/logs/
 /simulator/build-rosie-cuda*/
 /simulator/training/runs/
+/simulator/training/sweeps/
 /rosie/workdirs/

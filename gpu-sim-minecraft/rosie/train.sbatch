@@ -27,6 +27,7 @@ SIM_LR="${SIM_LR:-}"
 SIM_THREADS="${SIM_THREADS:-4}"
 SIM_PROFILE_EVERY="${SIM_PROFILE_EVERY:-0}"
 SIM_PLAN="${SIM_PLAN:-}"
+SIM_SWEEP="${SIM_SWEEP:-}"
 SIM_RESUME="${SIM_RESUME:-}"
 SIM_INITIALIZE="${SIM_INITIALIZE:-}"
 SIM_REPLAY_EVERY="${SIM_REPLAY_EVERY:-0}"
@@ -45,7 +46,11 @@ if [[ -n "${SIM_ENVIRONMENT:-}" || -n "${SIM_SCHEMA:-}" || -n "${SIM_SEED:-}" ]]
     echo "ERROR: SIM_ENVIRONMENT/SIM_SCHEMA/SIM_SEED were replaced by the environment, policy and seed in SIM_PLAN."
     exit 1
 fi
-if [[ -z "$SIM_PLAN" && -z "$SIM_RESUME" ]]; then
+if [[ -n "$SIM_SWEEP" && ( ! -f "$SIM_SWEEP" || -n "$SIM_PLAN" || -n "$SIM_RESUME" || -n "$SIM_INITIALIZE" ) ]]; then
+    echo "ERROR: SIM_SWEEP needs an existing manifest and cannot be combined with plan/resume/initialize."
+    exit 1
+fi
+if [[ -z "$SIM_PLAN" && -z "$SIM_RESUME" && -z "$SIM_SWEEP" ]]; then
     SIM_PLAN="simulator/setups/curricula/shield-axe-curriculum.json"
 fi
 if [[ -z "$SIM_RESUME" ]]; then
@@ -143,6 +148,30 @@ chmod a-w "$LIBRARY"
 flock --unlock "$BUILD_LOCK_FD"
 exec {BUILD_LOCK_FD}>&-
 echo "Released build lock; training uses private library: $LIBRARY"
+
+if [[ -n "$SIM_SWEEP" ]]; then
+    echo "Running shared-GPU sweep: $SIM_SWEEP"
+    "$PYTHON" -B -m simulator.training.sweep run "$SIM_SWEEP" --library "$LIBRARY" \
+        --allocated-cpus "${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_PER_GPU:-8}}" &
+    SWEEP_PID=$!
+    stop_sweep() {
+        trap '' INT TERM
+        kill "-$1" "$SWEEP_PID" 2>/dev/null || true
+        wait "$SWEEP_PID" || true
+        exit "$2"
+    }
+    trap 'stop_sweep INT 130' INT
+    trap 'stop_sweep TERM 143' TERM
+    SWEEP_RESULT=0
+    wait "$SWEEP_PID" || SWEEP_RESULT=$?
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if ! "$PYTHON" -B -m simulator.training.plot_sweep "$SIM_SWEEP"; then
+        echo "ERROR: Sweep plot failed; regenerate it with simulator.training.plot_sweep."
+        if (( SWEEP_RESULT == 0 )); then SWEEP_RESULT=1; fi
+    fi
+    exit "$SWEEP_RESULT"
+fi
 
 echo "Training on $(hostname): envs=$SIM_ENVS updates=$SIM_UPDATES rollout_steps=$SIM_ROLLOUT_STEPS plan=$SIM_PLAN resume=$SIM_RESUME"
 TRAIN_ARGS=(

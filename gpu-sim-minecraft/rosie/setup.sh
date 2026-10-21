@@ -30,7 +30,7 @@ fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 "$VENV_DIR/bin/python" -m pip install \
     --index-url https://download.pytorch.org/whl/cu124 torch==2.5.1
-"$VENV_DIR/bin/python" -m pip install --no-deps \
+"$VENV_DIR/bin/python" -m pip install \
     -r "$SIM_ROOT/simulator/training/requirements.txt"
 
 mkdir -p "$SCRIPT_DIR/logs"

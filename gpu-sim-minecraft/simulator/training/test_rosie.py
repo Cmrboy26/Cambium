@@ -153,6 +153,31 @@ class TrainingJobTests(unittest.TestCase):
                         'fi\n')
         self.script = Path(__file__).resolve().parents[2] / "rosie/train.sbatch"
 
+    def test_shared_sweep_uses_private_library_and_exports_one_png(self):
+        manifest = self.root / "sweep.json"
+        manifest.write_text("{}")
+        plot_log = self.root / "plot-arguments"
+        self.executable(self.root / ".venv-rosie/bin/python", '''#!/usr/bin/env bash
+if [[ "$1" != "-B" ]]; then exit 0; fi
+if [[ "$3" == simulator.training.plot_sweep ]]; then
+    printf '%s\n' "$@" > "$JOB_TEST_PLOT"
+    exit 0
+fi
+printf '%s\n' "$@" > "$JOB_TEST_LOG"
+while (( $# )); do
+    if [[ "$1" == --library ]]; then cp -- "$2" "$JOB_TEST_SNAPSHOT"; break; fi
+    shift
+done
+''')
+        result = self.launch(SIM_SWEEP=str(manifest), JOB_TEST_PLOT=str(plot_log), SLURM_CPUS_PER_GPU="12")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertEqual(arguments[:5], ["-B", "-m", "simulator.training.sweep", "run", str(manifest)])
+        self.assertEqual(arguments[-2:], ["--allocated-cpus", "12"])
+        self.assertEqual(self.snapshot.read_bytes(), b"compiled simulator")
+        self.assertEqual(plot_log.read_text().splitlines(), ["-B", "-m", "simulator.training.plot_sweep", str(manifest)])
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
     def executable(self, path, text):
         path.write_text(text)
         path.chmod(0o700)
@@ -394,13 +419,17 @@ print(f"{12345 + count};test-cluster")
             "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
         }))
 
-    def launch(self, answers=None, dry_run=True, profile_every=None, **settings):
+    def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
         arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
         if profile_every is not None:
             arguments.extend(["--profile-every", str(profile_every)])
+        if shared_gpu:
+            arguments.append("--shared-gpu")
+        if max_parallel is not None:
+            arguments.extend(["--max-parallel", str(max_parallel)])
         return subprocess.run(arguments, input="\n".join(answers or [""] * 17) + "\n",
                               cwd=self.temporary.name, env=environment,
                               capture_output=True, text=True, timeout=10)
@@ -414,6 +443,35 @@ print(f"{12345 + count};test-cluster")
                          "SIM_LR=0.0003", "Validated 1 plan(s); 0 failed", "Dry run: nothing submitted"):
             self.assertIn(expected, result.stdout)
         self.assertFalse(self.log.exists())
+
+    def test_shared_gpu_preview_is_one_job_without_creating_files(self):
+        result = self.launch(self.sweep_answers(10, [".0001", ".0003", ".0006"]), shared_gpu=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("sbatch --parsable"), 1)
+        self.assertIn("3 trials, max parallel=0", result.stdout)
+        self.assertIn("SIM_SWEEP=", result.stdout)
+        self.assertFalse((self.root / "simulator/training/sweeps").exists())
+        self.assertFalse(self.log.exists())
+
+    def test_shared_gpu_freezes_trials_then_submits_one_job(self):
+        answers = self.sweep_answers(10, [".0001", ".0003", ".0006"])
+        answers[-1] = "y"
+        result = self.launch(answers, dry_run=False, shared_gpu=True, profile_every=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.history.read_text().splitlines()), 1)
+        manifests = list((self.root / "simulator/training/sweeps").glob("*/sweep.json"))
+        self.assertEqual(len(manifests), 1)
+        sweep = json.loads(manifests[0].read_text())
+        self.assertEqual([trial["value"] for trial in sweep["trials"]], [.0001, .0003, .0006])
+        self.assertTrue(all(trial["options"]["profile_every"] == 10 for trial in sweep["trials"]))
+
+    def test_shared_gpu_rejects_resource_sweeps_and_honors_optional_cap(self):
+        invalid = self.launch(self.sweep_answers(12, ["16G", "32G"]), shared_gpu=True)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertFalse(self.log.exists())
+        limited = self.launch(self.sweep_answers(10, [".0001", ".0003", ".0006"]), shared_gpu=True, max_parallel=1)
+        self.assertEqual(limited.returncode, 0, limited.stderr)
+        self.assertIn("max parallel=1", limited.stdout)
 
     def test_collection_profile_interval_is_explicit(self):
         result = self.launch(profile_every=10, SIM_PROFILE_EVERY="99")

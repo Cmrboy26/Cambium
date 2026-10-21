@@ -5,9 +5,19 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 DRY_RUN=false
 PROFILE_EVERY=0
+SHARED_GPU=false
+MAX_PARALLEL=0
 while (( $# )); do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
+        --shared-gpu) SHARED_GPU=true; shift ;;
+        --max-parallel)
+            if [[ ! "${2:-}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+                printf 'Expected a nonnegative integer after --max-parallel (0 means all).\n' >&2
+                exit 1
+            fi
+            MAX_PARALLEL="$2"
+            shift 2 ;;
         --profile-every)
             if [[ ! "${2:-}" =~ ^(0|[1-9][0-9]*)$ ]]; then
                 printf 'Expected a nonnegative integer after --profile-every.\n' >&2
@@ -16,11 +26,15 @@ while (( $# )); do
             PROFILE_EVERY="$2"
             shift 2 ;;
         -h|--help)
-            printf 'Usage: bash rosie/submit.sh [--dry-run] [--profile-every N]\nInteractive training submission; Enter accepts each default.\nType multiple at one training/resource setting to submit a single-variable sweep.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
+            printf 'Usage: bash rosie/submit.sh [--dry-run] [--profile-every N] [--shared-gpu [--max-parallel N]]\nInteractive training submission; Enter accepts each default.\nType multiple at one training/resource setting to submit a single-variable sweep.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
             exit 0 ;;
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
+if ! "$SHARED_GPU" && (( MAX_PARALLEL != 0 )); then
+    printf -- '--max-parallel requires --shared-gpu.\n' >&2
+    exit 1
+fi
 
 SWEEP_VARIABLE=""
 SWEEP_LABEL=""
@@ -164,6 +178,15 @@ prompt LR 'Learning rate' "$LR_DEFAULT" '^([0-9]*\.[0-9]*[1-9][0-9]*|[1-9][0-9]*
 prompt CPUS 'Allocated CPU cores' 8 '^[1-9][0-9]{0,2}$' true
 prompt MEMORY 'Host RAM (not GPU memory)' 24G '^[1-9][0-9]*[KMGT]$' true
 THREAD_LIMIT="$CPUS"
+if "$SHARED_GPU" && [[ -n "$SWEEP_VARIABLE" && "$SWEEP_VARIABLE" != THREADS ]]; then
+    ACTIVE_TRIALS="${#SWEEP_VALUES[@]}"
+    if (( MAX_PARALLEL > 0 && MAX_PARALLEL < ACTIVE_TRIALS )); then ACTIVE_TRIALS="$MAX_PARALLEL"; fi
+    THREAD_LIMIT=$(( CPUS / ACTIVE_TRIALS ))
+    if (( THREAD_LIMIT < 1 )); then
+        printf 'Allocate at least one CPU core per simultaneous trial, or use --max-parallel.\n' >&2
+        exit 1
+    fi
+fi
 if [[ "$SWEEP_VARIABLE" == CPUS ]]; then
     for cores in "${SWEEP_VALUES[@]}"; do
         if (( cores < THREAD_LIMIT )); then THREAD_LIMIT="$cores"; fi
@@ -175,6 +198,56 @@ printf '\nCUDA build directory: simulator/build-rosie-cuda-%s\n' "$ARCH"
 printf 'Builds use a shared lock; each job trains from a private library copy.\n'
 printf 'For jobs submitted with the older launcher, enter their IDs to avoid overlapping an unlocked build.\n'
 prompt DEPENDENCY 'Wait for job IDs (colon-separated), or none' none '^(none|[1-9][0-9]*(:[1-9][0-9]*)*)$'
+
+if "$SHARED_GPU"; then
+    case "$SWEEP_VARIABLE" in
+        ENVS) PARAMETER=envs ;; UPDATES) PARAMETER=updates ;; ROLLOUT) PARAMETER=rollout_steps ;;
+        HIDDEN) PARAMETER=hidden_dim ;; EPOCHS) PARAMETER=epochs ;; MINIBATCH) PARAMETER=minibatch_size ;;
+        LR) PARAMETER=lr ;; THREADS) PARAMETER=threads ;; REPLAY) PARAMETER=replay_every ;;
+        *) printf 'Shared-GPU mode requires multiple at one training setting, not allocation CPU/RAM/wall-time.\n' >&2; exit 1 ;;
+    esac
+    SWEEP_DIRECTORY="$ROOT/simulator/training/sweeps/$JOB_NAME"
+    SWEEP_OPTIONS="$("$PYTHON" - "$ENVS" "$UPDATES" "$ROLLOUT" "$HIDDEN" "$EPOCHS" "$MINIBATCH" "$LR" "$THREADS" "$REPLAY" "$PROFILE_EVERY" <<'PY'
+import json
+import sys
+keys = ("envs", "updates", "rollout_steps", "hidden_dim", "epochs", "minibatch_size", "lr", "threads", "replay_every", "profile_every")
+options = {key: float(value) if key == "lr" else int(value) for key, value in zip(keys, sys.argv[1:])}
+print(json.dumps({"device": "cuda", **options}))
+PY
+)"
+    PREPARE=("$PYTHON" -B -m simulator.training.sweep prepare --plan "$PLAN" --directory "$SWEEP_DIRECTORY"
+        --runs "$ROOT/simulator/training/runs" --name "$JOB_NAME" --parameter "$PARAMETER"
+        --values "${SWEEP_VALUES[@]}" --options "$SWEEP_OPTIONS" --max-parallel "$MAX_PARALLEL" --allocated-cpus "$CPUS")
+    "${PREPARE[@]}" --dry-run
+    SHARED_COMMAND=(sbatch --parsable "--job-name=$JOB_NAME" "--partition=$PARTITION" "--gres=$GRES"
+        "--time=$TIME" "--cpus-per-gpu=$CPUS" "--mem=$MEMORY"
+        "--export=ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_SWEEP=$SWEEP_DIRECTORY/sweep.json")
+    if [[ "$DEPENDENCY" != none ]]; then SHARED_COMMAND+=("--dependency=afterany:$DEPENDENCY"); fi
+    SHARED_COMMAND+=(rosie/train.sbatch)
+    printf '\nShared-GPU sweep: %s, %d trials, max parallel=%s (0 means all).\n' "$PARAMETER" "${#SWEEP_VALUES[@]}" "$MAX_PARALLEL"
+    printf 'Allocation: %s, CPUs=%s, RAM=%s; GPU memory is shared, not guaranteed per trial.\n' "$GRES" "$CPUS" "$MEMORY"
+    printf 'Training threads per trial: %s (or selected values for a thread sweep).\n' "$THREADS"
+    printf 'Submission command:\n  '
+    printf '%q ' "${SHARED_COMMAND[@]}"
+    printf '\n'
+    if "$DRY_RUN"; then printf 'Dry run: nothing submitted or written.\n'; exit 0; fi
+    prompt CONFIRM 'Submit 1 shared-GPU sweep job? (y/n)' n '^[yYnN]$'
+    if [[ "$CONFIRM" != [yY] ]]; then printf 'Cancelled; nothing submitted.\n'; exit 0; fi
+    if ! command -v sbatch >/dev/null 2>&1; then printf 'sbatch is unavailable.\n' >&2; exit 1; fi
+    "${PREPARE[@]}"
+    while IFS= read -r variable; do
+        case "$variable" in SIM_*|SBATCH_*) unset "$variable" ;; esac
+    done < <(compgen -e)
+    mkdir -p rosie/logs
+    if ! JOB_ID="$("${SHARED_COMMAND[@]}")"; then
+        printf 'Submission failed; frozen sweep retained at %s.\n' "$SWEEP_DIRECTORY" >&2
+        exit 1
+    fi
+    JOB_ID="${JOB_ID%%;*}"
+    if [[ ! "$JOB_ID" =~ ^[1-9][0-9]*$ ]]; then printf 'Unexpected sbatch job ID: %s\n' "$JOB_ID" >&2; exit 1; fi
+    printf 'Submitted job %s\nSweep: %s/sweep.json\nComparison: %s/comparison.png\n' "$JOB_ID" "$SWEEP_DIRECTORY" "$SWEEP_DIRECTORY"
+    exit 0
+fi
 
 RUN_NAMES=("$JOB_NAME")
 if [[ -n "$SWEEP_VARIABLE" ]]; then

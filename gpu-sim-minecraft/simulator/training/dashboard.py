@@ -14,7 +14,7 @@ ASSETS = Path(__file__).resolve().parent / "dashboard"
 METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "timeouts",
            "replays_exported", "reward_mean", "reward_total", "loss", "policy_loss", "value_loss", "entropy",
            "collection_seconds", "update_seconds", "evaluation_seconds", "evaluation_episodes",
-           "replay_seconds", "iteration_seconds", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",
+           "replay_seconds", "iteration_seconds", "elapsed_seconds", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",
            "player_transitions_per_second")
 COUNTS = {"update", "samples", "completed_rounds", "terminated_duels", "timeouts", "replays_exported",
           "evaluation_episodes", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes"}
