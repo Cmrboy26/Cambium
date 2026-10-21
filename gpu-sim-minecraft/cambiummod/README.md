@@ -23,12 +23,15 @@ name is required. [Game-folder selection](../scripts/README.md#minecraft-folder)
 
 Press **F8** or use `/simmenu` in a private singleplayer world. After the
 [one-time local Rosie setup](../rosie/README.md#local-replays-and-duels), the
-**Rosie** tab lists runs and explicitly syncs their checkpoints, named snapshots
-and environments. **Library** shows local policies and lets you rename them.
+**Rosie** tab lists runs and syncs policies only, policies plus the latest replay,
+or all outputs, with transfer progress. **Library** groups policies by run, with
+a version selector and local-only run/policy display names.
 In **Duel**, choose an environment and independently select a policy or scripted
-controller for each fighter, then start. Synced setups run locally while offline.
+controller for each fighter, set the round duration, then start. Synced setups
+run locally while offline; replacing a local duel reuses the warm Python process.
 **Live** provides pause/resume/reset/stop and join/leave controls. The debug
-sidebar can be toggled there or with `/simduel hud`; it never uses the action bar.
+HUD places P1 left, P2 right and match status centrally, with health/charge/time
+bars and gear icons. Toggle it there or with `/simduel hud`, never the action bar.
 Selections and aliases persist in the game folder. Existing commands still work.
 
 ## Live Policy Commands

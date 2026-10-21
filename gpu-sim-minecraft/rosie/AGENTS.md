@@ -310,7 +310,7 @@ before using this launcher.
 
 The helper is `python -B -m simulator.training.rosie <action>
 --minecraft-directory <game>`; actions are `setup`, `connect`, `runs`, `replays`,
-`replay`, `sync`, `duel`. `connect` requires a terminal, not `--json`/`--offline`.
+`replay`, `sync`, `duel`, `local`. `connect` requires a terminal, not `--json`/`--offline`.
 `--run` and `--replay` default to `latest`; `--offline` uses only
 cached artifacts. `--json` emits newline-separated events for the mod. Run/replay
 basenames are limited to 120 ASCII letters, digits, dots, underscores or hyphens,
@@ -320,8 +320,13 @@ interpolated; resolved remote files must remain inside the configured run root.
 `replay` downloads only the selected sample to game `sim-replays`, prefixing its
 filename with the run ID. `duel` caches `latest.pt` and available config/metrics
 in game `sim-rosie-cache/<run>`, then serves CPU inference on an automatically
-allocated loopback port. `sync` caches the checkpoint and **all** replay files
-for that run; consider disk usage before syncing large runs. Transfers reuse
+allocated loopback port. `sync --scope policy` (default) caches the latest policy,
+retained snapshots and config; `--scope latest` adds the latest replay, and
+`--scope all` includes all replays and metrics. `--workers 1..4` controls parallel
+downloads (default 3), including requests through the terminal tunnel. Progress
+events include aggregate bytes/files/cache hits, active filenames and preparation,
+transfer, verification and indexing phases. The index preserves local display
+aliases for runs and policy versions. Transfers reuse
 matching size/mtime files, stream to unique `.part` files, verify length/SHA-256,
 then atomically replace destinations. A failed transfer does not replace an
 existing artifact. Remote reads pin a file descriptor across atomic trainer
@@ -330,11 +335,15 @@ checkpoint replacements. Replay limit is 64 MiB, other artifact limit 512 MiB.
 For offline duels: `scripts/rosie-play.ps1 -Action duel -Run <run> -Offline`;
 use `/simduel arena <printed-port>`. Ctrl+C stops the terminal-owned service.
 Cached replays can be loaded normally with `/simreplay load latest`. The cache
-is not a historical model archive: syncing newer weights replaces cached
-`latest.pt`, and neither local nor remote `latest` means best-performing.
+retains explicit named policy snapshots, but syncing newer weights replaces
+cached `latest.pt`; neither local nor remote `latest` means best-performing.
+Library duels use action `local --duel <file> --offline`, without SSH access.
+The mod can reload that fixed configuration in the same authenticated local
+process to avoid repeated PyTorch imports; cold startup still imports/loads once.
 
-Tests: `python -B -m unittest simulator.training.test_rosie -v` is stdlib-only
-and uses local subprocesses to exercise the actual remote reader. The existing
+Tests: `python -B -m unittest simulator.training.test_rosie -v` uses local
+subprocesses to exercise the actual remote reader; library-index tests also need
+the training Python dependencies. The existing
 `test_training.InferenceChecks` also launches a real offline policy process.
 Neither proves local Windows SSH authentication or in-game behavior. See
 [in-game commands and lifecycle](../cambiummod/AGENTS.md#rosie-artifact-commands)

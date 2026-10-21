@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 from http.client import HTTPConnection, HTTPException
@@ -15,6 +16,8 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from textwrap import dedent
 
 
@@ -436,7 +439,7 @@ class Rosie:
         path.write_text(json.dumps(manifest), encoding="utf-8")
         return manifest
 
-    def fetch(self, run, filename, destination, expected):
+    def fetch(self, run, filename, destination, expected, progress=None):
         valid_name(run)
         if filename.startswith("snapshots/"):
             if not valid_name(filename.removeprefix("snapshots/")).endswith(".pt"):
@@ -447,10 +450,14 @@ class Rosie:
         if destination.is_file():
             stat = destination.stat()
             if self.offline or (stat.st_size == expected["size"] and stat.st_mtime_ns // 100 == expected["mtime_ns"] // 100):
+                if progress:
+                    progress(stat.st_size, stat.st_size, "cached")
                 return destination
         if self.offline:
             raise ValueError("Artifact is not cached locally; sync it while online first")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if progress:
+            progress(0, expected.get("size", 0), "preparing")
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -461,6 +468,8 @@ class Rosie:
                     size = header["size"]
                     if type(size) is not int or not 0 <= size <= MAX_FILE:
                         raise ValueError("Invalid artifact size")
+                    if progress:
+                        progress(0, size, "downloading")
                     digest = hashlib.sha256()
                     remaining = size
                     while remaining:
@@ -470,10 +479,16 @@ class Rosie:
                         target.write(chunk)
                         digest.update(chunk)
                         remaining -= len(chunk)
+                        if progress:
+                            progress(size - remaining, size, "downloading")
+                    if progress:
+                        progress(size, size, "verifying")
                     if source.read(1) or digest.hexdigest() != header["sha256"]:
                         raise ValueError("Artifact transfer failed integrity check; retry sync")
             os.utime(temporary, ns=(header["mtime_ns"], header["mtime_ns"]))
             temporary.replace(destination)
+            if progress:
+                progress(size, size, "complete")
             return destination
         finally:
             if temporary is not None:
@@ -502,6 +517,65 @@ class Rosie:
         for entry in manifest.get("snapshots", []):
             filename = valid_name(entry["name"])
             self.fetch(run, "snapshots/" + filename, self.cache / run / "snapshots" / filename, entry)
+
+    def sync(self, run, manifest, scope="policy", workers=3, progress=None):
+        valid_name(run)
+        if scope not in ("policy", "latest", "all") or type(workers) is not int or not 1 <= workers <= 4:
+            raise ValueError("Sync requires scope policy/latest/all and 1 to 4 workers")
+        if "latest.pt" not in manifest["files"]:
+            raise ValueError("This run has no saved checkpoint yet")
+        artifacts = []
+        for filename in ("config.json", "latest.pt", "metrics.jsonl"):
+            if filename in manifest["files"] and (filename != "metrics.jsonl" or scope == "all"):
+                artifacts.append((filename, self.cache / run / filename, manifest["files"][filename]))
+        for entry in manifest.get("snapshots", []):
+            filename = valid_name(entry["name"])
+            if not filename.endswith(".pt"):
+                raise ValueError("Snapshot must be a .pt file")
+            artifacts.append(("snapshots/" + filename, self.cache / run / "snapshots" / filename, entry))
+        replays = manifest["replays"] if scope == "all" else manifest["replays"][:1] if scope == "latest" else []
+        for entry in replays:
+            filename = valid_name(entry["name"])
+            artifacts.append((filename, self.game / "sim-replays" / (run + "--" + filename), entry))
+        if len({str(destination) for _, destination, _ in artifacts}) != len(artifacts):
+            raise ValueError("Duplicate sync artifact")
+        states = {filename: {"done": 0, "size": entry["size"], "phase": "queued"} for filename, _, entry in artifacts}
+        lock = threading.Lock()
+        last_report = 0.0
+
+        def report(filename, done, size, phase):
+            nonlocal last_report
+            with lock:
+                states[filename].update(done=done, size=size, phase=phase)
+                now = time.monotonic()
+                if progress and (phase != "downloading" or now - last_report >= 0.15):
+                    last_report = now
+                    completed = sum(state["phase"] in ("complete", "cached") for state in states.values())
+                    overall = ("downloading" if any(state["phase"] == "downloading" for state in states.values())
+                               else "verifying" if any(state["phase"] == "verifying" for state in states.values())
+                               else "preparing" if completed < len(states) else "downloaded")
+                    progress(phase=overall, file=filename, file_phase=phase,
+                             completed=completed,
+                             total=len(states), bytes_done=sum(state["done"] for state in states.values()),
+                             bytes_total=sum(state["size"] for state in states.values()),
+                             cached=sum(state["phase"] == "cached" for state in states.values()),
+                             active=[name + " (" + state["phase"] + ")" for name, state in states.items()
+                                     if state["phase"] not in ("complete", "cached", "queued")])
+
+        def download(artifact):
+            filename, destination, entry = artifact
+            return self.fetch(run, filename, destination, entry,
+                              progress=lambda done, size, phase: report(filename, done, size, phase))
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rosie-sync") as executor:
+            list(executor.map(download, artifacts))
+        if progress:
+            progress(phase="indexing", file="Local policy library", completed=len(states), total=len(states),
+                     bytes_done=sum(state["done"] for state in states.values()),
+                     bytes_total=sum(state["size"] for state in states.values()),
+                     cached=sum(state["phase"] == "cached" for state in states.values()), active=[])
+        self.index_run(run)
+        return len(replays)
 
     def index_run(self, run):
         from simulator.training.serve import Policy
@@ -538,7 +612,7 @@ class Rosie:
                                              if len(stage["scenario"]["arenas"]) > 1 else ""),
                                          "run": run, "policy": contract,
                                          "contract_hash": fingerprint(contract), "environment": arena["environment"]})
-        result = {"version": 1, "policies": policies, "environments": environments}
+        result = {"version": 1, "policies": policies, "environments": environments, "runs": previous.get("runs", [])}
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.cache, delete=False) as target:
             temporary = Path(target.name)
             try:
@@ -557,12 +631,15 @@ def main(argv=None):
     parser.add_argument("--minecraft-directory", required=True)
     parser.add_argument("--run", default="latest")
     parser.add_argument("--replay", default="latest")
+    parser.add_argument("--scope", choices=("policy", "latest", "all"), default="policy")
+    parser.add_argument("--workers", type=int, choices=range(1, 5), default=3)
     parser.add_argument("--host")
     parser.add_argument("--user")
     parser.add_argument("--runs-directory", default=DEFAULT_RUNS)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    started = time.monotonic()
 
     def emit(event, **values):
         message = {"event": event, **values}
@@ -587,41 +664,49 @@ def main(argv=None):
             connect_terminal(args.minecraft_directory)
             return 0
         if args.action == "local":
+            emit("startup", phase="Importing PyTorch", seconds=time.monotonic() - started)
             import torch
             from simulator.training.serve import DuelPolicy, make_server
 
             if args.duel is None:
                 raise ValueError("Local duel requires --duel <configuration.json>")
             torch.set_num_threads(1)
-            with make_server(DuelPolicy(args.duel), 0) as server:
-                emit("policy", run="Local duel", port=server.server_address[1])
+            emit("startup", phase="Loading local fighters", seconds=time.monotonic() - started)
+            reload_token = secrets.token_urlsafe(32)
+            with make_server(DuelPolicy(args.duel), 0, reload_policy=lambda: DuelPolicy(args.duel), reload_token=reload_token) as server:
+                emit("policy", run="Local duel", port=server.server_address[1], reload_token=reload_token, startup_seconds=time.monotonic() - started)
                 server.serve_forever()
             return 0
         rosie = Rosie(args.minecraft_directory, args.offline)
         if args.action == "runs":
             emit("runs", items=rosie.runs())
             return 0
+        if args.action == "duel":
+            emit("startup", phase="Reading Rosie run metadata", seconds=time.monotonic() - started)
         run = rosie.select(args.run, checkpoint=args.action in ("duel", "sync"))
+        if args.action == "sync":
+            emit("progress", phase="manifest", file="Reading remote file list", completed=0, total=0,
+                 bytes_done=0, bytes_total=0, cached=0, active=[])
         manifest = rosie.manifest(run)
         if args.action == "replays":
             emit("replays", run=run, items=manifest["replays"])
         elif args.action == "replay":
             emit("replay", run=run, path=str(rosie.replay(run, manifest, args.replay)))
         else:
-            checkpoint = rosie.checkpoint(run, manifest)
             if args.action == "sync":
-                rosie.sync_snapshots(run, manifest)
-                for entry in manifest["replays"]:
-                    rosie.replay(run, manifest, entry["name"])
-                rosie.index_run(run)
-                emit("synced", run=run, checkpoint=str(checkpoint), replays=len(manifest["replays"]))
+                count = rosie.sync(run, manifest, args.scope, args.workers, lambda **values: emit("progress", **values))
+                emit("synced", run=run, checkpoint=str(rosie.cache / run / "latest.pt"), replays=count, scope=args.scope)
             else:
+                emit("startup", phase="Checking cached checkpoint / contacting Rosie", seconds=time.monotonic() - started)
+                checkpoint = rosie.checkpoint(run, manifest)
+                emit("startup", phase="Importing PyTorch", seconds=time.monotonic() - started)
                 import torch
                 from simulator.training.serve import Policy, make_server
 
                 torch.set_num_threads(1)
+                emit("startup", phase="Loading checkpoint", seconds=time.monotonic() - started)
                 with make_server(Policy(checkpoint), 0) as server:
-                    emit("policy", run=run, checkpoint=str(checkpoint), port=server.server_address[1])
+                    emit("policy", run=run, checkpoint=str(checkpoint), port=server.server_address[1], startup_seconds=time.monotonic() - started)
                     server.serve_forever()
         return 0
     except ImportError as error:

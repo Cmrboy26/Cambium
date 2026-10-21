@@ -452,7 +452,11 @@ final class LiveDuel implements AutoCloseable {
 			if (lastControls != null && index != humanSlot) lines.add("Actions " + SimulationReplay.buttons(lastControls[index]));
 		}
 		lines.add(String.format(Locale.ROOT, "Inference %.0f ms", inferenceMillis));
-		DuelHud.publish("CAMBIUM / LIVE", lines);
+		DuelHud.Match match = new DuelHud.Match("LIVE DUEL", session.paused ? "Paused" : restartDelay > 0 ? "Resetting" : "Running",
+				session.buildArena ? "Arena" : "World", tick, maxTicks, round, winsA, winsB, draws, inferenceMillis);
+		DuelHud.publishMatch(match,
+				DuelHud.fighter(fighters[0], fighterNames[0] + (humanSlot == 0 ? " (you)" : ""), humanSlot == 0 ? "Human" : lastControls == null ? "Waiting" : SimulationReplay.buttons(lastControls[0])),
+				DuelHud.fighter(fighters[1], fighterNames[1] + (humanSlot == 1 ? " (you)" : ""), humanSlot == 1 ? "Human" : lastControls == null ? "Waiting" : SimulationReplay.buttons(lastControls[1])), lines);
 	}
 
 	private float[][] observations() {

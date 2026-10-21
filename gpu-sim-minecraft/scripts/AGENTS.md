@@ -173,6 +173,8 @@ requirements. [Authentication, caching and protocol](../rosie/AGENTS.md#local-ar
 | `-Action` | `runs` (default), `replays`, `replay`, `sync`, `duel` |
 | `-Run` | Run basename or `latest` (newest saved, not best) |
 | `-Replay` | Replay basename or `latest` |
+| `-SyncScope` | `policy` (default), `latest` (policy + latest replay), `all` |
+| `-Downloads` | Concurrent sync downloads, 1..4; default 3 |
 | `-MinecraftDirectory` | Instance game folder; normal selection rules |
 | `-SshHost` | Setup only; management host, SSH alias or 1..4; `ROSIE_SSH_JUMP` |
 | `-SshUser` | Setup only; Rosie account, `ROSIE_SSH_USER` or prompted local username |
@@ -187,8 +189,11 @@ and leave it open. Minecraft and other launcher terminals reuse its tunnel;
 Ctrl+C disconnects. Existing key/agent users can omit this step.
 Terminal `duel` stays running and prints its automatically selected port; use
 `/simduel arena <port>`, then `/simduel join`. Ctrl+C stops inference. In-game
-commands perform these handoffs automatically. `sync` downloads every replay
-in the selected run, so use `replay` for on-demand viewing of just one sample.
+commands perform these handoffs automatically. `sync` defaults to policies,
+named snapshots and config only. `-SyncScope latest` adds the newest replay;
+`-SyncScope all` adds every replay and metrics. It reports preparation, transfer,
+verification and indexing progress, reusing unchanged cached files. No training
+or remote inference starts. Connection setup must run on the Minecraft machine.
 
 ## Serve Dashboard
 

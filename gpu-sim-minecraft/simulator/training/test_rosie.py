@@ -892,9 +892,11 @@ class RosieTests(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in library["environments"][2:]],
                  ["rosie-123 / practice / arena 1", "rosie-123 / practice / arena 2"])
         library["policies"][0]["name"] = "My reliable fighter"
+        library["runs"] = [{"id": "rosie-123", "name": "My local run alias"}]
         (self.rosie.cache / "library.json").write_text(json.dumps(library))
         with patch.object(self.rosie, "ssh_command", side_effect=AssertionError("offline library contacted Rosie")):
             self.assertEqual(self.rosie.index_run("rosie-123")["policies"][0]["name"], "My reliable fighter")
+            self.assertEqual(self.rosie.index_run("rosie-123")["runs"][0]["name"], "My local run alias")
             self.rosie.sync_snapshots("rosie-123", manifest)
         for invalid in ("snapshots/../outside.pt", "snapshots/a/b.pt", "snapshots/file.json"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
@@ -1074,14 +1076,61 @@ class RosieTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(Rosie, "ssh_command", side_effect=self.local_command), \
             patch.object(Rosie, "index_run"), contextlib.redirect_stdout(output):
-            result = main(["sync", "--minecraft-directory", str(self.game), "--run", "rosie-123", "--json"])
+            result = main(["sync", "--minecraft-directory", str(self.game), "--run", "rosie-123", "--scope", "all", "--json"])
         self.assertEqual(result, 0)
-        self.assertEqual(json.loads(output.getvalue())["replays"], 1)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[-1]["replays"], 1)
+        self.assertEqual(events[0]["phase"], "manifest")
+        self.assertEqual(events[-2]["phase"], "indexing")
         output = io.StringIO()
         with patch.object(Rosie, "ssh_command", side_effect=AssertionError("offline SSH")), contextlib.redirect_stdout(output):
             result = main(["replay", "--minecraft-directory", str(self.game), "--offline", "--json"])
         self.assertEqual(result, 0)
         self.assertTrue(Path(json.loads(output.getvalue())["path"]).is_file())
+
+    def test_sync_scopes_progress_cache_and_bounded_parallel_downloads(self):
+        import threading
+        (self.run / "replays/older.jsonl").write_bytes(b"older replay")
+        os.utime(self.run / "replays/older.jsonl", ns=(1, 1))
+        (self.run / "snapshots").mkdir()
+        (self.run / "snapshots/early.pt").write_bytes(b"snapshot")
+        manifest = self.rosie.manifest("rosie-123")
+        events = []
+        with patch.object(self.rosie, "index_run"):
+            self.assertEqual(self.rosie.sync("rosie-123", manifest, "policy", progress=lambda **event: events.append(event)), 0)
+            self.assertFalse((self.game / "sim-replays").exists())
+            self.assertTrue((self.rosie.cache / "rosie-123/snapshots/early.pt").is_file())
+            self.assertEqual(events[-1]["completed"], events[-1]["total"])
+            self.assertEqual(events[-1]["bytes_done"], events[-1]["bytes_total"])
+            self.assertEqual(self.rosie.sync("rosie-123", manifest, "latest"), 1)
+            self.assertTrue((self.game / "sim-replays/rosie-123--sample.jsonl").is_file())
+            self.assertFalse((self.game / "sim-replays/rosie-123--older.jsonl").exists())
+            self.assertEqual(self.rosie.sync("rosie-123", manifest, "all"), 2)
+            events.clear()
+            with patch.object(self.rosie, "ssh_command", side_effect=AssertionError("unchanged artifact downloaded again")):
+                self.rosie.sync("rosie-123", manifest, "all", progress=lambda **event: events.append(event))
+            self.assertEqual(events[-1]["cached"], events[-1]["total"])
+        barrier = threading.Barrier(2)
+        running = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def fetch(*arguments, **keywords):
+            nonlocal running, maximum
+            with lock:
+                running += 1
+                maximum = max(maximum, running)
+            barrier.wait(timeout=5)
+            with lock:
+                running -= 1
+
+        two = {"files": {"latest.pt": manifest["files"]["latest.pt"], "config.json": manifest["files"]["config.json"]}, "replays": []}
+        with patch.object(self.rosie, "index_run"), patch.object(self.rosie, "fetch", side_effect=fetch):
+            self.rosie.sync("rosie-123", two, workers=2)
+        self.assertEqual(maximum, 2)
+        for workers in (0, 5, True):
+            with self.assertRaises(ValueError):
+                self.rosie.sync("rosie-123", manifest, workers=workers)
 
     def test_cli_emits_machine_readable_errors(self):
         output = io.StringIO()

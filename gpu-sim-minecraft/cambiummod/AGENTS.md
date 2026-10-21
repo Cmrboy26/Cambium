@@ -160,7 +160,7 @@ and are guarded against superseded operations and changed worlds/owners.
 | `/simrosie replays [run]` | List that run's samples; click to select one. |
 | `/simrosie replay [run] [file]` | Download/cache one replay, load and start absolute playback. |
 | `/simrosie duel [run]` | Download/cache weights, start local CPU policy on a free loopback port, start arena. |
-| `/simrosie sync [run]` | Cache checkpoint plus all samples without changing the world. |
+| `/simrosie sync [run]` | Cache policies/config only; panel offers latest/all replay scopes. |
 | `/simrosie status` | Current helper operation. |
 | `/simrosie stop` | Cancel helper; stop its live duel and restore participant state; retain cache. |
 
@@ -182,7 +182,14 @@ pause the world. Command opening is deferred to the client tick because chat
 closes its screen after submitting a command. Private-world checks apply again
 before opening. Closing the panel leaves the current duel running.
 
-The Rosie tab explicitly lists remote runs and syncs a selected one. Opening the
+The Rosie tab explicitly lists remote runs and syncs a selected one. Its scope
+selector defaults to policy only (latest checkpoint, retained snapshots and
+config); latest replay adds one sample, all adds every replay and metrics.
+Three bounded concurrent downloads report per-file preparation, transfer and
+verification, aggregate bytes/files/cache hits, then separate library indexing.
+The bar measures bytes processed, including unchanged files reused from cache;
+indexing can continue after the transfer bar reaches 100%.
+Opening the
 panel, browsing cached entries and starting a local duel never contact Rosie.
 Login still happens in the local terminal connection flow, never a password UI.
 Helpers retain generation/world/owner guards, literal process arguments and
@@ -195,11 +202,19 @@ local checkpoint path, update/stage, semantic contract hash and policy descripto
 Environments include checkpoint scenes and every resolved stage/arena template
 from synced `config.json`. These are fixed templates, not distribution sampling
 or a live curriculum. Sync preserves other runs and existing policy aliases.
-Renaming is disabled while the helper runs. Cached checkpoints must exist inside
+Library rows select runs; the bottom selector chooses Latest or a retained policy
+version. Local run and per-version display names are independent of remote IDs,
+paths and files; sync preserves both. Renaming is disabled while the helper runs.
+Cached checkpoints must exist inside
 the cache's real path; mismatched contracts are rejected before starting.
 
 `selections.json` stores both fighter modes/policy IDs, scripted options, chosen
-environment and arena/world mode. `duel.json` is a `minecraft_sim_duel` version 1
+environment, arena/world mode, sync scope and optional round duration. Duration
+uses seconds in the panel, rounded to twenty controlled ticks per second;
+positive limits up to 1,000,000 ticks are supported. Environment Default removes
+the override; changing it affects the next launch, not the running round.
+Inference delays can extend wall-clock duration.
+`duel.json` is a `minecraft_sim_duel` version 1
 configuration with concrete policy/environment and exactly two fighter entries.
 Launching invokes the configured local interpreter/repository with Rosie action
 `local --duel <file> --offline`; CPU inference uses a free loopback port and no
@@ -209,10 +224,22 @@ sprint, shield and optional zero-based axe/sword slots; unavailable semantic
 features/actions are rejected by the service. Stationary target requires no
 options. No arbitrary Python factories or training opponent pools are executed.
 
-`DuelHud` publishes immutable server-tick telemetry to a dedicated top-right
-Fabric HUD layer: round/ticks/scores, fighter names, health/charge/shield/input
-and inference latency, or replay progress/error/hit outcomes. It wraps to width,
-limits height and hides with vanilla HUD or an open screen. The Live tab reads
+Cold startup reports PyTorch import and fighter loading with elapsed time.
+Online `/simrosie duel` still reads remote metadata; the library path never
+connects to SSH. Replacing a library duel keeps the owned Python process warm
+and POSTs `{}` to its authenticated `/reload` route. Only its configured local
+duel file is read. The new controllers are validated before swapping; failure
+keeps the prior service configuration. Stop/disconnect/LAN/shutdown still kills
+the helper. Warm-reload handoffs check generation, world, server and owner.
+Fresh launches after Stop still pay cold import cost; no startup speed is
+guaranteed across machines. Status reports cold-start or warm-reload timing.
+
+`DuelHud` publishes copied server-tick telemetry to a Fabric HUD layer: P1 at
+left, P2 at right, shared round/time/score/latency centrally. Health, absorption,
+attack charge and remaining-time bars are bounded. Native item rendering shows
+main/offhand, helmet, chest, legs and boots. Columns adapt to GUI width; long
+labels are clipped with ellipsis. It hides with vanilla HUD or an open screen.
+The Live tab retains textual details (including replay errors/hit outcomes) from
 the same snapshot. Preference lives in `config/cambium-hud.json`; disconnect or
 session close clears telemetry. No live/replay telemetry uses action-bar text.
 

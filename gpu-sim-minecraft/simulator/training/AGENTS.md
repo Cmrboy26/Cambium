@@ -757,7 +757,8 @@ row; scripted state resets when the request session changes. Controllers keep
 independent fixed controls/RNG, and `/info.fighters` carries readable provenance.
 Live configs do not run self-play pools, curricula or arbitrary Python factories.
 Legacy positional-checkpoint serving remains unchanged; choose it or `--duel`,
-not both.
+not both. Optional `max_ticks` overrides round length (integer 1..1,000,000);
+it does not modify the cached environment or a checkpoint.
 
 Rosie `sync` additionally caches safe `snapshots/*.pt` artifacts and writes game
 `sim-rosie-cache/library.json`. It indexes checkpoint scenes and resolved stage
@@ -767,6 +768,18 @@ the local duel config. Rosie action `local --duel <file> --offline` starts CPU
 inference on a free loopback port without constructing a Rosie client, reading
 SSH configuration or requiring a native library. This still needs the local
 training Python dependencies; GPU-trained checkpoint tensors load on CPU.
+Sync defaults to `--scope policy` (latest/named policies and config); `latest`
+adds the newest replay, `all` adds all replays/metrics. `--workers 1..4` defaults
+to three concurrent transfers. Serialized progress events report aggregate
+bytes/files/cache hits and active filenames, followed by library indexing.
+Local run/per-version display aliases survive resync.
+
+Local-service startup emits import/loading stages and total elapsed time. It can
+optionally expose authenticated POST `/reload` for the same configured duel file;
+no caller-supplied path is accepted. New controllers validate before an atomic
+service swap; failed reload leaves the old service usable. The mod reuses this
+process when replacing local duels, avoiding repeated interpreter/PyTorch startup,
+but still ends it on Stop/disconnect. Legacy services do not expose reload.
 
 ## Verification And Limits
 

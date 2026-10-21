@@ -78,9 +78,15 @@ class InferenceChecks(unittest.TestCase):
         definition["fighters"][1] = {"type": "checkpoint", "path": "other.pt"}
         definition.pop("reference")
         definition.update(policy=duel.contract, environment=duel.info["environment"])
+        definition["max_ticks"] = 1200
         path.write_text(json.dumps(definition))
         paired = DuelPolicy(path, deterministic=True)
+        self.assertEqual(paired.info["max_ticks"], 1200)
         self.assertEqual(paired.act({**request, "contract_hash": paired.info["contract_hash"]})["actions"][1][3], 0)
+        for invalid in (True, 0, 1_000_001, 20.5):
+            path.write_text(json.dumps({**definition, "max_ticks": invalid}))
+            with self.assertRaisesRegex(ValueError, "max_ticks"):
+                DuelPolicy(path)
         definition["fighters"][1] = {"type": "self_play"}
         path.write_text(json.dumps(definition))
         with self.assertRaisesRegex(ValueError, "Live fighters"):
@@ -103,7 +109,8 @@ class InferenceChecks(unittest.TestCase):
                 "local", "--minecraft-directory", str(game), "--duel", str(path), "--offline", "--json"],
                 cwd=ROOT, stdout=subprocess.PIPE, stderr=errors)
             events = queue.Queue()
-            reader = threading.Thread(target=lambda: events.put(process.stdout.readline()), daemon=True)
+            reader = threading.Thread(target=lambda: events.put(next((line for line in process.stdout
+                if json.loads(line)["event"] in ("policy", "error")), b"")), daemon=True)
             try:
                 reader.start()
                 event = json.loads(events.get(timeout=30))
@@ -119,6 +126,30 @@ class InferenceChecks(unittest.TestCase):
                     actions = json.load(response)["actions"]
                 self.assertEqual(actions[0][3], 0)
                 self.assertEqual(actions[1][3], 1)
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(Request(base + "/reload", b"{}", {"Content-Type": "application/json"}), timeout=3)
+                self.assertEqual(denied.exception.code, 403)
+                denied.exception.close()
+                definition["max_ticks"] = 1600
+                definition["fighters"][1]["controller"] = "stationary_target"
+                path.write_text(json.dumps(definition))
+                headers = {"Content-Type": "application/json", "Authorization": "Bearer " + event["reload_token"]}
+                with urlopen(Request(base + "/reload", b"{}", headers), timeout=10) as response:
+                    reloaded = json.load(response)
+                self.assertTrue(reloaded["reloaded"])
+                self.assertGreaterEqual(reloaded["seconds"], 0)
+                self.assertIsNone(process.poll())
+                with urlopen(base + "/info", timeout=3) as response:
+                    self.assertEqual(json.load(response)["max_ticks"], 1600)
+                with urlopen(Request(base + "/act", json.dumps({**body, "session": "warm-round"}).encode(), {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual(json.load(response)["actions"][1][3], 0)
+                path.write_text("invalid configuration")
+                with self.assertRaises(HTTPError) as invalid:
+                    urlopen(Request(base + "/reload", b"{}", headers), timeout=3)
+                self.assertEqual(invalid.exception.code, 400)
+                invalid.exception.close()
+                with urlopen(base + "/info", timeout=3) as response:
+                    self.assertEqual(json.load(response)["max_ticks"], 1600)
             finally:
                 process.terminate()
                 process.wait(timeout=10)
@@ -208,7 +239,8 @@ class InferenceChecks(unittest.TestCase):
                 cwd=ROOT, stdout=subprocess.PIPE, stderr=errors)
             try:
                 events = queue.Queue()
-                reader = threading.Thread(target=lambda: events.put(process.stdout.readline()), daemon=True)
+                reader = threading.Thread(target=lambda: events.put(next((line for line in process.stdout
+                    if json.loads(line)["event"] in ("policy", "error")), b"")), daemon=True)
                 reader.start()
                 event = json.loads(events.get(timeout=30))
                 self.assertEqual(event["event"], "policy", event)

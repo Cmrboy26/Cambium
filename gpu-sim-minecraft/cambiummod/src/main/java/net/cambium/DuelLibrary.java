@@ -15,6 +15,7 @@ final class DuelLibrary {
 	final Path root;
 	final List<JsonObject> policies = new ArrayList<>();
 	final List<JsonObject> environments = new ArrayList<>();
+	final List<JsonObject> runs = new ArrayList<>();
 	private JsonObject index;
 
 	DuelLibrary(Path game) throws IOException {
@@ -31,6 +32,32 @@ final class DuelLibrary {
 				(category.equals("policies") ? policies : environments).add(entry);
 			}
 		}
+		if (!index.has("runs")) index.add("runs", new JsonArray());
+		for (var value : index.getAsJsonArray("runs")) runs.add(value.getAsJsonObject());
+		for (JsonObject policy : policies) {
+			if (!policy.has("run")) continue;
+			String identity = policy.get("run").getAsString();
+			if (find(runs, identity) == null) {
+				JsonObject run = new JsonObject();
+				run.addProperty("id", identity);
+				run.addProperty("name", identity);
+				runs.add(run);
+				index.getAsJsonArray("runs").add(run);
+			}
+		}
+	}
+
+	List<JsonObject> versions(String run) {
+		return policies.stream().filter(entry -> entry.has("run") && entry.get("run").getAsString().equals(run))
+				.sorted(java.util.Comparator.<JsonObject, Boolean>comparing(entry -> !entry.get("id").getAsString().endsWith(":latest.pt"))
+						.thenComparing(java.util.Comparator.comparingLong((JsonObject entry) -> entry.has("update") ? entry.get("update").getAsLong() : 0).reversed()))
+				.toList();
+	}
+
+	static String versionName(JsonObject entry) {
+		String identity = entry.get("id").getAsString();
+		String version = identity.endsWith(":latest.pt") ? "Latest" : identity.substring(identity.lastIndexOf('/') + 1).replace(".pt", "");
+		return version + " / update " + (entry.has("update") ? entry.get("update").getAsLong() : 0) + " / " + entry.get("name").getAsString();
 	}
 
 	JsonObject find(List<JsonObject> entries, String identity) {
@@ -60,10 +87,16 @@ final class DuelLibrary {
 	}
 
 	Path saveDuel(JsonObject environment, JsonObject first, JsonObject second) throws IOException {
+		return saveDuel(environment, first, second, 0);
+	}
+
+	Path saveDuel(JsonObject environment, JsonObject first, JsonObject second, int maxTicks) throws IOException {
 		if (environment == null) throw new IOException("Sync and choose an environment first");
+		if (maxTicks < 0 || maxTicks > 1000000) throw new IOException("Invalid duel duration");
 		JsonObject configuration = new JsonObject();
 		configuration.addProperty("format", "minecraft_sim_duel");
 		configuration.addProperty("version", 1);
+		if (maxTicks > 0) configuration.addProperty("max_ticks", maxTicks);
 		configuration.add("policy", environment.get("policy").deepCopy());
 		configuration.add("environment", environment.get("environment").deepCopy());
 		JsonArray fighters = new JsonArray();
@@ -72,6 +105,12 @@ final class DuelLibrary {
 		configuration.add("fighters", fighters);
 		write(root.resolve("duel.json"), configuration);
 		return root.resolve("duel.json");
+	}
+
+	static int durationTicks(String seconds) {
+		double duration = Double.parseDouble(seconds);
+		if (!Double.isFinite(duration) || duration <= 0 || duration > 50000) throw new IllegalArgumentException("Use a duration above 0 and up to 50000 seconds");
+		return Math.max(1, (int) Math.round(duration * 20));
 	}
 
 	void rename(JsonObject entry, String name) throws IOException {

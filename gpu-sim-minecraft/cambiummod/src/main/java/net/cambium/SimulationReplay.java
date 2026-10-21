@@ -335,7 +335,10 @@ final class SimulationReplay {
 					lines.add(reference.outcome().accepted() ? "Hit accepted" : "Hit rejected");
 				}
 			}
-			DuelHud.publish("CAMBIUM / REPLAY", lines);
+			DuelHud.publishMatch(new DuelHud.Match("REPLAY", paused ? "Paused" : "Playing", (absolute ? "Absolute" : "Input") + " " + speed + "x",
+					frame, trace.frames.size() - 1, 0, 0, 0, 0, 0),
+					DuelHud.fighter(actors.get(0), "Replay A", buttons(sample.actors().get(0).controls())),
+					DuelHud.fighter(actors.get(1), "Replay B", buttons(sample.actors().get(1).controls())), lines);
 		}
 
 		void advance() {

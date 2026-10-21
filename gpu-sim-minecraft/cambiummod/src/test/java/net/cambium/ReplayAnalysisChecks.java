@@ -35,6 +35,13 @@ public final class ReplayAnalysisChecks {
 		checkMinorCollision();
 		checkRosieLauncher();
 		checkDuelLibrary();
+		for (int width : new int[]{320, 426, 640, 960, 1280}) {
+			DuelHud.Layout layout = DuelHud.layout(width);
+			require(layout.left() + layout.fighterWidth() + 8 <= layout.center() && layout.center() + layout.centerWidth() + 8 <= layout.right(), "Player and shared HUD columns must never overlap");
+			require(layout.right() + layout.fighterWidth() <= width - 8, "HUD must stay inside the viewport");
+		}
+		require(DuelHud.time(1201).equals("1:01") && DuelHud.time(-1).equals("0:00"), "Round time must clamp at zero and round up partial seconds");
+		require(DuelHud.fraction(40, 20) == 1 && DuelHud.fraction(-1, 20) == 0, "HUD bars must stay within bounds");
 		var replayFood = new ReplayPlayer.ReplayFoodData();
 		replayFood.setFoodLevel(12);
 		replayFood.setSaturation(2.0F);
@@ -106,6 +113,10 @@ public final class ReplayAnalysisChecks {
 		require(builder.command().contains(root.toString()) && builder.command().contains("run;not-a-shell"), "Helper arguments must be literal, including spaces and shell metacharacters");
 		require(builder.command().contains("--json") && !builder.redirectErrorStream(), "Helper stdout must remain a separate JSON event stream");
 		require(builder.directory().toPath().equals(root.resolve("checkout with spaces")), "Module must start from configured repository");
+		for (String scope : java.util.List.of("policy", "latest", "all")) {
+			var sync = RosieLauncher.helper(config, root, "sync", "run", "latest", scope).command();
+			require(sync.get(sync.indexOf("--scope") + 1).equals(scope) && sync.get(sync.indexOf("--workers") + 1).equals("3"), "Sync scopes and bounded concurrency must reach the helper unchanged");
+		}
 		for (String action : java.util.List.of("local", "local-world")) {
 			ProcessBuilder local = RosieLauncher.helper(config, root, action, "latest", "latest");
 			require(local.command().get(5).equals("local") && local.command().contains("--offline"), "Local launch must select offline mode, including world mode");
@@ -136,6 +147,14 @@ public final class ReplayAnalysisChecks {
 			JsonObject duel = JsonParser.parseString(Files.readString(library.saveDuel(environment, first, second))).getAsJsonObject();
 			require(duel.getAsJsonArray("fighters").get(0).getAsJsonObject().get("name").getAsString().equals("My fighter"), "Readable fighter names must survive launch");
 			require(duel.getAsJsonArray("fighters").get(1).getAsJsonObject().get("type").getAsString().equals("scripted"), "Each side must retain its own controller type");
+			JsonObject limited = JsonParser.parseString(Files.readString(library.saveDuel(environment, first, second, 1200))).getAsJsonObject();
+			require(limited.get("max_ticks").getAsInt() == 1200 && !environment.has("max_ticks"), "Duration override must not mutate the library environment");
+			require(DuelLibrary.durationTicks("60") == 1200 && DuelLibrary.durationTicks("0.05") == 1, "Duration uses twenty controlled ticks per second");
+			for (String invalid : java.util.List.of("0", "-2", "NaN", "Infinity", "50001")) {
+				boolean invalidDuration = false;
+				try { DuelLibrary.durationTicks(invalid); } catch (IllegalArgumentException expected) { invalidDuration = true; }
+				require(invalidDuration, "Invalid round duration must be rejected");
+			}
 			entry.addProperty("contract_hash", "b".repeat(64));
 			boolean rejected = false;
 			try { library.policyFighter(entry, environment); } catch (java.io.IOException expected) { rejected = true; }
@@ -150,12 +169,21 @@ public final class ReplayAnalysisChecks {
 			index.addProperty("version", 1);
 			JsonArray entries = new JsonArray();
 			entry.addProperty("id", "fixture:latest.pt");
+			entry.addProperty("run", "fixture");
 			entries.add(entry);
+			JsonObject snapshot = entry.deepCopy();
+			snapshot.addProperty("id", "fixture:snapshots/early.pt");
+			snapshot.addProperty("update", 200);
+			entries.add(snapshot);
 			index.add("policies", entries);
 			index.add("environments", new JsonArray());
 			DuelLibrary.write(library.root.resolve("library.json"), index);
 			DuelLibrary reopened = new DuelLibrary(game);
+			require(reopened.runs.size() == 1 && reopened.versions("fixture").size() == 2, "Legacy libraries must group downloaded versions by run");
+			require(reopened.versions("fixture").getFirst().get("id").getAsString().endsWith(":latest.pt"), "Latest must appear before named policy versions");
+			reopened.rename(reopened.runs.getFirst(), "My local run");
 			reopened.rename(reopened.policies.getFirst(), " My saved alias ");
+			require(new DuelLibrary(game).runs.getFirst().get("name").getAsString().equals("My local run"), "Run display aliases must persist without renaming run IDs");
 			require(new DuelLibrary(game).policies.getFirst().get("name").getAsString().equals("My saved alias"), "Aliases must be trimmed and survive reopening Minecraft");
 			require(Files.readString(library.root.resolve("library.json")).contains("\n  \"policies\""), "The local library must remain human-readable after renaming");
 			System.out.println("PASS: local library and independent duel configuration");

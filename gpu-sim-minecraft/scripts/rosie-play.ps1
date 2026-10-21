@@ -17,6 +17,8 @@ param(
     [ValidateSet('runs', 'replays', 'replay', 'sync', 'duel')][string] $Action = 'runs',
     [string] $Run = 'latest',
     [string] $Replay = 'latest',
+    [ValidateSet('policy', 'latest', 'all')][string] $SyncScope = 'policy',
+    [ValidateRange(1, 4)][int] $Downloads = 3,
     [string] $MinecraftDirectory,
     [string] $SshHost = $env:ROSIE_SSH_JUMP,
     [string] $SshUser = $env:ROSIE_SSH_USER,
@@ -55,6 +57,7 @@ if ($Setup) {
     $command += @('connect', '--minecraft-directory', $game)
 } else {
     $command += @($Action, '--minecraft-directory', $game, '--run', $Run, '--replay', $Replay)
+    if ($Action -eq 'sync') { $command += @('--scope', $SyncScope, '--workers', $Downloads) }
     if ($Offline) { $command += '--offline' }
 }
 

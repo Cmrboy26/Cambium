@@ -40,9 +40,13 @@ final class ControlPanel extends Screen {
 	private int page;
 	private String query = "";
 	private String selectedPolicy = "";
+	private String libraryRun = "";
+	private int maxTicks;
 	private String selectedRun = "";
+	private String syncScope = "policy";
 	private String status = "";
 	private boolean helperBusy;
+	private boolean helperServing;
 	private int left;
 	private int contentWidth;
 
@@ -55,6 +59,8 @@ final class ControlPanel extends Screen {
 				JsonObject saved = JsonParser.parseString(Files.readString(library.root.resolve("selections.json"))).getAsJsonObject();
 				environmentId = saved.get("environment").getAsString();
 				arena = saved.get("arena").getAsBoolean();
+				maxTicks = saved.has("max_ticks") ? saved.get("max_ticks").getAsInt() : 0;
+				if (saved.has("sync_scope") && List.of("policy", "latest", "all").contains(saved.get("sync_scope").getAsString())) syncScope = saved.get("sync_scope").getAsString();
 				for (int index = 0; index < 2; index++) {
 					JsonObject fighter = saved.getAsJsonArray("fighters").get(index).getAsJsonObject();
 					policyIds[index] = fighter.get("policy").getAsString();
@@ -94,6 +100,8 @@ final class ControlPanel extends Screen {
 	void refreshLibrary() {
 		try {
 			library = new DuelLibrary(Minecraft.getInstance().gameDirectory.toPath());
+			if (library.find(library.runs, libraryRun) == null && !library.runs.isEmpty()) libraryRun = identity(library.runs.getFirst());
+			selectVersion();
 			if (library.find(library.environments, environmentId) == null && !library.environments.isEmpty()) environmentId = identity(library.environments.getFirst());
 			for (int index = 0; index < 2; index++) {
 				if (library.find(library.policies, policyIds[index]) == null && !library.policies.isEmpty()) policyIds[index] = identity(library.policies.getFirst());
@@ -106,8 +114,9 @@ final class ControlPanel extends Screen {
 
 	@Override
 	public void tick() {
-		if (helperBusy != RosieLauncher.isBusy()) {
+		if (helperBusy != RosieLauncher.isBusy() || helperServing != RosieLauncher.isServing()) {
 			helperBusy = RosieLauncher.isBusy();
+			helperServing = RosieLauncher.isServing();
 			rebuildWidgets();
 		}
 	}
@@ -165,8 +174,8 @@ final class ControlPanel extends Screen {
 		}
 		button(RosieLauncher.isServing() ? "Replace live duel" : "Start live duel", left, height - 30, contentWidth - 124, this::launch)
 				.active = environment != null && (!RosieLauncher.isBusy() || RosieLauncher.isServing());
-		button("Sidebar: " + (DuelHud.enabled() ? "On" : "Off"), left + contentWidth - 120, height - 30, 120,
-				() -> { DuelHud.toggle(minecraft); rebuildWidgets(); });
+		button(maxTicks == 0 ? "Duration: Default" : String.format(Locale.ROOT, "Duration: %.1f s", maxTicks / 20.0), left + contentWidth - 120, height - 30, 120,
+				() -> minecraft.gui.setScreen(new DurationScreen()));
 	}
 
 	private void shelf() {
@@ -177,44 +186,65 @@ final class ControlPanel extends Screen {
 		search.setResponder(value -> { query = value; page = 0; rebuildWidgets(); });
 		setInitialFocus(search);
 		button("Refresh", left + contentWidth - 80, 64, 80, this::refreshLibrary);
-		List<JsonObject> entries = library == null ? List.of() : library.policies.stream().filter(entry -> name(entry).toLowerCase(Locale.ROOT).contains(query.toLowerCase(Locale.ROOT))).toList();
-		int rows = Math.max(1, (height - 184) / 24);
+		String filter = query.toLowerCase(Locale.ROOT);
+		List<JsonObject> entries = library == null ? List.of() : library.runs.stream().filter(entry -> name(entry).toLowerCase(Locale.ROOT).contains(filter)
+				|| identity(entry).toLowerCase(Locale.ROOT).contains(filter) || library.versions(identity(entry)).stream().anyMatch(policy -> name(policy).toLowerCase(Locale.ROOT).contains(filter))).toList();
+		int rows = Math.max(1, (height - 212) / 24);
 		page = Math.min(page, Math.max(0, (entries.size() - 1) / rows));
 		for (int index = page * rows; index < Math.min(entries.size(), (page + 1) * rows); index++) {
 			JsonObject entry = entries.get(index);
-			button((identity(entry).equals(selectedPolicy) ? "> " : "") + name(entry) + " / update " + entry.get("update").getAsLong(),
-					left, 92 + (index % rows) * 24, contentWidth, () -> { selectedPolicy = identity(entry); rebuildWidgets(); });
+			button((identity(entry).equals(libraryRun) ? "> " : "") + name(entry) + " / " + library.versions(identity(entry)).size() + " versions",
+					left, 92 + (index % rows) * 24, contentWidth, () -> { libraryRun = identity(entry); selectVersion(); rebuildWidgets(); });
 		}
-		if (entries.isEmpty()) label("No matching local policies", left, 100, contentWidth, 0xFFACBDB5);
-		pager(entries.size(), rows);
-		int actionWidth = (contentWidth - 8) / 3;
+		if (entries.isEmpty()) label("No matching local runs", left, 100, contentWidth, 0xFFACBDB5);
+		pager(entries.size(), rows, height - 108);
+		List<JsonObject> versions = library == null ? List.of() : library.versions(libraryRun);
+		JsonObject version = library == null ? null : library.find(versions, selectedPolicy);
+		if (version != null) addRenderableWidget(CycleButton.builder(entry -> Component.literal(fit(DuelLibrary.versionName(entry), contentWidth - 24)), version)
+				.withValues(versions).displayOnlyValue().create(left, height - 80, contentWidth, 20, Component.literal("Policy version"),
+						(widget, value) -> { selectedPolicy = identity(value); rebuildWidgets(); })).setTooltip(Tooltip.create(Component.literal(DuelLibrary.versionName(version))));
+		int actionWidth = (contentWidth - 12) / 4;
 		for (int index = 0; index < 2; index++) {
 			final int fighter = index;
-			button(index == 0 ? "Assign to A" : "Assign to B", left + index * (actionWidth + 4), height - 30, actionWidth,
+			button(index == 0 ? "Assign A" : "Assign B", left + index * (actionWidth + 4), height - 30, actionWidth,
 					() -> { policyIds[fighter] = selectedPolicy; modes[fighter] = "Policy"; tab = 0; persist(); rebuildWidgets(); })
 					.active = library != null && library.find(library.policies, selectedPolicy) != null;
 		}
-		button("Rename", left + 2 * (actionWidth + 4), height - 30, actionWidth, () -> {
+		button("Name policy", left + 2 * (actionWidth + 4), height - 30, actionWidth, () -> {
 			JsonObject entry = library.find(library.policies, selectedPolicy);
 			minecraft.gui.setScreen(new RenameScreen(entry));
 		}).active = !RosieLauncher.isBusy() && library != null && library.find(library.policies, selectedPolicy) != null;
+		button("Name run", left + 3 * (actionWidth + 4), height - 30, actionWidth,
+				() -> minecraft.gui.setScreen(new RenameScreen(library.find(library.runs, libraryRun))))
+				.active = !RosieLauncher.isBusy() && library != null && library.find(library.runs, libraryRun) != null;
+	}
+
+	private void selectVersion() {
+		List<JsonObject> versions = library.versions(libraryRun);
+		if (library.find(versions, selectedPolicy) == null) selectedPolicy = versions.isEmpty() ? "" : identity(versions.getFirst());
 	}
 
 	private void rosie() {
 		button("Refresh remote runs", left, 64, (contentWidth - 4) / 2, () -> RosieLauncher.start(minecraft, "runs", "latest", "latest")).active = !RosieLauncher.isBusy();
 		button("Sync selected run", left + (contentWidth + 4) / 2, 64, (contentWidth - 4) / 2,
-				() -> RosieLauncher.start(minecraft, "sync", selectedRun, "latest")).active = !selectedRun.isEmpty() && !RosieLauncher.isBusy();
+				() -> RosieLauncher.start(minecraft, "sync", selectedRun, "latest", syncScope)).active = !selectedRun.isEmpty() && !RosieLauncher.isBusy();
+		addRenderableWidget(CycleButton.builder(value -> Component.literal(switch (value) {
+			case "policy" -> "Policy only";
+			case "latest" -> "Policy + latest replay";
+			default -> "All policies and replays";
+		}), syncScope).withValues("policy", "latest", "all").displayOnlyValue().create(left, 90, contentWidth, 20,
+				Component.literal("Sync scope"), (widget, value) -> { syncScope = value; persist(); })).active = !RosieLauncher.isBusy();
 		List<JsonObject> runs = RosieLauncher.remoteRuns();
-		int rows = Math.max(1, (height - 184) / 24);
+		int rows = Math.max(1, (height - 218) / 24);
 		page = Math.min(page, Math.max(0, (runs.size() - 1) / rows));
 		for (int index = page * rows; index < Math.min(runs.size(), (page + 1) * rows); index++) {
 			JsonObject entry = runs.get(index);
 			String run = name(entry);
-			button((run.equals(selectedRun) ? "> " : "") + run, left, 92 + index % rows * 24, contentWidth,
+			button((run.equals(selectedRun) ? "> " : "") + run, left, 116 + index % rows * 24, contentWidth,
 					() -> { selectedRun = run; rebuildWidgets(); }).active = entry.get("checkpoint").getAsBoolean();
 		}
-		if (runs.isEmpty()) label("No remote run list loaded", left, 100, contentWidth, 0xFFACBDB5);
-		pager(runs.size(), rows);
+		if (runs.isEmpty()) label("No remote run list loaded", left, 121, contentWidth, 0xFFACBDB5);
+		pager(runs.size(), rows, height - 96);
 		button("Cancel helper / stop local service", left, height - 30, contentWidth, () -> { RosieLauncher.stopOwned(minecraft); rebuildWidgets(); }).active = RosieLauncher.isBusy();
 	}
 
@@ -235,9 +265,13 @@ final class ControlPanel extends Screen {
 	}
 
 	private void pager(int count, int rows) {
-		button("Previous", left, height - 80, 76, () -> { page--; rebuildWidgets(); }).active = page > 0;
-		label((page + 1) + " / " + Math.max(1, (count + rows - 1) / rows), left + 84, height - 73, contentWidth - 168, 0xFFACBDB5);
-		button("Next", left + contentWidth - 76, height - 80, 76, () -> { page++; rebuildWidgets(); }).active = (page + 1) * rows < count;
+		pager(count, rows, height - 80);
+	}
+
+	private void pager(int count, int rows, int top) {
+		button("Previous", left, top, 76, () -> { page--; rebuildWidgets(); }).active = page > 0;
+		label((page + 1) + " / " + Math.max(1, (count + rows - 1) / rows), left + 84, top + 7, contentWidth - 168, 0xFFACBDB5);
+		button("Next", left + contentWidth - 76, top, 76, () -> { page++; rebuildWidgets(); }).active = (page + 1) * rows < count;
 	}
 
 	private void launch() {
@@ -247,9 +281,8 @@ final class ControlPanel extends Screen {
 			for (int index = 0; index < 2; index++) fighters[index] = modes[index].equals("Policy")
 					? library.policyFighter(library.find(library.policies, policyIds[index]), environment)
 					: DuelLibrary.scriptedFighter(modes[index].equals("Basic melee") ? "basic_melee" : "stationary_target", scriptOptions[index]);
-			library.saveDuel(environment, fighters[0], fighters[1]);
+			library.saveDuel(environment, fighters[0], fighters[1], maxTicks);
 			persist();
-			if (RosieLauncher.isServing()) RosieLauncher.stopOwned(minecraft);
 			RosieLauncher.start(minecraft, arena ? "local" : "local-world", "latest", "latest");
 			tab = 3;
 			rebuildWidgets();
@@ -261,6 +294,8 @@ final class ControlPanel extends Screen {
 		JsonObject saved = new JsonObject();
 		saved.addProperty("environment", environmentId);
 		saved.addProperty("arena", arena);
+		saved.addProperty("max_ticks", maxTicks);
+		saved.addProperty("sync_scope", syncScope);
 		var fighters = new com.google.gson.JsonArray();
 		for (int index = 0; index < 2; index++) {
 			JsonObject fighter = new JsonObject();
@@ -300,6 +335,17 @@ final class ControlPanel extends Screen {
 		for (Label label : labels) graphics.text(font, fit(label.text(), label.width()), label.left(), label.top(), label.color());
 		String message = status.isEmpty() ? RosieLauncher.status() : status;
 		graphics.text(font, fit(message, contentWidth), left, height - 45, status.isEmpty() ? 0xFFACBDB5 : 0xFFF3B298);
+		JsonObject progress = RosieLauncher.progress();
+		if (tab == 2 && progress != null) {
+			long total = progress.get("bytes_total").getAsLong();
+			long done = progress.get("bytes_done").getAsLong();
+			String detail = progress.get("phase").getAsString() + " | " + progress.get("completed").getAsInt() + "/" + progress.get("total").getAsInt()
+					+ " files | " + String.format(Locale.ROOT, "%.1f/%.1f MiB", done / 1048576.0, total / 1048576.0)
+					+ " | " + progress.get("cached").getAsInt() + " cached";
+			graphics.text(font, fit(detail, contentWidth), left, height - 68, 0xFFACBDB5);
+			graphics.fill(left, height - 56, left + contentWidth, height - 52, 0xFF354244);
+			if (total > 0) graphics.fill(left, height - 56, left + (int) (contentWidth * Math.clamp(done / (double) total, 0, 1)), height - 52, 0xFF92DDB3);
+		}
 		if (tab == 3) {
 			List<String> lines = DuelHud.lines();
 			for (int index = 0; index < Math.min(lines.size(), Math.max(0, (height - 178) / 12)); index++) graphics.text(font, fit(lines.get(index), contentWidth), left, 130 + index * 12, 0xFFE2E8E5);
@@ -360,7 +406,7 @@ final class ControlPanel extends Screen {
 
 	private final class RenameScreen extends Screen {
 		private final JsonObject entry;
-		RenameScreen(JsonObject entry) { super(Component.literal("Policy name")); this.entry = entry; }
+		RenameScreen(JsonObject entry) { super(Component.literal("Local display name")); this.entry = entry; }
 		@Override protected void init() {
 			int size = Math.min(400, width - 40);
 			int position = (width - size) / 2;
@@ -378,6 +424,36 @@ final class ControlPanel extends Screen {
 			graphics.fill(0, 0, width, height, 0xF0181E20);
 			graphics.text(font, title, (width - Math.min(400, width - 40)) / 2, 48, 0xFF92DDB3);
 			graphics.text(font, fit(status, width - 40), 20, height - 35, 0xFFF3B298);
+			super.extractRenderState(graphics, mouseX, mouseY, delta);
+		}
+		@Override public boolean isPauseScreen() { return false; }
+		@Override public void onClose() { minecraft.gui.setScreen(ControlPanel.this); }
+	}
+
+	private final class DurationScreen extends Screen {
+		private String error = "";
+		DurationScreen() { super(Component.literal("Maximum round duration (seconds)")); }
+		@Override protected void init() {
+			int size = Math.min(400, width - 40);
+			int position = (width - size) / 2;
+			JsonObject environment = environment();
+			int initial = maxTicks > 0 ? maxTicks : environment != null && environment.getAsJsonObject("environment").has("max_ticks")
+					? environment.getAsJsonObject("environment").get("max_ticks").getAsInt() : 300;
+			EditBox duration = addRenderableWidget(new EditBox(font, position, 74, size, 20, title));
+			duration.setMaxLength(12);
+			duration.setValue(String.format(Locale.ROOT, "%.2f", initial / 20.0));
+			setInitialFocus(duration);
+			addRenderableWidget(Button.builder(Component.literal("Apply"), widget -> {
+				try { maxTicks = DuelLibrary.durationTicks(duration.getValue()); persist(); onClose(); }
+				catch (IllegalArgumentException invalid) { error = invalid.getMessage(); }
+			}).bounds(position, 108, (size - 8) / 2, 20).build());
+			addRenderableWidget(Button.builder(Component.literal("Cancel"), widget -> onClose()).bounds(position + (size + 8) / 2, 108, (size - 8) / 2, 20).build());
+			addRenderableWidget(Button.builder(Component.literal("Environment default"), widget -> { maxTicks = 0; persist(); onClose(); }).bounds(position, 136, size, 20).build());
+		}
+		@Override public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
+			graphics.fill(0, 0, width, height, 0xF0181E20);
+			graphics.text(font, fit(title.getString(), width - 40), (width - Math.min(400, width - 40)) / 2, 48, 0xFF92DDB3);
+			graphics.text(font, fit(error, width - 40), 20, height - 35, 0xFFF3B298);
 			super.extractRenderState(graphics, mouseX, mouseY, delta);
 		}
 		@Override public boolean isPauseScreen() { return false; }

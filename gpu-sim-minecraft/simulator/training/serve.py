@@ -1,11 +1,13 @@
 """Serve a trained duel policy to the Minecraft mod over loopback HTTP."""
 
 import argparse
+import hmac
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
+import time
 
 import numpy as np
 import torch
@@ -102,7 +104,7 @@ class DuelPolicy:
     def __init__(self, configuration, device="cpu", deterministic=False, seed=1):
         self.path = Path(configuration).resolve()
         value = json.loads(self.path.read_text(encoding="utf-8"))
-        if (not isinstance(value, dict) or set(value) - {"format", "version", "reference", "policy", "environment", "fighters"}
+        if (not isinstance(value, dict) or set(value) - {"format", "version", "reference", "policy", "environment", "fighters", "max_ticks"}
                 or value.get("format") != "minecraft_sim_duel" or type(value.get("version")) is not int
                 or value["version"] != 1):
             raise ValueError("Expected minecraft_sim_duel version 1")
@@ -127,7 +129,10 @@ class DuelPolicy:
         if "environment" not in self.info:
             raise ValueError("A duel requires an environment or reference checkpoint")
         scenario = self.info["environment"]
-        self.info["max_ticks"] = scenario.get("max_ticks", 300)
+        limit = value.get("max_ticks", scenario.get("max_ticks", self.info.get("max_ticks", 300)))
+        if type(limit) is not int or not 1 <= limit <= 1_000_000:
+            raise ValueError("Duel max_ticks must be an integer from 1 to 1000000")
+        self.info["max_ticks"] = limit
         for action in self.contract["actions"]:
             if action["name"] == "weapon" and any(slot >= len(player["loadout"]["weapons"])
                     for slot in action["values"] for player in scenario["players"]):
@@ -167,7 +172,10 @@ class DuelPolicy:
                 "contract_hash": self.info["contract_hash"], "actions": actions}
 
 
-def make_server(policy, port):
+def make_server(policy, port, reload_policy=None, reload_token=None):
+    active = [policy]
+    reload_lock = threading.Lock()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             pass
@@ -181,11 +189,15 @@ def make_server(policy, port):
             self.wfile.write(body)
 
         def do_GET(self):
-            self.reply(200, policy.info) if self.path == "/info" else self.reply(404, {"error": "Not found"})
+            self.reply(200, active[0].info) if self.path == "/info" else self.reply(404, {"error": "Not found"})
 
         def do_POST(self):
-            if self.path != "/act":
+            if self.path != "/act" and not (self.path == "/reload" and reload_policy is not None):
                 self.reply(404, {"error": "Not found"})
+                return
+            if self.path == "/reload" and (not reload_token or not hmac.compare_digest(
+                    self.headers.get("Authorization", ""), "Bearer " + reload_token)):
+                self.reply(403, {"error": "Unauthorized reload"})
                 return
             try:
                 if self.headers.get_content_type() != "application/json":
@@ -194,10 +206,19 @@ def make_server(policy, port):
                 if not 1 <= length <= 16384:
                     raise ValueError("Request must contain 1..16384 bytes")
                 request = json.loads(self.rfile.read(length).decode("utf-8"))
-                self.reply(200, policy.act(request))
+                if self.path == "/reload":
+                    if request != {}:
+                        raise ValueError("Reload uses only the configured local duel file")
+                    started = time.monotonic()
+                    with reload_lock:
+                        replacement = reload_policy()
+                        active[0] = replacement
+                    self.reply(200, {"reloaded": True, "seconds": time.monotonic() - started})
+                else:
+                    self.reply(200, active[0].act(request))
             except (ValueError, TypeError, OverflowError) as error:
                 self.reply(400, {"error": str(error)})
-            except RuntimeError as error:
+            except (RuntimeError, OSError) as error:
                 self.reply(500, {"error": str(error)})
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
