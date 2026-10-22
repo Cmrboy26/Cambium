@@ -204,7 +204,24 @@ public final class ReplayAnalysisChecks {
 			entry.addProperty("path", checkpoint.toString());
 			entry.addProperty("contract_hash", "a".repeat(64));
 			JsonObject first = library.policyFighter(entry, environment);
-			JsonObject second = DuelLibrary.scriptedFighter("basic_melee", new JsonObject());
+			JsonObject meleeOptions = new JsonObject();
+			meleeOptions.addProperty("attack_interval", 5);
+			meleeOptions.addProperty("strafe", true);
+			JsonObject second = DuelLibrary.scriptedFighter("basic_melee", meleeOptions);
+			require(second.get("options").equals(meleeOptions), "Scripted fighter options must survive duel serialization");
+			for (String[] controller : new String[][]{
+					{"Basic melee", "basic_melee"}, {"Stationary melee", "stationary_melee"},
+					{"Tactical melee", "tactical_melee"}, {"Random walk", "random_walk"},
+					{"Stationary target", "stationary_target"}}) {
+				JsonObject scripted = DuelLibrary.scriptedFighter(controller[1], new JsonObject());
+				require(DuelLibrary.scriptedController(controller[0]).equals(controller[1])
+						&& scripted.get("controller").getAsString().equals(controller[1])
+						&& scripted.get("name").getAsString().equals(controller[0]), "Duel panel modes must map to registered scripted controllers");
+			}
+			boolean unknownController = false;
+			try { DuelLibrary.scriptedFighter("unknown", new JsonObject()); }
+			catch (IllegalArgumentException expected) { unknownController = true; }
+			require(unknownController, "Unknown scripted controllers must be rejected");
 			JsonObject duel = JsonParser.parseString(Files.readString(library.saveDuel(environment, first, second))).getAsJsonObject();
 			require(duel.getAsJsonArray("fighters").get(0).getAsJsonObject().get("name").getAsString().equals("My fighter"), "Readable fighter names must survive launch");
 			require(duel.getAsJsonArray("fighters").get(1).getAsJsonObject().get("type").getAsString().equals("scripted"), "Each side must retain its own controller type");

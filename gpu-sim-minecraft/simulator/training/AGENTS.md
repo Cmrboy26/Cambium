@@ -403,8 +403,9 @@ Additional scripted controllers:
   charged; it suppresses uncharged attacks. Evasive/patient need backward,
   left and right choices. They reuse the base fighter's checkpointed timers.
 
-These extra controllers are training/evaluation builtins; the independent
-live-duel server still accepts only `stationary_target` and `basic_melee`.
+These controllers are also available in independent live duels. Controller
+requirements remain contract-dependent: required observations and action choices
+must exist in the selected policy layout or the duel is rejected before startup.
 
 Stage `controls.fixed` maps head names to semantic values, e.g.
 `{"attack":false,"movement":"neutral","weapon":0}`. Omitted heads remain learned.
@@ -1029,12 +1030,14 @@ incompatible checkpoint layouts, unsupported controllers and invalid scripted
 options fail before the service starts.
 
 Each fighter is `{"type":"checkpoint","path":"...","name":"..."}` or
-`{"type":"scripted","controller":"basic_melee","options":{},"name":"..."}`;
-`stationary_target` is the other built-in script. Checkpoint paths are relative
-to the duel file unless absolute. Each controller sees only its own observation
-row; scripted state resets when the request session changes. Controllers keep
-independent fixed controls/RNG, and `/info.fighters` carries readable provenance.
-Live configs do not run self-play pools, curricula or arbitrary Python factories.
+`{"type":"scripted","controller":"...","options":{},"name":"..."}`.
+Built-in scripts are `stationary_target`, `basic_melee`, `stationary_melee`,
+`tactical_melee` and `random_walk`; options follow each controller's definition
+above. Checkpoint paths are relative to the duel file unless absolute. Each
+controller sees only its own observation row; scripted state resets when the
+request session changes. Controllers keep independent fixed controls/RNG, and
+`/info.fighters` carries readable provenance. Live configs do not run self-play
+pools, curricula or arbitrary Python factories.
 Legacy positional-checkpoint serving remains unchanged; choose it or `--duel`,
 not both. Optional `max_ticks` overrides round length (integer 1..1,000,000);
 it does not modify the cached environment or a checkpoint.
