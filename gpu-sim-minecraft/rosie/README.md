@@ -14,7 +14,8 @@ bash rosie/setup.sh
 
 ## Train
 
-Walk through GPU, plan and training settings; press Enter to accept defaults:
+Choose GPU and plan, then edit training settings with Up/Down and type values.
+Ctrl+U clears a value; Enter on the bottom Submit row submits:
 
 ```sh
 bash rosie/submit.sh
@@ -23,9 +24,10 @@ tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 ```
 
 The selected plan is validated; `bash rosie/submit.sh --dry-run` previews without submitting.
-The job/run name appears in the dashboard. Sweep one setting with `multiple`, then
-values one per line and an empty line. Jobs get `-<value>` suffixes and train
+The job/run name appears in the dashboard. Sweep one field with comma-separated
+values (e.g. entropy `0,0.005,0.01`). Jobs get `-<value>` suffixes and train
 concurrently with locked builds and private libraries. [Options](AGENTS.md#interactive-submission).
+Use `--line-mode` for the original sequential prompts and `multiple` entry.
 Use `--shared-gpu` for one job and an overlaid PNG; `--max-parallel N` caps concurrency. [Details](AGENTS.md#shared-gpu-sweeps).
 For a one-update CUDA smoke test, use `sbatch rosie/train.sbatch` instead.
 

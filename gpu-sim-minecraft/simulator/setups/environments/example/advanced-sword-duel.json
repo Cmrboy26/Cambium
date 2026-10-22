@@ -1,0 +1,42 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 2,
+  "minecraft": "26.3",
+  "name": "example-advanced-sword-duel",
+  "arena": "../../arenas/example/flat-duel.json",
+  "players": {
+    "shared": {
+      "health": 20,
+      "loadout": {
+        "weapons": ["minecraft:iron_sword", "minecraft:iron_axe"],
+        "selected": 0,
+        "offhand": "minecraft:shield",
+        "armor": {
+          "boots": "minecraft:air",
+          "leggings": "minecraft:iron_leggings",
+          "chestplate": "minecraft:iron_chestplate",
+          "helmet": "minecraft:air"
+        }
+      }
+    },
+    "overrides": [
+      {"position": [-2, 1, 0], "yaw": -90},
+      {"position": [2, 1, 0], "yaw": 90}
+    ]
+  },
+  "spawns": {
+    "sample": "episode",
+    "region": {"min": [-3, 1, -3], "max": [3, 1, 3]},
+    "minimum_separation": 3,
+    "yaw": {"uniform": [-180, 180]}
+  },
+  "task": {
+    "max_ticks": 900,
+    "rewards": {
+      "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "death": -20,
+      "episode_timeout": -10, "no_damage_penalty": -20, "blocked_with_shield": 4,
+      "good_aim": 1, "proximity": 0.5, "pitch_control": 0.25,
+      "aim_hold": 1.5, "extreme_pitch_penalty": -1
+    }
+  }
+}

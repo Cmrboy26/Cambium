@@ -11,7 +11,12 @@
         "weapons": ["minecraft:iron_sword"],
         "selected": 0,
         "offhand": "minecraft:air",
-        "armor": {}
+        "armor": {
+          "boots": "minecraft:air",
+          "leggings": "minecraft:iron_leggings",
+          "chestplate": "minecraft:iron_chestplate",
+          "helmet": "minecraft:air"
+        }
       }
     },
     "overrides": [
@@ -28,12 +33,10 @@
   "task": {
     "max_ticks": 900,
     "rewards": {
-      "doing_damage": 1,
-      "taking_damage": -1,
-      "won_duel": 5,
-      "death": -5,
-      "episode_timeout": -1,
-      "good_aim": 0.1
+      "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "death": -20,
+      "episode_timeout": -10, "no_damage_penalty": -20, "blocked_with_shield": 4,
+      "good_aim": 1, "proximity": 0.5, "pitch_control": 0.25,
+      "aim_hold": 1.5, "extreme_pitch_penalty": -1
     }
   }
 }

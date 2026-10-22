@@ -1,0 +1,16 @@
+{
+  "format": "minecraft_sim_arena",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "test-flat-duel",
+  "requires": ["movement", "melee"],
+  "rules": {"simulate_food": false, "natural_regeneration": false},
+  "bounds": {"min": [-7, 0, -7], "size": [15, 4, 15]},
+  "blocks": [
+    {"from": [-7, 0, -7], "to": [7, 0, 7], "block": "minecraft:stone"},
+    {"from": [-7, 1, -7], "to": [-7, 3, 7], "block": "minecraft:stone"},
+    {"from": [7, 1, -7], "to": [7, 3, 7], "block": "minecraft:stone"},
+    {"from": [-6, 1, -7], "to": [6, 3, -7], "block": "minecraft:stone"},
+    {"from": [-6, 1, 7], "to": [6, 3, 7], "block": "minecraft:stone"}
+  ]
+}

@@ -19,7 +19,9 @@ from simulator.training.plans import (
 from simulator.training.policies import fixed_indices
 
 
-LEARNER_DEFAULTS = {"hidden_dim": 256, "lr": 0.0003, "epochs": 4, "minibatch_size": 1024}
+LEARNER_DEFAULTS = {"hidden_dim": 256, "lr": 0.0003, "epochs": 4, "minibatch_size": 1024,
+                    "gamma": 0.99, "gae_lambda": 0.95, "clip_eps": 0.2,
+                    "vf_coef": 0.5, "ent_coef": 0.01, "max_grad_norm": 0.5}
 PLAYER_FIELDS = ("position", "velocity", "yaw", "pitch", "on_ground", "health",
                  "absorption", "attack_strength_ticks", "loadout")
 SCENE_FIELDS = ("format", "version", "minecraft", "name", "profile", "requires",
@@ -189,9 +191,19 @@ def _learner(value):
     result = {**LEARNER_DEFAULTS, **value}
     for key in ("hidden_dim", "epochs", "minibatch_size"):
         positive(result[key], f"learner {key}")
-    if finite(result["lr"], "learner lr") <= 0:
-        raise ValueError("Learner lr must be positive")
-    result["lr"] = float(result["lr"])
+    for key in ("lr", "gamma", "gae_lambda", "clip_eps", "vf_coef", "ent_coef", "max_grad_norm"):
+        result[key] = float(finite(result[key], f"learner {key}"))
+    for key in ("lr", "max_grad_norm"):
+        if result[key] <= 0:
+            raise ValueError(f"Learner {key} must be positive")
+    for key in ("gamma", "gae_lambda"):
+        if not 0 <= result[key] <= 1:
+            raise ValueError(f"Learner {key} must be between 0 and 1")
+    if not 0 < result["clip_eps"] < 1:
+        raise ValueError("Learner clip_eps must be between 0 and 1, exclusive")
+    for key in ("vf_coef", "ent_coef"):
+        if result[key] < 0:
+            raise ValueError(f"Learner {key} must be nonnegative")
     return result
 
 

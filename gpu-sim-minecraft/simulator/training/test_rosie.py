@@ -21,6 +21,49 @@ from simulator.training.rosie import (
 )
 
 
+class SubmissionFormTests(unittest.TestCase):
+    def values(self):
+        from simulator.training.submit_form import LEARNER_FIELDS
+        from simulator.training.compiler import LEARNER_DEFAULTS
+        return {"JOB_NAME": "test", "TIME": "1-00:00:00", "ENVS": "8192", "UPDATES": "1500",
+                "ROLLOUT": "128", "CPUS": "8", "MEMORY": "24G", "THREADS": "auto", "REPLAY": "0",
+                "DEPENDENCY": "none", **{key: str(LEARNER_DEFAULTS[name]) for key, name in LEARNER_FIELDS.items()}}
+
+    def test_form_validates_numeric_sweeps_and_cpu_limits(self):
+        from simulator.training.submit_form import normalize
+        values = self.values()
+        values["ENT_COEF"] = "0,0.01,0.02"
+        settings, sweep = normalize(values, shared_gpu=True)
+        self.assertEqual(settings["THREADS"], "2")
+        self.assertEqual(sweep["variable"], "ENT_COEF")
+        self.assertEqual(sweep["values"], ["0", "0.01", "0.02"])
+        for changes in ({"LR": "0.0001,0.0003"}, {"ENT_COEF": "0.01,1e-2"}, {"GAMMA": "1.1"},
+                        {"CLIP_EPS": "nan"}, {"THREADS": "4"}, {"ENT_COEF": "0.01,"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                normalize({**values, **changes}, shared_gpu=True)
+
+    def test_arrow_navigation_editing_and_enter_on_submit(self):
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from simulator.training.submit_form import ORDER, SubmissionForm
+        with create_pipe_input() as pipe:
+            form = SubmissionForm(self.values(), input=pipe, output=DummyOutput())
+            pipe.send_text("\x15edited-name\x1b[B\x1b[A\x1b[B" + "\x1b[B" * (len(ORDER) - 1) + "\r")
+            settings, sweep = form.run()
+        self.assertEqual(settings["JOB_NAME"], "edited-name")
+        self.assertEqual(sweep, {})
+
+    def test_form_cancellation_does_not_return_settings(self):
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from simulator.training.submit_form import SubmissionForm
+        with create_pipe_input() as pipe:
+            form = SubmissionForm(self.values(), input=pipe, output=DummyOutput())
+            pipe.send_text("\x03")
+            with self.assertRaises(KeyboardInterrupt):
+                form.run()
+
+
 @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
 class SetupTests(unittest.TestCase):
     def setUp(self):
@@ -206,6 +249,16 @@ done
         self.assertEqual(arguments[arguments.index("--envs") + 1], "256")
         for removed in ("--schema", "--environment", "--seed", "--epochs", "--hidden-dim", "--minibatch-size"):
             self.assertNotIn(removed, arguments)
+
+    def test_learner_hyperparameters_reach_trainer(self):
+        settings = {"GAMMA": "0.9", "GAE_LAMBDA": "0.8", "CLIP_EPS": "0.1",
+                    "VF_COEF": "0.25", "ENT_COEF": "0", "MAX_GRAD_NORM": "1"}
+        result = self.launch(**{"SIM_" + key: value for key, value in settings.items()})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        for key, value in settings.items():
+            flag = "--" + key.lower().replace("_", "-")
+            self.assertEqual(arguments[arguments.index(flag) + 1], value)
 
     def test_collection_profiling_reaches_trainer(self):
         result = self.launch(SIM_PROFILE_EVERY="10")
@@ -419,7 +472,7 @@ print(f"{12345 + count};test-cluster")
             "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
         }))
 
-    def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None, **settings):
+    def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None, learner=None, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
@@ -430,9 +483,79 @@ print(f"{12345 + count};test-cluster")
             arguments.append("--shared-gpu")
         if max_parallel is not None:
             arguments.extend(["--max-parallel", str(max_parallel)])
+        for key, value in (learner or {}).items():
+            arguments.extend(["--" + key.replace("_", "-"), str(value)])
         return subprocess.run(arguments, input="\n".join(answers or [""] * 17) + "\n",
                               cwd=self.temporary.name, env=environment,
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=20)
+
+    def test_new_ppo_overrides_and_single_variable_sweep_reach_submissions(self):
+        result = self.launch([""] * 16 + ["y"], dry_run=False,
+                             learner={"gamma": "0.9", "gae_lambda": "0.8", "clip_eps": "0.1",
+                                      "vf_coef": "0.25", "ent_coef": "0,0.01", "max_grad_norm": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submissions = [json.loads(line) for line in self.history.read_text().splitlines()]
+        self.assertEqual(len(submissions), 2)
+        for submission, entropy in zip(submissions, ("0", "0.01")):
+            export = next(value for value in submission["arguments"] if value.startswith("--export="))
+            for expected in ("SIM_GAMMA=0.9", "SIM_GAE_LAMBDA=0.8", "SIM_CLIP_EPS=0.1", "SIM_VF_COEF=0.25",
+                             "SIM_ENT_COEF=" + entropy, "SIM_MAX_GRAD_NORM=1"):
+                self.assertIn(expected, export)
+        invalid = self.launch(learner={"gamma": "nan"})
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(len(self.history.read_text().splitlines()), 2)
+
+    def test_terminal_form_enter_submits_with_edited_values(self):
+        import fcntl
+        import pty
+        import select
+        import struct
+        import termios
+        import time
+        from simulator.training.submit_form import ORDER
+        primary, secondary = pty.openpty()
+        fcntl.ioctl(secondary, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
+                       "PYTHONPATH": str(Path(__file__).resolve().parents[2]), "TERM": "xterm-256color",
+                       "PROMPT_TOOLKIT_NO_CPR": "1", "SUBMIT_TEST_LOG": str(self.log),
+                       "SUBMIT_TEST_HISTORY": str(self.history)}
+        process = subprocess.Popen(["bash", str(self.script)], stdin=secondary, stdout=secondary, stderr=secondary,
+                                   cwd=self.temporary.name, env=environment)
+        os.close(secondary)
+        captured = b""
+        phase = 0
+        deadline = time.monotonic() + 25
+        try:
+            while process.poll() is None and time.monotonic() < deadline:
+                if not select.select([primary], [], [], 1)[0]:
+                    continue
+                try:
+                    captured += os.read(primary, 65536)
+                except OSError:
+                    break
+                if phase == 0 and b"GPU preset [" in captured:
+                    os.write(primary, b"\n")
+                    phase = 1
+                if phase == 1 and b"Plan number [" in captured:
+                    os.write(primary, b"\n")
+                    phase = 2
+                if phase == 2 and b"Rosie Training Submission" in captured:
+                    target = ORDER.index("ENT_COEF")
+                    keys = "\x15arrow-submit" + "\x1b[B" * target + "\x15" + "0.025"
+                    keys += "\x1b[B" * (len(ORDER) - target) + "\r"
+                    os.write(primary, keys.encode())
+                    phase = 3
+            self.assertEqual(process.wait(timeout=2), 0, captured.decode(errors="replace"))
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            os.close(primary)
+        submission = json.loads(self.log.read_text())
+        self.assertIn("--job-name=arrow-submit", submission["arguments"])
+        export = next(value for value in submission["arguments"] if value.startswith("--export="))
+        self.assertIn("SIM_ENT_COEF=0.025", export)
+        self.assertEqual(len(self.history.read_text().splitlines()), 1)
 
     def test_enter_defaults_use_h100_and_current_plan_budget(self):
         result = self.launch()

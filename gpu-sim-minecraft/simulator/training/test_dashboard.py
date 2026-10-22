@@ -112,6 +112,9 @@ const document = {getElementById(id) {if (!nodes.has(id)) nodes.set(id,new Node(
     addEventListener() {}, dispatchEvent() {}};
 const context = vm.createContext({document, Intl, CustomEvent:class {}, setInterval() {}, cancelAnimationFrame() {}});
 vm.runInContext(fs.readFileSync(path.join(process.argv[1],'dashboard.js'),'utf8'), context);
+for (const [name,label] of [['missed_attack','Missed attack'],['shield_disabled','Shield disabled'],['win_speed','Win speed']]) {
+    assert.equal(vm.runInContext(`rewardTypes.find(([key])=>key==='${name}')?.[1]`, context),label);
+}
 const conditionCharts=[];
 context.Chart=class {
     constructor(canvas,config) {this.canvas=canvas; this.data=config.data; this.options=config.options; this.plugins=config.plugins; this.destroyed=false; conditionCharts.push(this);}

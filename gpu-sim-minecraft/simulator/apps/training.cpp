@@ -55,10 +55,10 @@ struct TrainingBatch {
     std::vector<std::uint8_t> dealt_damage;
     std::vector<std::uint64_t> episodes;
     std::vector<int> observed_opponent_disable;
-    std::vector<std::array<double, 12>> step_reward_totals;
-    std::array<float, 6> weights;
+    std::vector<std::array<double, 15>> step_reward_totals;
+    std::array<float, 9> weights;
     float block_weight = 0.0F;
-    std::array<double, 7> reward_totals{};
+    std::array<double, 10> reward_totals{};
     std::array<float, 5> shaping_weights{};
     std::array<double, 5> shaping_totals{};
     std::uint64_t seed;
@@ -398,10 +398,18 @@ struct TrainingBatch {
                     recordReward(offset + (1 - player), 1, weights[1] * health_fraction);
                     dealt_damage[index] = 1;
                 }
+                if (state.last_attack.attempted && state.last_attack.target < 0) {
+                    rewards[index] += weights[6];
+                    recordReward(index, 6, weights[6]);
+                }
+                if (state.last_attack.shield_disabled) {
+                    rewards[index] += weights[7];
+                    recordReward(index, 7, weights[7]);
+                }
                 if (state.last_attack.blocked_damage > 0.0F
                     && weaponAttributes(state.weapon).disable_shield_seconds == 0.0F) {
                     rewards[offset + (1 - player)] += block_weight;
-                    recordReward(offset + (1 - player), 6, block_weight);
+                    recordReward(offset + (1 - player), 9, block_weight);
                 }
                 lost[player] = !state.alive() || outside(state);
             }
@@ -414,6 +422,12 @@ struct TrainingBatch {
                 if (terminated[environment]) {
                     rewards[index] += lost[player] ? weights[3] : weights[2];
                     recordReward(index, lost[player] ? 3 : 2, lost[player] ? weights[3] : weights[2]);
+                    if (!lost[player]) {
+                        const float speed_bonus = static_cast<float>(weights[8] * std::clamp(
+                            1.0 - static_cast<double>(worlds[environment].tick) / max_ticks, 0.0, 1.0));
+                        rewards[index] += speed_bonus;
+                        recordReward(index, 8, speed_bonus);
+                    }
                 } else if (truncated[environment]) {
                     rewards[index] += weights[4] + (dealt_damage[index] ? 0.0F : weights[5]);
                     recordReward(index, 4, weights[4]);
@@ -442,18 +456,18 @@ int protect(Function function) {
 }
 
 MCSIM_EXPORT const char* mcsim_last_error() { return last_error.c_str(); }
-MCSIM_EXPORT int mcsim_api_version() { return 2; }
+MCSIM_EXPORT int mcsim_api_version() { return 3; }
 MCSIM_EXPORT const char* mcsim_build_info() {
     static const std::string description = nlohmann::json{
-        {"abi", 2}, {"minecraft", "26.3"}, {"version", MCSIM_BUILD_VERSION},
+        {"abi", 3}, {"minecraft", "26.3"}, {"version", MCSIM_BUILD_VERSION},
         {"source_hash", MCSIM_SOURCE_HASH}, {"revision", MCSIM_SOURCE_REVISION},
         {"compiler", MCSIM_BUILD_COMPILER}, {"compiled", __DATE__ " " __TIME__},
         {"catalogue_hash", app::catalogue_hash}, {"capabilities", app::capability_names},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
                            {"reward_total", sizeof(double)}, {"done", sizeof(std::uint8_t)}}},
-        {"reward_inputs", {{"base", 6}, {"shaping", 5}}},
-        {"reward_totals", {{"base", 7}, {"shaping", 5}}},
+        {"reward_inputs", {{"base", 9}, {"shaping", 5}}},
+        {"reward_totals", {{"base", 10}, {"shaping", 5}}},
 #if defined(MCSIM_HAS_CUDA)
         {"cuda_compiled", true}
 #else
@@ -506,7 +520,7 @@ MCSIM_EXPORT void* mcsim_create(int environments, int use_cuda, const char* path
             || (use_cuda != 0 && use_cuda != 1) || !weights) {
             throw std::invalid_argument("Invalid training batch configuration");
         }
-        for (int index = 0; index < 6; ++index) {
+        for (int index = 0; index < 9; ++index) {
             if (!std::isfinite(weights[index])) {
                 throw std::invalid_argument("Reward weights must be finite");
             }
@@ -524,7 +538,7 @@ MCSIM_EXPORT void* mcsim_create_schema(int environments, int use_cuda, const cha
             || (use_cuda != 0 && use_cuda != 1) || !weights) {
             throw std::invalid_argument("Invalid training schema or batch configuration");
         }
-        for (int index = 0; index < 6; ++index) {
+        for (int index = 0; index < 9; ++index) {
             if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         }
         result = new TrainingBatch(environments, use_cuda != 0, path, max_ticks, seed, weights, 2);
@@ -596,7 +610,7 @@ MCSIM_EXPORT void* mcsim_create_contract(int environments, int use_cuda, const c
             || (use_cuda != 0 && use_cuda != 1) || !weights || !contract) {
             throw std::invalid_argument("Invalid configured training batch");
         }
-        for (int index = 0; index < 6; ++index) if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
+        for (int index = 0; index < 9; ++index) if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         result = new TrainingBatch(environments, use_cuda != 0, path, max_ticks, seed, weights, 3, contract);
     });
     return result;
@@ -624,7 +638,7 @@ MCSIM_EXPORT int mcsim_step_reward_totals(void* handle, const std::uint8_t* mask
         if (mask && std::any_of(mask, mask + batch.players.size(), [](auto value) { return value > 1; })) {
             throw std::invalid_argument("Step reward mask must contain one boolean per player");
         }
-        std::array<double, 12> selected{};
+        std::array<double, 15> selected{};
         for (std::size_t index = 0; index < batch.players.size(); ++index) {
             if (mask && !mask[index]) continue;
             for (std::size_t term = 0; term < selected.size(); ++term) {

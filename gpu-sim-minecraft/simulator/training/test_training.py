@@ -19,6 +19,7 @@ import torch
 from backend.fast_rl_model import ActorCritic
 from simulator.training.environment import (
     DEFAULT_REWARD_WEIGHTS, Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, SCHEMA, SCHEMA_V2, SHAPING_REWARD_NAMES,
+    resolve_reward_weights,
 )
 from simulator.training.contract import FEATURES, from_legacy, validate_contract, resolve_scenario
 from simulator.training.serve import DuelPolicy, Policy, make_server
@@ -289,12 +290,136 @@ class InferenceChecks(unittest.TestCase):
 
 
 class TrainingChecks(unittest.TestCase):
+    def test_optional_combat_and_win_speed_weights(self):
+        additions = {"missed_attack": -0.1, "shield_disabled": 2.0, "win_speed": 20.0}
+        resolved = resolve_reward_weights({}, additions)
+        for name, value in additions.items():
+            self.assertEqual(resolved[name], value)
+            self.assertEqual(resolve_reward_weights({})[name], 0.0)
+
+    def test_missed_attack_reward_tracks_swings_not_damage(self):
+        for hit_block in (False, True):
+            with self.subTest(hit_block=hit_block), tempfile.TemporaryDirectory() as directory:
+                definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+                if hit_block:
+                    for player in definition["players"]:
+                        player["yaw"] = -90
+                path = Path(directory) / "missed-swings.json"
+                path.write_text(json.dumps(definition), encoding="utf-8")
+                weights = {name: 0.0 for name in REWARD_NAMES}
+                weights["missed_attack"] = -0.25
+                with Environment(2, environment=path, weights=weights) as environment:
+                    _, rewards, _, _ = environment.step(neutral(2))
+                    np.testing.assert_array_equal(rewards, 0)
+                    actions = neutral(2)
+                    actions[0, 0, 3] = actions[1, 1, 3] = 1
+                    _, rewards, _, _ = environment.step(actions)
+                    np.testing.assert_array_equal(rewards, [[-0.25, 0], [0, -0.25]])
+                    self.assertEqual(environment.reward_totals()["missed_attack"], -0.5)
+                    selected = np.array([[True, False], [False, False]])
+                    self.assertEqual(environment.step_reward_totals(selected)["missed_attack"], -0.25)
+                    environment.reset(np.array([True, False]))
+                    self.assertEqual(environment.step_reward_totals()["missed_attack"], -0.25)
+                    _, rewards, _, _ = environment.step(neutral(2))
+                    np.testing.assert_array_equal(rewards, 0)
+                    environment.reset()
+                    environment.step(actions)
+                    if not hit_block:
+                        _, rewards, _, _ = environment.step(actions)
+                        np.testing.assert_array_equal(rewards, 0)
+
+    def test_missed_attack_reward_excludes_absorption_and_immunity(self):
+        for absorption in (0, 20):
+            with self.subTest(absorption=absorption), tempfile.TemporaryDirectory() as directory:
+                definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+                definition["players"][0]["position"][2] = -0.5
+                definition["players"][1]["position"][2] = 1.5
+                definition["players"][1]["absorption"] = absorption
+                path = Path(directory) / "contact-swings.json"
+                path.write_text(json.dumps(definition), encoding="utf-8")
+                weights = {name: 0.0 for name in REWARD_NAMES}
+                weights["missed_attack"] = -0.25
+                with Environment(1, environment=path, weights=weights) as environment:
+                    actions = neutral(1)
+                    actions[0, 0, 3] = 1
+                    _, rewards, _, _ = environment.step(actions)
+                    np.testing.assert_array_equal(rewards, 0)
+                    health = environment.replay_frame()["actors"][1]["health"]
+                    _, rewards, _, _ = environment.step(actions)
+                    np.testing.assert_array_equal(rewards, 0)
+                    self.assertEqual(environment.replay_frame()["actors"][1]["health"], health)
+                    self.assertEqual(environment.reward_totals()["missed_attack"], 0)
+
+    def test_win_speed_reward_scales_with_completion_time(self):
+        for winner in (0, 1):
+            for limit, wait in ((8, 0), (8, 3), (4, 3)):
+                with self.subTest(winner=winner, limit=limit, wait=wait), tempfile.TemporaryDirectory() as directory:
+                    definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+                    definition["players"][0]["position"][2] = -0.5
+                    definition["players"][1]["position"][2] = 1.5
+                    definition["players"][1 - winner]["health"] = 1
+                    path = Path(directory) / "timed-win.json"
+                    path.write_text(json.dumps(definition), encoding="utf-8")
+                    weights = {name: 0.0 for name in REWARD_NAMES}
+                    with Environment(2, environment=path, max_ticks=16, weights=weights) as environment:
+                        weights.update(win_speed=20.0, won_duel=50.0)
+                        environment.set_rewards(weights)
+                        environment.set_max_ticks(limit)
+                        for _ in range(wait):
+                            _, rewards, _, _ = environment.step(neutral(2))
+                            np.testing.assert_array_equal(rewards, 0)
+                        actions = neutral(2)
+                        actions[:, winner, 3] = 1
+                        _, rewards, terminated, truncated = environment.step(actions)
+                        self.assertTrue(terminated.all())
+                        self.assertFalse(truncated.any())
+                        bonus = 20 * (1 - (wait + 1) / limit)
+                        expected = np.zeros((2, 2))
+                        expected[:, winner] = 50 + bonus
+                        np.testing.assert_allclose(rewards, expected)
+                        self.assertEqual(environment.reward_totals()["win_speed"], 2 * bonus)
+                        self.assertEqual(environment.reward_totals()["won_duel"], 100)
+                        self.assertEqual(sum(environment.step_reward_totals().values()), rewards.sum())
+                        environment.reset(np.array([True, False]))
+                        self.assertEqual(environment.step_reward_totals()["win_speed"], bonus)
+                        environment.reset()
+                        self.assertEqual(environment.step_reward_totals()["win_speed"], 0)
+                        _, rewards, _, _ = environment.step(actions)
+                        expected[:, winner] = 50 + 20 * (1 - 1 / limit)
+                        np.testing.assert_allclose(rewards, expected)
+
+    def test_win_speed_reward_excludes_timeouts_and_double_losses(self):
+        weights = {name: 0.0 for name in REWARD_NAMES}
+        weights["win_speed"] = 20
+        with Environment(1, max_ticks=2, weights=weights) as environment:
+            for _ in range(2):
+                _, rewards, terminated, truncated = environment.step(neutral(1))
+                np.testing.assert_array_equal(rewards, 0)
+            self.assertFalse(terminated.any())
+            self.assertTrue(truncated.all())
+            self.assertEqual(environment.reward_totals()["win_speed"], 0)
+        with tempfile.TemporaryDirectory() as directory:
+            definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+            definition["blocks"] = []
+            path = Path(directory) / "double-loss.json"
+            path.write_text(json.dumps(definition), encoding="utf-8")
+            with Environment(1, environment=path, max_ticks=100, weights=weights) as environment:
+                for _ in range(100):
+                    _, rewards, terminated, truncated = environment.step(neutral(1))
+                    np.testing.assert_array_equal(rewards, 0)
+                    if terminated.any() or truncated.any():
+                        break
+                self.assertTrue(terminated.all())
+                self.assertFalse(truncated.any())
+                np.testing.assert_array_equal(environment.losses(np.array([True])), True)
+                self.assertEqual(environment.reward_totals()["win_speed"], 0)
+
     def test_native_build_contract_diagnostics(self):
         with Environment(1) as environment:
             self.assertTrue(Path(environment.build_info["library_path"]).is_file())
-            self.assertEqual(environment.build_info["abi"], 2)
+            self.assertEqual(environment.build_info["abi"], 3)
             self.assertEqual(len(environment.build_info["source_hash"]), 64)
-            self.assertEqual(environment.build_info["reward_inputs"], {"base": 6, "shaping": 5})
+            self.assertEqual(environment.build_info["reward_inputs"], {"base": 9, "shaping": 5})
         with mock.patch("simulator.training.environment.CATALOGUE_HASH", "0" * 64):
             with self.assertRaisesRegex(RuntimeError, "catalogue differs"):
                 Environment(1)
@@ -754,9 +879,10 @@ class TrainingChecks(unittest.TestCase):
 
     def test_old_native_reward_abi_requires_rebuild(self):
         with mock.patch("simulator.training.environment.ctypes.CDLL") as library:
-            library.return_value.mcsim_api_version.return_value = 1
-            with self.assertRaisesRegex(RuntimeError, "rebuild for health-normalized rewards"):
-                Environment(1)
+            for version in (1, 2):
+                library.return_value.mcsim_api_version.return_value = version
+                with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "rebuild for combat-event and win-speed rewards"):
+                    Environment(1)
 
     def test_shield_block_reward_excludes_axes(self):
         for attacker in (0, 1):
@@ -768,7 +894,8 @@ class TrainingChecks(unittest.TestCase):
                     path = Path(directory) / "shield-duel.json"
                     path.write_text(json.dumps(definition), encoding="utf-8")
                     with Environment(1, environment=path, schema="v2",
-                                     weights={**unshaped_weights(), "blocked_with_shield": 7}) as environment:
+                                     weights={**unshaped_weights(), "blocked_with_shield": 7,
+                                              "shield_disabled": 3, "missed_attack": -0.25}) as environment:
                         defender = 1 - attacker
                         actions = neutral(1, 8)
                         actions[0, attacker, 6] = weapon
@@ -781,8 +908,11 @@ class TrainingChecks(unittest.TestCase):
                         self.assertFalse(terminated.any() or truncated.any())
                         expected = np.zeros((1, 2), dtype=np.float32)
                         expected[0, defender] = 7 if weapon == 0 else 0
+                        expected[0, attacker] = 3 if weapon == 1 else 0
                         np.testing.assert_array_equal(rewards, expected)
                         self.assertEqual(environment.reward_totals()["blocked_with_shield"], 7 if weapon == 0 else 0)
+                        self.assertEqual(environment.reward_totals()["shield_disabled"], 3 if weapon == 1 else 0)
+                        self.assertEqual(environment.reward_totals()["missed_attack"], 0)
                         state = environment.replay_frame()["actors"][defender]
                         self.assertEqual(state["health"], 20)
                         self.assertEqual(state["shield_cooldown"] > 0, weapon == 1)
@@ -809,7 +939,7 @@ class TrainingChecks(unittest.TestCase):
             for name in ("sweep_hit_multiplier", "critical_hit_multiplier"):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Unknown reward weights"):
                     Environment(1, weights={**weights, name: 1})
-            for name in ("doing_damage", "taking_damage", "blocked_with_shield"):
+            for name in ("doing_damage", "taking_damage", "blocked_with_shield", "missed_attack", "shield_disabled", "win_speed"):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, "finite"):
                     Environment(1, weights={**weights, name: float("nan")})
 
@@ -948,7 +1078,7 @@ class TrainingChecks(unittest.TestCase):
             for row in metrics:
                 np.testing.assert_allclose(sum(row["reward_types"].values()), row["reward_total"], rtol=1e-6, atol=2e-5)
                 np.testing.assert_allclose(row["reward_mean"] * 16, row["reward_total"], rtol=1e-6, atol=2e-5)
-            for semantics in (None, "episode_shaping_budgets_v1"):
+            for semantics in (None, "episode_shaping_budgets_v1", "health_fraction_damage_episode_shaping_budgets_v2"):
                 incompatible = {**checkpoint, "metadata": checkpoint["metadata"].copy()}
                 if semantics is None:
                     incompatible["metadata"].pop("reward_semantics")

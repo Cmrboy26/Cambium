@@ -6,6 +6,8 @@ const rewardTypes = [
     ["doing_damage", "Damage dealt", colors.green], ["taking_damage", "Damage taken", colors.red],
     ["won_duel", "Win", colors.blue], ["death", "Death", "#8f364c"],
     ["episode_timeout", "Timeout", colors.amber], ["no_damage_penalty", "No damage", colors.gray],
+    ["missed_attack", "Missed attack", "#a86b32"],
+    ["shield_disabled", "Shield disabled", "#467b9d"], ["win_speed", "Win speed", "#458541"],
     ["blocked_with_shield", "Shield block", "#29898c"],
     ["good_aim", "Good aim", "#746ca8"], ["proximity", "Proximity", "#7b8542"],
     ["pitch_control", "Pitch control", "#4f6170"], ["aim_hold", "Aim hold", "#ab7256"],

@@ -78,9 +78,18 @@ to preview without submitting. Profiling defaults off, ignores inherited
 `SIM_PROFILE_EVERY` in the wizard, and does not add or shift prompts. Choose a
 unique baseline run name. See the [timing schema and report commands](../simulator/training/AGENTS.md#collection-profiling)
 before comparing profiled and ordinary update throughput.
-The wizard changes to the project root. Enter accepts each displayed default;
-submission requires an explicit `y` after the escaped command preview.
-`--dry-run` walks through the same prompts without calling `sbatch`.
+The wizard changes to the project root. Choose GPU and plan first (Enter accepts
+their defaults), then use the editable terminal form: Up/Down or Tab/Shift+Tab
+select a row, type to edit, Ctrl+U clears its value, and Ctrl+C/Ctrl+D cancel.
+Values start populated; use the usual Left/Right/Home/End/Backspace editing keys.
+Enter moves to the next row; Enter on the bottom **Submit** row authorizes the
+selected jobs, without a second confirmation prompt. Errors leave the form open.
+The form scrolls on shorter terminals and keeps Submit visible. `--dry-run` uses
+the same form but only previews commands, submitting/writing nothing. Install the
+updated training requirements for `prompt-toolkit` (or rerun `rosie/setup.sh`).
+`--line-mode` keeps the original sequential prompts and explicit `y` confirmation;
+piped/non-terminal input also uses that mode. The new PPO fields can be supplied
+there through the override flags described below.
 Plan discovery includes all nested folders under `simulator/setups/curricula`.
 The menu shows paths relative to that directory so bucketed plans with the same
 filename remain distinguishable; submission retains the full selected path.
@@ -115,7 +124,25 @@ hyphens, and fit within 120 characters including any sweep suffix. Existing run
 paths and duplicate generated names abort the whole setup before submission;
 choose a new name rather than overwriting an earlier test.
 
-Type `multiple` at one training/resource prompt (wall time, worlds, update cap,
+In the terminal form, enter comma-separated values in exactly one training or
+resource field for a single-variable sweep, e.g. entropy `0,0.005,0.01`.
+Equivalent numeric values are rejected. `THREADS=auto` chooses up to four threads,
+bounded by the smallest core allocation and active shared-GPU trial count;
+an explicit value must satisfy the same total CPU budget. All learner values
+start from the selected plan's effective configuration.
+
+Submit CLI flags `--gamma`, `--gae-lambda`, `--clip-eps`, `--vf-coef`, `--ent-coef`
+and `--max-grad-norm` set the corresponding form defaults. A comma-separated flag
+value also defines a sweep in line mode, for example:
+
+```sh
+bash rosie/submit.sh --line-mode --dry-run --ent-coef 0,0.005,0.01
+```
+
+The [learner reference](../simulator/training/AGENTS.md#learner-configuration)
+defines defaults, numeric ranges, persisted metadata and resume constraints.
+For line-mode sweeps in the original settings, type `multiple` at one
+training/resource prompt (wall time, worlds, update cap,
 rollout, learner settings, CPU cores/threads, RAM or replay interval) for a
 single-variable sweep. Enter one value per line, then an empty line to continue
 to the next setting. Values use the normal validation, require at least one
@@ -125,8 +152,8 @@ single-valued. For example, name `lr-test` with learning-rate values `.0001`,
 `.0003` and `.0006` generates `lr-test-.0001`, `lr-test-.0003` and `lr-test-.0006`,
 each with the same other settings. Time suffixes replace colons with hyphens;
 positive exponent suffixes omit `+`. CPU sweeps keep threads fixed at a value
-valid for the smallest core allocation. The wizard previews every command,
-then asks once to submit the complete setup; closed input or cancellation
+valid for the smallest core allocation. The wizard previews every command;
+line mode then asks once to submit the complete setup. Closed input or cancellation
 submits nothing. A later submission failure stops the remainder without
 canceling jobs already submitted.
 
@@ -145,12 +172,13 @@ No jobs are submitted by the mocked checks:
 
 ### Shared-GPU Sweeps
 
-`bash rosie/submit.sh --shared-gpu` keeps the existing prompts and `multiple`
-entry but submits exactly one allocation. All selected trial values launch
+`bash rosie/submit.sh --shared-gpu` uses the same form (or line-mode `multiple`
+entry) but submits exactly one allocation. All selected trial values launch
 concurrently by default; `--max-parallel N` optionally queues excess trials
 inside the job (`0` means all). Ordinary submissions remain separate jobs.
 Only training settings may be swept: worlds, update cap, rollout length, width,
-PPO epochs, minibatch size, learning rate, trainer threads or replay interval.
+PPO epochs, minibatch size, learning rate, gamma, GAE lambda, clipping epsilon,
+value/entropy coefficients, maximum gradient norm, trainer threads or replay interval.
 Allocation CPU cores, host RAM and wall-time remain single-valued. One seed and
 one allocated GPU are supported; this is independent training, not multi-GPU PPO.
 
@@ -223,6 +251,9 @@ Supported training environment variables:
 - `SIM_ROLLOUT_STEPS`: steps per rollout; default 16 for new runs, restored on resume.
 - `SIM_EPOCHS`, `SIM_MINIBATCH_SIZE`, `SIM_HIDDEN_DIM`, `SIM_LR`: optional
   overrides of the plan's learner settings; unset by default.
+- `SIM_GAMMA`, `SIM_GAE_LAMBDA`, `SIM_CLIP_EPS`, `SIM_VF_COEF`, `SIM_ENT_COEF`,
+  `SIM_MAX_GRAD_NORM`: optional PPO learner overrides; unset by default so the
+  plan/checkpoint owns their effective values. Changed resume settings fail.
 - `SIM_THREADS`: CPU threads; default 4. The plan owns the seed.
 - `SIM_PROFILE_EVERY`: collection profiling interval in global updates; default
   0 (off). Positive intervals add `collection_profile` to sampled metric rows.

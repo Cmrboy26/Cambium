@@ -242,7 +242,7 @@ class FastRLAgent:
     GAE_LAMBDA = 0.95
     CLIP_EPS = 0.2
     VF_COEF = 0.5
-    ENT_COEF = 0.01 # Encourages deterministic policy convergence faster
+    ENT_COEF = 0.01
     MAX_GRAD_NORM = 0.5
     LR = 3e-4
     PPO_EPOCHS = 4

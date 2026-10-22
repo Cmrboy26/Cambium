@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from backend.fast_rl_model import ActorCritic
+from simulator.training._test_plans import example_plan
 from simulator.training.contract import from_legacy, resolve_scenario, validate_contract
 from simulator.training.environment import Environment, REWARD_NAMES, ROOT, SCHEMA
 from simulator.training.research import SampledWorlds
@@ -66,8 +67,10 @@ class ExperimentRuntimeChecks(unittest.TestCase):
     def test_public_training_resume_and_replay(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"
+            plan = Path(directory) / "plan.json"
+            plan.write_text(json.dumps(example_plan()), encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):
-                main(["--updates", "1", "--envs", "2", "--rollout-steps", "4", "--threads", "1",
+                main(["--plan", str(plan), "--updates", "1", "--envs", "2", "--rollout-steps", "4", "--threads", "1",
                       "--max-ticks", "3", "--hidden-dim", "16", "--epochs", "1", "--minibatch-size", "4",
                       "--output", str(output), "--replay-every", "1"])
             configuration = json.loads((output / "config.json").read_text())
