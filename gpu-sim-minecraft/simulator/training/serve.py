@@ -18,6 +18,10 @@ from simulator.training.contract import CATALOGUE_HASH, fingerprint, from_legacy
 from simulator.training.policies import fixed_indices
 from simulator.training.controllers import create_controller
 
+LIVE_SCRIPTED_CONTROLLERS = frozenset((
+    "stationary_target", "basic_melee", "stationary_melee", "tactical_melee", "random_walk",
+))
+
 
 def inference_observations(request, schema, contract_hash):
     if (not isinstance(request, dict) or request.get("protocol") != 1
@@ -145,7 +149,7 @@ class DuelPolicy:
             definition = {key: deepcopy(item) for key, item in fighter.items() if key != "name"}
             if definition.get("type") not in ("checkpoint", "scripted"):
                 raise ValueError("Live fighters must be checkpoint policies or scripted controllers")
-            if definition["type"] == "scripted" and definition.get("controller") not in ("stationary_target", "basic_melee"):
+            if definition["type"] == "scripted" and definition.get("controller") not in LIVE_SCRIPTED_CONTROLLERS:
                 raise ValueError("Live duels accept only built-in scripted controllers")
             if definition["type"] == "checkpoint":
                 path = Path(definition.get("path", ""))

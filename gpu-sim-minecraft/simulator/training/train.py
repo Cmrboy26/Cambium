@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 
+from simulator.training.compiler import LEARNER_DEFAULTS, _learner
 from simulator.training.environment import ROOT
 from simulator.training.ppo import compute_gae, metadata, optimize
 
@@ -35,6 +36,9 @@ def arguments(argv=None):
     parser.add_argument("--epochs", type=positive, help="Override plan learner PPO epochs")
     parser.add_argument("--minibatch-size", type=positive, help="Override plan learner minibatch size")
     parser.add_argument("--lr", type=float, help="Override plan learner learning rate")
+    for name in ("gamma", "gae_lambda", "clip_eps", "vf_coef", "ent_coef", "max_grad_norm"):
+        parser.add_argument("--" + name.replace("_", "-"), type=float,
+                            help=f"Override plan learner {name} (default {LEARNER_DEFAULTS[name]})")
     parser.add_argument("--max-ticks", type=positive, help="Explicit override of all episode limits for smoke checks")
     options = parser.parse_args(argv)
     if options.profile_every < 0:
@@ -45,10 +49,10 @@ def arguments(argv=None):
         parser.error("hidden-dim must be <=4096")
     if options.max_ticks is not None and options.max_ticks > 1000000:
         parser.error("max-ticks must be <=1000000")
-    if options.lr is not None:
-        import math
-        if not math.isfinite(options.lr) or options.lr <= 0:
-            parser.error("lr must be finite and positive")
+    try:
+        _learner({name: getattr(options, name) for name in LEARNER_DEFAULTS if getattr(options, name) is not None})
+    except ValueError as error:
+        parser.error(str(error))
     if options.initialize and options.resume:
         parser.error("Choose --initialize or --resume, not both")
     if options.replay_every < 0 or options.replay_dir and not options.replay_every:

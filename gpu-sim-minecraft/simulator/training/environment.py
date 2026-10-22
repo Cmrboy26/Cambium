@@ -16,12 +16,13 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MAX_TICKS = 300
 MAX_MAX_TICKS = 1_000_000
 BASE_REWARD_NAMES = ("doing_damage", "taking_damage", "won_duel", "death",
-                     "episode_timeout", "no_damage_penalty")
+                     "episode_timeout", "no_damage_penalty", "missed_attack",
+                     "shield_disabled", "win_speed")
 SHAPING_REWARD_NAMES = ("good_aim", "proximity", "pitch_control", "aim_hold", "extreme_pitch_penalty")
 REWARD_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield", *SHAPING_REWARD_NAMES)
 REWARD_TYPE_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield")
 DEFAULT_REWARD_WEIGHTS = json.loads(Path(__file__).with_name("reward_weights.json").read_text(encoding="utf-8"))
-REWARD_SEMANTICS = "health_fraction_damage_episode_shaping_budgets_v2"
+REWARD_SEMANTICS = "health_fraction_damage_combat_events_win_speed_v3"
 
 
 def resolve_max_ticks(environment=None, override=None):
@@ -69,8 +70,8 @@ def load_library(library=None, device="cpu"):
         try:
             native = ctypes.CDLL(str(path))
             native.mcsim_api_version.restype = ctypes.c_int
-            if native.mcsim_api_version() != 2:
-                raise RuntimeError("Unsupported training library ABI; rebuild for health-normalized rewards")
+            if native.mcsim_api_version() != 3:
+                raise RuntimeError("Unsupported training library ABI; rebuild for combat-event and win-speed rewards")
             native.mcsim_build_info.restype = ctypes.c_char_p
             build_info = json.loads(native.mcsim_build_info())
             if build_info.get("catalogue_hash") != CATALOGUE_HASH:
@@ -134,6 +135,10 @@ class Environment:
             raise ValueError("Reward weights must be finite")
         self.native = load_library(library, device)
         self.build_info = self.native._build_info.copy()
+        if (any(observation.get("encoding") == "one_hot" or "clip" in observation
+                for observation in self.contract["observations"])
+                and self.build_info.get("observation_projection_version", 0) < 1):
+            raise RuntimeError("Rebuild minecraft_sim_training to enable observation encodings and clipping")
         pointer = ctypes.c_void_p
         self.native.mcsim_last_error.restype = ctypes.c_char_p
         set_block_reward = self.native.mcsim_set_block_reward

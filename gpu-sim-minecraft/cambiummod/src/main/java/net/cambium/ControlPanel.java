@@ -28,7 +28,7 @@ import net.minecraft.network.chat.Component;
 final class ControlPanel extends Screen {
 
 	private record Label(String text, int left, int top, int width, int color) {}
-	private static final List<String> MODES = List.of("Policy", "Basic melee", "Stationary target");
+	private static final List<String> MODES = List.of("Policy", "Basic melee", "Stationary melee", "Tactical melee", "Random walk", "Stationary target");
 	private static Object requestedWorld;
 	private final Screen previous;
 	private final List<Label> labels = new ArrayList<>();
@@ -169,10 +169,15 @@ final class ControlPanel extends Screen {
 			int column = left + index * (columnWidth + 12);
 			label(index == 0 ? "Fighter A" : "Fighter B", column, 107, columnWidth, index == 0 ? 0xFF85C5F5 : 0xFFF6A397);
 			addRenderableWidget(CycleButton.builder(Component::literal, modes[index]).withValues(MODES).displayOnlyValue()
-					.create(column, 120, columnWidth, 20, Component.literal("Controller"), (widget, value) -> { modes[fighter] = value; persist(); rebuildWidgets(); }));
+					.create(column, 120, columnWidth, 20, Component.literal("Controller"), (widget, value) -> {
+						if (!modes[fighter].equals(value)) scriptOptions[fighter] = new JsonObject();
+						modes[fighter] = value;
+						persist();
+						rebuildWidgets();
+					}));
 			JsonObject policy = library == null ? null : library.find(library.policies, policyIds[index]);
 			String title = modes[index].equals("Policy") ? policy == null ? "Select local policy" : name(policy)
-					: modes[index].equals("Basic melee") ? "Script settings" : "Idle target";
+					: modes[index].equals("Stationary target") ? "Idle target" : "Script settings";
 			Button selection = button(title, column, 146, columnWidth, () -> {
 				if (modes[fighter].equals("Policy")) {
 					List<JsonObject> compatible = library == null ? List.of() : library.policies;
@@ -834,25 +839,31 @@ final class ControlPanel extends Screen {
 
 	private final class ScriptScreen extends Screen {
 		private final int fighter;
+		private final String mode;
 		private EditBox interval;
 		private EditBox distance;
 		private EditBox strafeInterval;
 		private EditBox axe;
 		private EditBox sword;
+		private EditBox changeInterval;
+		private EditBox wallMargin;
 		private boolean strafe;
 		private boolean sprint;
 		private boolean shield;
+		private String tacticalStyle;
 		private int position;
 		private int column;
 		private String error = "";
 
 		ScriptScreen(int fighter) {
-			super(Component.literal("Basic melee / Fighter " + (fighter == 0 ? "A" : "B")));
+			super(Component.literal(modes[fighter] + " / Fighter " + (fighter == 0 ? "A" : "B")));
 			this.fighter = fighter;
+			this.mode = modes[fighter];
 			JsonObject options = scriptOptions[fighter];
 			strafe = options.has("strafe") && options.get("strafe").getAsBoolean();
 			sprint = options.has("sprint") && options.get("sprint").getAsBoolean();
 			shield = options.has("shield") && options.get("shield").getAsBoolean();
+			tacticalStyle = options.has("style") ? options.get("style").getAsString() : "evasive";
 		}
 
 		@Override protected void init() {
@@ -860,16 +871,37 @@ final class ControlPanel extends Screen {
 			position = (width - size) / 2;
 			column = (size - 12) / 2;
 			JsonObject options = scriptOptions[fighter];
-			interval = field(position, 76, column, "Attack interval", options, "attack_interval", "13");
-			distance = field(position + column + 12, 76, column, "Melee distance", options, "melee_distance", "3");
-			strafeInterval = field(position, 116, column, "Strafe interval", options, "strafe_interval", "20");
-			axe = field(position + column + 12, 116, (column - 4) / 2, "Axe slot", options, "axe_slot", "");
-			sword = field(position + column + 16 + (column - 4) / 2, 116, (column - 4) / 2, "Sword slot", options, "sword_slot", "");
-			addRenderableWidget(CycleButton.onOffBuilder(strafe).create(position, 148, column, 20, Component.literal("Strafe"), (widget, value) -> strafe = value));
-			addRenderableWidget(CycleButton.onOffBuilder(sprint).create(position + column + 12, 148, column, 20, Component.literal("Sprint"), (widget, value) -> sprint = value));
-			addRenderableWidget(CycleButton.onOffBuilder(shield).create(position, 174, column, 20, Component.literal("Shield"), (widget, value) -> shield = value));
+			if (mode.equals("Random walk")) {
+				changeInterval = field(position, 76, column, "Change interval", options, "change_interval", "20");
+				wallMargin = field(position + column + 12, 76, column, "Wall margin", options, "wall_margin", "1.25");
+			} else {
+				interval = field(position, 76, column, "Attack interval", options, "attack_interval", "13");
+				distance = field(position + column + 12, 76, column, "Melee distance", options, "melee_distance", "3");
+				if (mode.equals("Basic melee") || mode.equals("Tactical melee")) {
+					strafeInterval = field(position, 116, column, "Strafe interval", options, "strafe_interval", "20");
+					addWeaponSlotFields(position + column + 12, options);
+					addRenderableWidget(CycleButton.onOffBuilder(strafe).create(position, 148, column, 20, Component.literal("Strafe"), (widget, value) -> strafe = value));
+					addRenderableWidget(CycleButton.onOffBuilder(sprint).create(position + column + 12, 148, column, 20, Component.literal("Sprint"), (widget, value) -> sprint = value));
+					if (mode.equals("Tactical melee")) {
+						addRenderableWidget(CycleButton.onOffBuilder(shield).create(position, 174, column, 20, Component.literal("Shield"), (widget, value) -> shield = value));
+						addRenderableWidget(CycleButton.builder(Component::literal, tacticalStyle).withValues("evasive", "aggressive", "patient").displayOnlyValue()
+								.create(position + column + 12, 174, column, 20, Component.literal("Style"), (widget, value) -> tacticalStyle = value));
+					} else {
+						addRenderableWidget(CycleButton.onOffBuilder(shield).create(position, 174, column, 20, Component.literal("Shield"), (widget, value) -> shield = value));
+					}
+				} else {
+					addWeaponSlotFields(position, options);
+					addRenderableWidget(CycleButton.onOffBuilder(shield).create(position, 148, column, 20, Component.literal("Shield"), (widget, value) -> shield = value));
+				}
+			}
 			addRenderableWidget(Button.builder(Component.literal("Apply"), widget -> apply()).bounds(position, height - 30, column, 20).build());
 			addRenderableWidget(Button.builder(Component.literal("Cancel"), widget -> onClose()).bounds(position + column + 12, height - 30, column, 20).build());
+		}
+
+		private void addWeaponSlotFields(int left, JsonObject options) {
+			int slotWidth = (column - 4) / 2;
+			axe = field(left, 116, slotWidth, "Axe slot", options, "axe_slot", "");
+			sword = field(left + slotWidth + 4, 116, slotWidth, "Sword slot", options, "sword_slot", "");
 		}
 
 		private EditBox field(int position, int top, int size, String name, JsonObject options, String key, String fallback) {
@@ -884,20 +916,31 @@ final class ControlPanel extends Screen {
 		private void apply() {
 			try {
 				JsonObject options = new JsonObject();
-				options.addProperty("attack_interval", positive(interval.getValue()));
-				options.addProperty("strafe_interval", positive(strafeInterval.getValue()));
-				double reach = Double.parseDouble(distance.getValue());
-				if (!Double.isFinite(reach) || reach <= 0 || reach >= 10) throw new IllegalArgumentException("Melee distance must be between 0 and 10");
-				options.addProperty("melee_distance", reach);
-				options.addProperty("strafe", strafe);
-				options.addProperty("sprint", sprint);
-				options.addProperty("shield", shield);
-				if (!axe.getValue().isBlank() || !sword.getValue().isBlank()) {
-					int axeSlot = Integer.parseInt(axe.getValue());
-					int swordSlot = Integer.parseInt(sword.getValue());
-					if (axeSlot < 0 || axeSlot > 8 || swordSlot < 0 || swordSlot > 8 || axeSlot == swordSlot) throw new IllegalArgumentException("Choose distinct axe/sword slots from 0 to 8");
-					options.addProperty("axe_slot", axeSlot);
-					options.addProperty("sword_slot", swordSlot);
+				if (mode.equals("Random walk")) {
+					options.addProperty("change_interval", positive(changeInterval.getValue()));
+					double margin = Double.parseDouble(wallMargin.getValue());
+					if (!Double.isFinite(margin) || margin <= 0 || margin >= 10) throw new IllegalArgumentException("Wall margin must be between 0 and 10");
+					options.addProperty("wall_margin", margin);
+				} else {
+					options.addProperty("attack_interval", positive(interval.getValue()));
+					double reach = Double.parseDouble(distance.getValue());
+					if (!Double.isFinite(reach) || reach <= 0 || reach >= 10) throw new IllegalArgumentException("Melee distance must be between 0 and 10");
+					options.addProperty("melee_distance", reach);
+					if (mode.equals("Basic melee") || mode.equals("Tactical melee")) {
+						options.addProperty("strafe_interval", positive(strafeInterval.getValue()));
+						options.addProperty("strafe", strafe);
+						options.addProperty("sprint", sprint);
+					}
+					options.addProperty("shield", shield);
+					if (mode.equals("Tactical melee")) options.addProperty("style", tacticalStyle);
+					if (!axe.getValue().isBlank() || !sword.getValue().isBlank()) {
+						if (axe.getValue().isBlank() || sword.getValue().isBlank()) throw new IllegalArgumentException("Set both axe and sword slots");
+						int axeSlot = Integer.parseInt(axe.getValue());
+						int swordSlot = Integer.parseInt(sword.getValue());
+						if (axeSlot < 0 || axeSlot > 8 || swordSlot < 0 || swordSlot > 8 || axeSlot == swordSlot) throw new IllegalArgumentException("Choose distinct axe/sword slots from 0 to 8");
+						options.addProperty("axe_slot", axeSlot);
+						options.addProperty("sword_slot", swordSlot);
+					}
 				}
 				scriptOptions[fighter] = options;
 				persist();
@@ -914,11 +957,18 @@ final class ControlPanel extends Screen {
 		@Override public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
 			graphics.fill(0, 0, width, height, 0xF0181E20);
 			graphics.text(font, title, position, 22, 0xFF92DDB3);
-			graphics.text(font, "Attack interval (ticks)", position, 62, 0xFFB5C2BE);
-			graphics.text(font, "Melee distance (blocks)", position + column + 12, 62, 0xFFB5C2BE);
-			graphics.text(font, "Strafe interval (ticks)", position, 103, 0xFFB5C2BE);
-			graphics.text(font, "Axe / sword slots", position + column + 12, 103, 0xFFB5C2BE);
-			graphics.text(font, fit(error, column * 2 + 12), position, height - 45, 0xFFF3B298);
+			if (mode.equals("Random walk")) {
+				graphics.text(font, "Change interval (ticks)", position, 62, 0xFFB5C2BE);
+				graphics.text(font, "Wall margin (blocks)", position + column + 12, 62, 0xFFB5C2BE);
+			} else {
+				graphics.text(font, "Attack interval (ticks)", position, 62, 0xFFB5C2BE);
+				graphics.text(font, "Melee distance (blocks)", position + column + 12, 62, 0xFFB5C2BE);
+				if (mode.equals("Basic melee") || mode.equals("Tactical melee")) {
+					graphics.text(font, "Strafe interval (ticks)", position, 103, 0xFFB5C2BE);
+					graphics.text(font, "Axe / sword slots", position + column + 12, 103, 0xFFB5C2BE);
+				} else graphics.text(font, "Axe / sword slots", position, 103, 0xFFB5C2BE);
+			}
+			graphics.text(font, fit(error, column * 2 + 12), position, 48, 0xFFF3B298);
 			super.extractRenderState(graphics, mouseX, mouseY, delta);
 		}
 		@Override public boolean isPauseScreen() { return false; }

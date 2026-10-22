@@ -193,6 +193,13 @@ if [[ -n "$SIM_EPOCHS" ]]; then TRAIN_ARGS+=(--epochs "$SIM_EPOCHS"); fi
 if [[ -n "$SIM_MINIBATCH_SIZE" ]]; then TRAIN_ARGS+=(--minibatch-size "$SIM_MINIBATCH_SIZE"); fi
 if [[ -n "$SIM_HIDDEN_DIM" ]]; then TRAIN_ARGS+=(--hidden-dim "$SIM_HIDDEN_DIM"); fi
 if [[ -n "$SIM_LR" ]]; then TRAIN_ARGS+=(--lr "$SIM_LR"); fi
+for setting in GAMMA GAE_LAMBDA CLIP_EPS VF_COEF ENT_COEF MAX_GRAD_NORM; do
+    variable="SIM_$setting"
+    if [[ -n "${!variable:-}" ]]; then
+        flag="${setting,,}"
+        TRAIN_ARGS+=("--${flag//_/-}" "${!variable}")
+    fi
+done
 if [[ "$SIM_REPLAY_EVERY" -gt 0 ]]; then
     TRAIN_ARGS+=(--replay-every "$SIM_REPLAY_EVERY")
     if [[ -n "$SIM_REPLAY_DIR" ]]; then

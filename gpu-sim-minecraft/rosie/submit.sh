@@ -7,10 +7,19 @@ DRY_RUN=false
 PROFILE_EVERY=0
 SHARED_GPU=false
 MAX_PARALLEL=0
+LINE_MODE=false
+LEARNER_OVERRIDES=()
 while (( $# )); do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
+        --line-mode) LINE_MODE=true; shift ;;
         --shared-gpu) SHARED_GPU=true; shift ;;
+        --gamma|--gae-lambda|--clip-eps|--vf-coef|--ent-coef|--max-grad-norm)
+            if (( $# < 2 )); then printf 'Expected a value after %s.\n' "$1" >&2; exit 1; fi
+            variable="${1#--}"
+            variable="${variable^^}"
+            LEARNER_OVERRIDES+=(--override "${variable//-/_}" "$2")
+            shift 2 ;;
         --max-parallel)
             if [[ ! "${2:-}" =~ ^(0|[1-9][0-9]*)$ ]]; then
                 printf 'Expected a nonnegative integer after --max-parallel (0 means all).\n' >&2
@@ -26,7 +35,7 @@ while (( $# )); do
             PROFILE_EVERY="$2"
             shift 2 ;;
         -h|--help)
-            printf 'Usage: bash rosie/submit.sh [--dry-run] [--profile-every N] [--shared-gpu [--max-parallel N]]\nInteractive training submission; Enter accepts each default.\nType multiple at one training/resource setting to submit a single-variable sweep.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
+            printf 'Usage: bash rosie/submit.sh [--dry-run] [--line-mode] [--profile-every N] [--shared-gpu [--max-parallel N]]\nInteractive settings: Up/Down to navigate, type to edit, Enter on Submit.\nUse comma-separated values in one field for a single-variable sweep.\n--line-mode retains sequential prompts (also used for piped input).\nPPO overrides: --gamma, --gae-lambda, --clip-eps, --vf-coef, --ent-coef, --max-grad-norm VALUE.\nA comma-separated override also works in line mode.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
             exit 0 ;;
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
@@ -39,6 +48,22 @@ fi
 SWEEP_VARIABLE=""
 SWEEP_LABEL=""
 SWEEP_VALUES=()
+
+read_form_values() {
+    local key value
+    while IFS=$'\t' read -r key value; do
+        case "$key" in
+            SWEEP_VARIABLE)
+                if [[ -n "$SWEEP_VARIABLE" ]]; then printf 'Only one setting can be swept.\n' >&2; exit 1; fi
+                SWEEP_VARIABLE="$value" ;;
+            SWEEP_LABEL) SWEEP_LABEL="$value" ;;
+            SWEEP_VALUE) SWEEP_VALUES+=("$value") ;;
+            JOB_NAME|TIME|ENVS|UPDATES|ROLLOUT|HIDDEN|EPOCHS|MINIBATCH|LR|CPUS|MEMORY|THREADS|REPLAY|DEPENDENCY|GAMMA|GAE_LAMBDA|CLIP_EPS|VF_COEF|ENT_COEF|MAX_GRAD_NORM)
+                printf -v "$key" '%s' "$value" ;;
+            *) printf 'Unexpected form setting; nothing submitted.\n' >&2; exit 1 ;;
+        esac
+    done <<< "$1"
+}
 
 valid_value() {
     local value="$1" pattern="$2" maximum="$3"
@@ -145,6 +170,7 @@ fi
 if ! DEFAULTS="$("$PYTHON" - "$PLAN" <<'PY'
 import json
 import sys
+from simulator.training.compiler import LEARNER_DEFAULTS
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     plan = json.load(stream)
@@ -153,16 +179,30 @@ if plan.get("format") != "minecraft_sim_training_plan" or plan.get("version") !=
 stages = plan.get("stages", [])
 budgets = [stage.get("advance", {}).get("updates") for stage in stages]
 updates = sum(budgets) if budgets and all(type(value) is int and value > 0 for value in budgets) else 1500
-learner = {"hidden_dim": 256, "lr": 0.0003, "epochs": 4, "minibatch_size": 1024,
-           **plan.get("learner", {})}
-print(updates, learner["hidden_dim"], learner["epochs"], learner["minibatch_size"], learner["lr"])
+learner = {**LEARNER_DEFAULTS, **plan.get("learner", {})}
+keys = ("hidden_dim", "epochs", "minibatch_size", "lr", "gamma", "gae_lambda", "clip_eps", "vf_coef", "ent_coef", "max_grad_norm")
+print(updates, *(learner[key] for key in keys))
 PY
 )"; then
     printf 'Could not read training plan defaults; nothing submitted.\n' >&2
     exit 1
 fi
-read -r UPDATES_DEFAULT HIDDEN_DEFAULT EPOCHS_DEFAULT MINIBATCH_DEFAULT LR_DEFAULT <<< "$DEFAULTS"
+read -r UPDATES_DEFAULT HIDDEN_DEFAULT EPOCHS_DEFAULT MINIBATCH_DEFAULT LR_DEFAULT GAMMA GAE_LAMBDA CLIP_EPS VF_COEF ENT_COEF MAX_GRAD_NORM <<< "$DEFAULTS"
 
+FORM_USED=false
+FORM_ARGS=(--plan "$PLAN" --envs-default "$ENVS_DEFAULT" --rollout-default "$ROLLOUT_DEFAULT"
+    --time-default "$TIME_DEFAULT" --max-parallel "$MAX_PARALLEL" "${LEARNER_OVERRIDES[@]}")
+if [[ -t 0 && -t 2 ]] && ! "$LINE_MODE"; then
+    if "$SHARED_GPU"; then FORM_ARGS+=(--shared-gpu); fi
+    if ! FORM_DATA="$("$PYTHON" -B -m simulator.training.submit_form "${FORM_ARGS[@]}")"; then exit 1; fi
+    read_form_values "$FORM_DATA"
+    FORM_USED=true
+elif (( ${#LEARNER_OVERRIDES[@]} )); then
+    if ! FORM_DATA="$("$PYTHON" -B -m simulator.training.submit_form "${FORM_ARGS[@]}" --learner-only)"; then exit 1; fi
+    read_form_values "$FORM_DATA"
+fi
+
+if ! "$FORM_USED"; then
 printf '\nTraining settings (world counts are starting points, not measured tuning):\n'
 printf 'Type multiple at one training/resource setting; enter values one per line, then an empty line.\n'
 NAME="${PLAN##*/}"
@@ -198,20 +238,25 @@ printf '\nCUDA build directory: simulator/build-rosie-cuda-%s\n' "$ARCH"
 printf 'Builds use a shared lock; each job trains from a private library copy.\n'
 printf 'For jobs submitted with the older launcher, enter their IDs to avoid overlapping an unlocked build.\n'
 prompt DEPENDENCY 'Wait for job IDs (colon-separated), or none' none '^(none|[1-9][0-9]*(:[1-9][0-9]*)*)$'
+fi
 
 if "$SHARED_GPU"; then
     case "$SWEEP_VARIABLE" in
         ENVS) PARAMETER=envs ;; UPDATES) PARAMETER=updates ;; ROLLOUT) PARAMETER=rollout_steps ;;
         HIDDEN) PARAMETER=hidden_dim ;; EPOCHS) PARAMETER=epochs ;; MINIBATCH) PARAMETER=minibatch_size ;;
         LR) PARAMETER=lr ;; THREADS) PARAMETER=threads ;; REPLAY) PARAMETER=replay_every ;;
+        GAMMA|GAE_LAMBDA|CLIP_EPS|VF_COEF|ENT_COEF|MAX_GRAD_NORM) PARAMETER="${SWEEP_VARIABLE,,}" ;;
         *) printf 'Shared-GPU mode requires multiple at one training setting, not allocation CPU/RAM/wall-time.\n' >&2; exit 1 ;;
     esac
     SWEEP_DIRECTORY="$ROOT/simulator/training/sweeps/$JOB_NAME"
-    SWEEP_OPTIONS="$("$PYTHON" - "$ENVS" "$UPDATES" "$ROLLOUT" "$HIDDEN" "$EPOCHS" "$MINIBATCH" "$LR" "$THREADS" "$REPLAY" "$PROFILE_EVERY" <<'PY'
+    SWEEP_OPTIONS="$("$PYTHON" - "$ENVS" "$UPDATES" "$ROLLOUT" "$HIDDEN" "$EPOCHS" "$MINIBATCH" "$LR" "$THREADS" "$REPLAY" "$PROFILE_EVERY" "$GAMMA" "$GAE_LAMBDA" "$CLIP_EPS" "$VF_COEF" "$ENT_COEF" "$MAX_GRAD_NORM" <<'PY'
 import json
 import sys
-keys = ("envs", "updates", "rollout_steps", "hidden_dim", "epochs", "minibatch_size", "lr", "threads", "replay_every", "profile_every")
-options = {key: float(value) if key == "lr" else int(value) for key, value in zip(keys, sys.argv[1:])}
+from simulator.training.compiler import LEARNER_DEFAULTS
+keys = ("envs", "updates", "rollout_steps", "hidden_dim", "epochs", "minibatch_size", "lr", "threads", "replay_every", "profile_every",
+        "gamma", "gae_lambda", "clip_eps", "vf_coef", "ent_coef", "max_grad_norm")
+floats = set(LEARNER_DEFAULTS) - {"hidden_dim", "epochs", "minibatch_size"}
+options = {key: float(value) if key in floats else int(value) for key, value in zip(keys, sys.argv[1:])}
 print(json.dumps({"device": "cuda", **options}))
 PY
 )"
@@ -231,7 +276,7 @@ PY
     printf '%q ' "${SHARED_COMMAND[@]}"
     printf '\n'
     if "$DRY_RUN"; then printf 'Dry run: nothing submitted or written.\n'; exit 0; fi
-    prompt CONFIRM 'Submit 1 shared-GPU sweep job? (y/n)' n '^[yYnN]$'
+    if "$FORM_USED"; then CONFIRM=y; else prompt CONFIRM 'Submit 1 shared-GPU sweep job? (y/n)' n '^[yYnN]$'; fi
     if [[ "$CONFIRM" != [yY] ]]; then printf 'Cancelled; nothing submitted.\n'; exit 0; fi
     if ! command -v sbatch >/dev/null 2>&1; then printf 'sbatch is unavailable.\n' >&2; exit 1; fi
     "${PREPARE[@]}"
@@ -277,7 +322,7 @@ prepare_command() {
         printf -v "$SWEEP_VARIABLE" '%s' "${SWEEP_VALUES[index]}"
     fi
     RUN_OUTPUT="simulator/training/runs/${RUN_NAMES[index]}"
-    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY,SIM_PROFILE_EVERY=$PROFILE_EVERY"
+    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY,SIM_PROFILE_EVERY=$PROFILE_EVERY,SIM_GAMMA=$GAMMA,SIM_GAE_LAMBDA=$GAE_LAMBDA,SIM_CLIP_EPS=$CLIP_EPS,SIM_VF_COEF=$VF_COEF,SIM_ENT_COEF=$ENT_COEF,SIM_MAX_GRAD_NORM=$MAX_GRAD_NORM"
     COMMAND=(sbatch --parsable "--job-name=${RUN_NAMES[index]}" "--partition=$PARTITION" "--gres=$GRES"
         "--time=$TIME" "--cpus-per-gpu=$CPUS" "--mem=$MEMORY" "--export=$EXPORTS")
     if [[ "$dependency" != none ]]; then
@@ -300,7 +345,7 @@ if "$DRY_RUN"; then
     printf 'Dry run: nothing submitted.\n'
     exit 0
 fi
-prompt CONFIRM "Submit ${#RUN_NAMES[@]} job(s)? (y/n)" n '^[yYnN]$'
+if "$FORM_USED"; then CONFIRM=y; else prompt CONFIRM "Submit ${#RUN_NAMES[@]} job(s)? (y/n)" n '^[yYnN]$'; fi
 if [[ "$CONFIRM" != [yY] ]]; then
     printf 'Cancelled; nothing submitted.\n'
     exit 0

@@ -44,7 +44,7 @@ void checkResetPlayers(const char* environment, int cuda) {
     const std::array<float, 6> weights{};
     Handle handle(mcsim_create_contract(3, cuda, environment, 100, 123, weights.data(), descriptor.c_str()), mcsim_destroy);
     require(handle != nullptr, "create all-equipment descriptor batch using a two-slot environment");
-    require(mcsim_api_version() == 2, "additive functions preserve ABI 2");
+    require(mcsim_api_version() == 3, "current training library exposes ABI 3");
     require(mcsim_set_profiling(nullptr, 1) == -1, "profiling rejects null handles");
     require(mcsim_set_profiling(handle.get(), 2) == -1, "profiling requires a boolean flag");
     require(mcsim_profile(nullptr) == nullptr, "profile rejects null handles");
@@ -53,6 +53,8 @@ void checkResetPlayers(const char* environment, int cuda) {
     require(!baseline.contains("policy"), "resolved scenarios never advertise a stale embedded policy");
     auto own = baseline["players"];
     own[0]["health"] = 13;
+    own[0]["velocity"] = {0.1, -0.2, 0.3};
+    own[1]["velocity"] = {-0.2, 0.4, -0.1};
     own[0]["loadout"] = {{"weapons", {"minecraft:wooden_sword", "minecraft:netherite_axe"}}, {"selected", 1},
         {"offhand", "minecraft:shield"}, {"armor", {{"chestplate", "minecraft:netherite_chestplate"}}}};
     own[1]["loadout"] = {{"weapons", {"minecraft:air", "minecraft:iron_sword"}}, {"selected", 0}};
@@ -88,6 +90,13 @@ void checkResetPlayers(const char* environment, int cuda) {
         "shield ownership is visible from both perspectives");
     require(observation(0, "self.weapon_damage_fraction") == 1 && observation(0, "self.weapon_slot") == 1,
         "selected reset weapon attributes and legacy slot agree");
+    require(std::abs(observation(0, "self.velocity.x") - 0.1F) < 1e-6F
+        && std::abs(observation(0, "self.velocity.y") + 0.2F) < 1e-6F
+        && std::abs(observation(0, "self.velocity.z") - 0.3F) < 1e-6F
+        && std::abs(observation(0, "relative.velocity.x") + 0.3F) < 1e-6F
+        && std::abs(observation(0, "relative.velocity.y") - 0.6F) < 1e-6F
+        && std::abs(observation(0, "relative.velocity.z") + 0.4F) < 1e-6F,
+        "training observations include self and opponent-relative velocity");
     require(observation(1, "self.weapon_slot_0.present") == 0
         && std::abs(observation(1, "self.weapon_damage_fraction") - 0.1F) < 1e-6,
         "air slot is absent metadata but selected unarmed retains base damage");

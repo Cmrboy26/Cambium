@@ -13,9 +13,10 @@ import subprocess
 import sys
 import time
 
+from simulator.training.compiler import LEARNER_DEFAULTS
 
 ROOT = Path(__file__).resolve().parents[2]
-PARAMETERS = ("envs", "updates", "rollout_steps", "hidden_dim", "epochs", "minibatch_size", "lr", "threads", "replay_every")
+PARAMETERS = ("envs", "updates", "rollout_steps", *LEARNER_DEFAULTS, "threads", "replay_every")
 OPTIONS = (*PARAMETERS, "device", "profile_every", "save_every", "max_ticks")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
 
@@ -73,7 +74,7 @@ def prepare(plan, directory, runs, name, parameter, values, options, max_paralle
         if output.exists() or output.is_symlink():
             raise ValueError(f"Trial output already exists: {output}")
         frozen = deepcopy(experiment)
-        for key in ("hidden_dim", "epochs", "minibatch_size", "lr"):
+        for key in LEARNER_DEFAULTS:
             setting = getattr(parsed, key)
             if setting is not None:
                 frozen["learner"][key] = setting

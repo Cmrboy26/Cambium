@@ -69,6 +69,13 @@ to regenerate committed C++/Java constants; CI uses `--check` to reject drift.
 Appending a primitive also requires handwritten encoders/decoders/mechanics.
 Do not reorder existing feature/action indices or change legacy preset meanings.
 
+`self.on_ground`, `opponent.on_ground`, `self.sprinting`, and `opponent.sprinting`
+are binary float observations (0 or 1) appended after velocity. They expose the
+actual player state at observation time in native simulation and live Minecraft,
+not requested jump/sprint controls. Airborne players can still be sprinting.
+All four support scalar or optional `one_hot` encoding with categories `[0, 1]`.
+Legacy 22/31-input presets retain their original order and dimensions.
+
 [policy_fixtures.json](../contracts/policy_fixtures.json) supplies independent
 base observation expected values (1e-6 tolerance), reordered/scaled projection,
 all nine semantic controls and invalid descriptor mutations. Native and Java
@@ -184,8 +191,31 @@ historical concrete fixtures may still embed a descriptor.
 
 Observations are ordered objects like `{"feature":"self.attack_charge"}` or
 `{"feature":"relative.x","scale":2}`. Scale defaults to 1, multiplying the
-normalized feature; it must be finite and in -1000..1000. There are 1..128 entries;
-repeats are allowed.
+normalized feature; it must be finite and in -1000..1000. There are 1..128 entries
+and at most 128 expanded inputs; repeats are allowed. Optional descriptor fields:
+
+| Field | Contract |
+| --- | --- |
+| `encoding` | `scalar` (default, one input) or `one_hot` (one input per category) |
+| `categories` | Required only for `one_hot`: nonempty distinct integer JSON literals, in output order; slot features allow 0..8, binary features allow 0/1 |
+| `clip` | Scalar only: two finite increasing float32-range bounds, applied to the normalized feature before scale |
+
+Only `self.weapon_slot`, `opponent.weapon_slot` and catalogue binary flags support
+one-hot encoding. Continuous measurements cannot be encoded as categories.
+One-hot compares the original feature value to each category, emits 0/1 flags,
+then applies scale. Unlisted values emit all zeros; there is no implicit extra
+unknown category. For example, categories `[1,0]` encode slot 0 as `[0,1]`.
+The descriptor list order is preserved, and expanded category columns are adjacent.
+`observation_dim` counts expanded columns, not descriptors.
+
+Canonical validation removes explicit `encoding: scalar`, retaining legacy scalar
+descriptors, dimensions, output values and fingerprints. New encodings/categories/
+clip settings are checkpoint identity; they cannot be changed during resume.
+Native build metadata advertises `observation_projection_version: 1`; Python
+requires it only for policies using one-hot or clipping, so older native libraries
+still work with plain scalar policies. Rebuild the native library and reinstall
+the updated mod before deploying encoded policies. Shared Python/native/Java
+fixtures cover category order, unknown categories, clipping, scaling and rejection.
 
 | Primitive | Value before optional scale |
 | --- | --- |

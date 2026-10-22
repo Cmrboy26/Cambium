@@ -1,0 +1,3 @@
+- look for more observation ideas and test them
+- velocity, enemy attack charge (or time since last hit), if they're sprinting or on the ground, stuff like that
+- verify that yaw and pitch are not represented as angles (instead they're represented as sine and cosing or something)

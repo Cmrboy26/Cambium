@@ -26,6 +26,34 @@ _ARMOR_ITEMS = {slot: frozenset({"minecraft:air", *(f"minecraft:{material}_{slot
     for slot in _ARMOR_SLOTS}
 
 
+def categorical_values(feature):
+    if feature in ("self.weapon_slot", "opponent.weapon_slot"):
+        return tuple(range(LIMITS["weapon_slots"]))
+    if feature in FEATURES and feature.endswith((".alive", ".weapon_is_axe", ".shield_using",
+            ".shield_disabled", ".shield_disabled_observed", ".has_shield", ".present", ".is_axe", ".on_ground", ".sprinting")):
+        return (0, 1)
+    return ()
+
+
+def observation_width(observation):
+    return len(observation["categories"]) if observation.get("encoding") == "one_hot" else 1
+
+
+def project_observations(catalogue, contract):
+    result = []
+    for observation in contract["observations"]:
+        value = catalogue[FEATURES.index(observation["feature"])]
+        scale = observation.get("scale", 1.0)
+        if observation.get("encoding") == "one_hot":
+            result.extend(float(value == category) * scale for category in observation["categories"])
+        else:
+            if "clip" in observation:
+                lower, upper = observation["clip"]
+                value = min(max(value, lower), upper)
+            result.append(value * scale)
+    return result
+
+
 def validate_contract(value):
     contract = deepcopy(value)
     if (not isinstance(contract, dict) or contract.get("format") != "minecraft_sim_policy"
@@ -39,10 +67,39 @@ def validate_contract(value):
     for observation in observations:
         if not isinstance(observation, dict) or observation.get("feature") not in FEATURES:
             raise ValueError(f"Unsupported observation primitive: {observation}")
+        if set(observation) - {"feature", "scale", "encoding", "categories", "clip"}:
+            raise ValueError("Unsupported observation descriptor fields")
         scale = observation.get("scale", 1.0)
         if type(scale) not in (int, float) or not math.isfinite(scale) or abs(scale) > LIMITS["scale"]:
             raise ValueError("Observation scale must be finite and within -1000..1000")
         observation["scale"] = float(scale)
+        encoding = observation.get("encoding", "scalar")
+        if encoding == "scalar":
+            observation.pop("encoding", None)
+            if "categories" in observation:
+                raise ValueError("Observation categories require one_hot encoding")
+            if "clip" in observation:
+                bounds = observation["clip"]
+                if (not isinstance(bounds, list) or len(bounds) != 2
+                        or any(type(bound) not in (int, float) or not math.isfinite(bound)
+                               or abs(bound) > 3.4028234663852886e38 for bound in bounds)
+                        or bounds[0] >= bounds[1]):
+                    raise ValueError("Observation clip needs two finite increasing float32 bounds")
+                observation["clip"] = [float(bound) for bound in bounds]
+        elif encoding == "one_hot":
+            categories = observation.get("categories")
+            allowed = categorical_values(observation["feature"])
+            if (not allowed or not isinstance(categories, list) or not categories
+                    or any(type(category) is not int or category not in allowed for category in categories)
+                    or len(set(categories)) != len(categories)):
+                raise ValueError("one_hot needs distinct integer categories for a slot or binary feature")
+            if "clip" in observation:
+                raise ValueError("Observation clip is only supported for scalar encoding")
+        else:
+            raise ValueError("Observation encoding must be scalar or one_hot")
+    observation_dim = sum(observation_width(observation) for observation in observations)
+    if observation_dim > LIMITS["observations"]:
+        raise ValueError("Expanded policy needs at most 128 observation inputs")
     if not isinstance(actions, list) or not 1 <= len(actions) <= len(HEADS):
         raise ValueError("Policy needs 1..9 action heads")
     names = []
@@ -69,7 +126,7 @@ def validate_contract(value):
     required = contract.get("requires", [])
     if not isinstance(required, list) or any(item not in CAPABILITIES for item in required):
         raise ValueError("Policy requires unsupported simulator capabilities")
-    for key, expected in (("observation_dim", len(observations)), ("action_names", names), ("action_sizes", sizes)):
+    for key, expected in (("observation_dim", observation_dim), ("action_names", names), ("action_sizes", sizes)):
         if key in contract and contract[key] != expected:
             raise ValueError(f"Policy contract {key} disagrees with its descriptors")
         contract[key] = expected

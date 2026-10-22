@@ -22,6 +22,45 @@ memory; observations/rays/rewards run on CPU. Do not present physics benchmark
 rates as full PPO rates. Research collection covers rollout setup, decisions,
 physics, rewards, episode resets and GAE; replay is timed separately.
 
+## Learner Configuration
+
+The plan's `learner` object owns all effective PPO settings. The compiler fills
+omitted values; CLI overrides take precedence for new experiments. CLI names
+replace underscores with hyphens (for example `--gae-lambda` and `--ent-coef`).
+
+| Field | Default | Valid Values |
+| --- | --- | --- |
+| `hidden_dim` | 256 | Positive integer; trainer maximum 4096 |
+| `lr` | 0.0003 | Finite, positive |
+| `epochs` | 4 | Positive integer |
+| `minibatch_size` | 1024 | Positive integer |
+| `gamma` | 0.99 | Finite, 0 through 1 inclusive |
+| `gae_lambda` | 0.95 | Finite, 0 through 1 inclusive |
+| `clip_eps` | 0.2 | Finite, strictly between 0 and 1 |
+| `vf_coef` | 0.5 | Finite, nonnegative |
+| `ent_coef` | 0.01 | Finite, nonnegative; zero disables entropy regularization |
+| `max_grad_norm` | 0.5 | Finite, positive |
+
+`clip_eps` controls both policy-ratio and value clipping, preserving the original
+PPO behavior. Positive `ent_coef` encourages stochastic exploration, not faster
+deterministic convergence. GAE and optimization consume the resolved settings
+directly, not the legacy `FastRLAgent` class constants. No hot reload is supported.
+
+The resolved experiment and `config.json` options record every effective value.
+Run metadata, `latest.pt` and retained policy snapshots additionally include
+`metadata.learner_config`; `metadata.learner` remains the controller-mode label.
+The resolved plan hash includes learner settings. Resume rejects changed values;
+use `--initialize` for a new experiment with compatible weights and a new optimizer.
+Older checkpoints may omit the newly configurable fields: resume verifies the
+original hash and applies the established defaults before comparison. Historical
+manual edits to unrecorded class constants cannot be reconstructed automatically.
+
+Rosie submission exposes the same settings, including single-variable sweeps.
+Keep training/evaluation conditions fixed across trials and compare several seeds
+at equal transition budgets where possible; changing worlds/rollout changes the
+experience represented by an update. Sweep support does not automatically create
+a grid or change the plan's seed.
+
 ## Collection Profiling
 
 Profiling is opt-in and does not change the experiment/checkpoint contract.
@@ -196,10 +235,14 @@ training flags have no implicit migration aliases.
   The compiler produces one `minecraft_sim_experiment`, version 1, with no
   unresolved authoring references. Config uses `experiment`, not an authored plan
   copied alongside repeated environment defaults.
-- Curricula are optional, editable experiment data, not test fixtures. Do not add
-  per-preset assertions or read installed curriculum files in automated tests.
-  Use test-owned plans for compiler, sampler, training and submission behavior;
-  changing or emptying the curricula directory must not break those tests.
+- All files under `simulator/setups/` are editable experiment data, not test
+  fixtures. Do not read those arenas, environments, policies or curricula in
+  automated tests, including implicitly through the trainer's default plan.
+  Use inline test-owned definitions or the dedicated JSON fixtures under
+  `simulator/tests/setups/`; `_test_plans.py` owns shared test-plan references.
+  Temporary fake checkouts may create their own setup trees to test discovery
+  and submission. Changing or emptying the real setups directory must not break
+  automated tests; avoid per-preset assertions.
   For an explicit one-time check, run
   `python -m simulator.training.validate_plans [file-or-folder ...]` from the
   project root. With no paths, it recursively checks the curricula directory;
@@ -326,6 +369,11 @@ Implement `act(observations, indices=None)`, `reset(mask)`, `state_dict`,
 actions `[N,H]`; indices address persistent slots within the full world count.
 Reset masks always span the full count. State must be `weights_only`-safe.
 Controllers use contract feature scales and semantic choices, not preset indices.
+Observation offsets count expanded columns via `contract.observation_width`, not
+descriptor indices. Builtins undo nonzero scale and decode one-hot categories;
+required features with an all-zero unknown encoding raise rather than guess.
+Clipped scalar features remain clipped; controllers cannot recover discarded
+values. Custom controllers must follow the same expanded layout.
 Module factories execute local Python: only configure trusted code.
 
 Each world's opponent and learner side are sampled per episode and held fixed
@@ -333,6 +381,36 @@ until it ends. Only learner transitions reach PPO. Frozen controllers use local
 sampling generators rather than consuming the learner's RNG. The built-in
 fighter requires target distance/yaw/pitch-error features; shielding and explicit
 axe/sword switching are opt-in options with validated prerequisites.
+
+Additional scripted controllers:
+
+- `random_walk` uses `self.yaw_fraction` and all eight `arena.ray_world_*`
+  features (50-block normalized distances) to choose among all eight non-neutral
+  movement choices. `change_interval` defaults to 20 ticks (integer 1..1,000,000);
+  `wall_margin` defaults to 1.25 blocks (finite, strictly between 0 and 10).
+  Resample when the interval expires or a wall blocks the current direction;
+  if every direction is obstructed, choose the greatest reported clearance.
+  It never attacks, jumps, sprints or uses a shield; those heads require a
+  false choice when present. Each actor owns a `SeedSequence([seed, actor])`
+  generator. Checkpoints save generator state, direction and remaining ticks.
+  Selective reset clears direction/timer without rewinding any actor's RNG;
+  sub-batch order does not change an actor's random sequence.
+- `stationary_melee` uses the basic fighter's aiming, attack timing and optional
+  shields/weapon selection, but always selects neutral movement. Its only
+  options are `attack_interval`, `melee_distance`, `shield`, `axe_slot` and
+  `sword_slot` with the same defaults/prerequisites as `basic_melee`.
+- `tactical_melee` accepts the basic fighter's options plus `style` (default
+  `evasive`). `evasive` retreats below `melee_distance - 0.3`, circles within
+  0.8 blocks beyond melee distance and approaches beyond that. `aggressive`
+  presses forward even in melee range, sprints when enabled and pulses jump
+  on nearby attack intervals if the policy allows it. `patient` requires
+  `self.attack_charge`, retreats below 95% charge and approaches/circles when
+  charged; it suppresses uncharged attacks. Evasive/patient need backward,
+  left and right choices. They reuse the base fighter's checkpointed timers.
+
+These controllers are also available in independent live duels. Controller
+requirements remain contract-dependent: required observations and action choices
+must exist in the selected policy layout or the duel is rejected before startup.
 
 Stage `controls.fixed` maps head names to semantic values, e.g.
 `{"attack":false,"movement":"neutral","weapon":0}`. Omitted heads remain learned.
@@ -397,6 +475,16 @@ conditions to that named stage, regardless of which stage is currently training:
   }
 }
 ```
+
+For a held-out opponent panel, reserve distinct opponent IDs/mixtures exclusively
+for evaluation and do not reference their results in advancement criteria.
+Separate suites produce separate win rates; fixed stage conditions/seeds make
+curves comparable across curriculum changes. Global suites also run during early
+stages, providing a baseline, while their pinned controls remain independent of
+the learner's current constraints. Synchronous evaluation consumes wall time but
+never PPO samples; do not interpret scripted-style success as human-play parity.
+Use test-owned plans to verify separation and RNG isolation, not assertions over
+editable curricula. The authored advanced example is opt-in validation input.
 
 Inherited suites accept condition changes only inside `overrides`: `environment`,
 `opponents`, `controls`, `task_override`, `spawns` and `equipment`. Controls merge
@@ -629,7 +717,10 @@ The low-level concrete fixture adapter still reads historical
 supplied; this is not the authoring contract. Record resolved settings and
 `reward_semantics` in checkpoint metadata.
 Changed weights or semantics require a new run, not incompatible resume.
-Rebuild older native libraries for reward ABI 2; ABI 1 is rejected explicitly.
+Rebuild older native libraries for reward ABI 3; ABI 1/2 are rejected explicitly.
+The optional combat-event and win-speed weights default to zero. The expanded
+layout has nine base inputs, ten base totals (including shield blocks), five
+shaping inputs/totals and fifteen per-player step contributions.
 
 - Damage rewards are `doing_damage * health_removed / 20` for attackers and
   `taking_damage * health_removed / 20` for targets. Weights specify points per
@@ -641,6 +732,20 @@ Rebuild older native libraries for reward ABI 2; ABI 1 is rejected explicitly.
 - `blocked_with_shield` rewards actual non-axe blocks only. Axe hits,
   including disables, earn no block bonus. Held shields alone earn nothing;
   blocked hits earn neither damage reward nor damage penalty.
+- `missed_attack` pays its signed weight per attempted swing with no player
+  target, including block hits. Normally use a small negative weight. Player
+  contact rejected by immunity, absorption-only hits and shield blocks are not
+  misses. Suppressed inputs (miss cooldown, using a shield, dead actors) do not
+  count as attempted swings. There is no per-episode cap.
+- `shield_disabled` pays its weight to the attacker once per actual disable of
+  an active shield. It is not paid for weapon selection, ordinary axe hits,
+  hitting an already-disabled shield or ticks of remaining shield cooldown.
+  A later successful disable can pay again; there is no per-episode cap.
+- `win_speed` pays once on a win, in addition to `won_duel`, as
+  `weight * clamp(1 - elapsed_ticks / max_ticks, 0, 1)`. Use the completed tick
+  count and current episode limit, including stage/CLI overrides. Losses,
+  simultaneous losses and timeouts pay zero. A win on the final tick has zero
+  speed bonus. Reset restarts elapsed time; no per-tick time penalty is added.
 - Apply terminal win/loss and timeout/no-damage penalties once. Simultaneous
   losers both lose, not win. Shaping uses `good_aim`, `proximity`, `pitch_control`,
   `aim_hold` and `extreme_pitch_penalty` as per-player episode budgets, not
@@ -648,7 +753,8 @@ Rebuild older native libraries for reward ABI 2; ABI 1 is rejected explicitly.
   `aim_hold: 2` pays at most +2 over a full episode, whether its limit is 100 or
   1000 ticks. Negative weights bound total penalties. Early termination leaves
   the remainder unpaid. CLI episode-limit overrides use the same normalization.
-  Damage/block/win/loss/timeout rewards are not divided by episode length.
+  Event rewards are not divided by episode length; only `win_speed` scales its
+  one-time win bonus by the remaining fraction of the episode limit.
 
 Authored task example, with other rewards disabled:
 
@@ -929,12 +1035,14 @@ incompatible checkpoint layouts, unsupported controllers and invalid scripted
 options fail before the service starts.
 
 Each fighter is `{"type":"checkpoint","path":"...","name":"..."}` or
-`{"type":"scripted","controller":"basic_melee","options":{},"name":"..."}`;
-`stationary_target` is the other built-in script. Checkpoint paths are relative
-to the duel file unless absolute. Each controller sees only its own observation
-row; scripted state resets when the request session changes. Controllers keep
-independent fixed controls/RNG, and `/info.fighters` carries readable provenance.
-Live configs do not run self-play pools, curricula or arbitrary Python factories.
+`{"type":"scripted","controller":"...","options":{},"name":"..."}`.
+Built-in scripts are `stationary_target`, `basic_melee`, `stationary_melee`,
+`tactical_melee` and `random_walk`; options follow each controller's definition
+above. Checkpoint paths are relative to the duel file unless absolute. Each
+controller sees only its own observation row; scripted state resets when the
+request session changes. Controllers keep independent fixed controls/RNG, and
+`/info.fighters` carries readable provenance. Live configs do not run self-play
+pools, curricula or arbitrary Python factories.
 Legacy positional-checkpoint serving remains unchanged; choose it or `--duel`,
 not both. Optional `max_ticks` overrides round length (integer 1..1,000,000);
 it does not modify the cached environment or a checkpoint.
@@ -992,6 +1100,10 @@ pass does not exercise CUDA; successful training does not prove combat fidelity.
 Real-game conformance captures remain required.
 
 ## Extension Recipes
+
+Use the [contribution playbook](../../CONTRIBUTING.md) for the cross-component
+file/symbol lookup, source-derived mechanics, controller additions and state
+lifecycle. The recipes below remain the local contract reference.
 
 Start with configuration: existing feature names, head choices/order, terrain,
 loadouts and weights need experiment JSON, not another preset or mod code.

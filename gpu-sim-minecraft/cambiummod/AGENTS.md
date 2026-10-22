@@ -241,10 +241,15 @@ are created. World terrain is not edited.
 Launching invokes the configured local interpreter/repository with Rosie action
 `local --duel <file> --offline`; CPU inference uses a free loopback port and no
 native simulator library. `/simrosie local` starts the last saved arena setup.
-Basic melee options cover attack/strafe intervals, melee distance, strafe,
-sprint, shield and optional zero-based axe/sword slots; unavailable semantic
-features/actions are rejected by the service. Stationary target requires no
-options. No arbitrary Python factories or training opponent pools are executed.
+Scripted controllers include Basic melee, Stationary melee, Tactical melee,
+Random walk and Stationary target. Basic melee options cover attack/strafe
+intervals, melee distance, strafe, sprint, shield and optional zero-based
+axe/sword slots. Stationary melee keeps attack timing/aim/equipment options but
+does not move. Tactical melee adds evasive/aggressive/patient style selection;
+Random walk exposes direction-change interval and wall margin. Unsupported
+features/actions are rejected by the service for the selected policy contract.
+Stationary target requires no options. No arbitrary Python factories or training
+opponent pools are executed.
 
 Cold startup reports PyTorch import and fighter loading with elapsed time.
 Online `/simrosie duel` still reads remote metadata; the library path never

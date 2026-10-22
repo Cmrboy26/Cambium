@@ -23,6 +23,12 @@
 Read the applicable guide before working in a component. This root guide applies
 throughout the repository; component guides add local implementation references.
 
+Use the [contribution playbook](CONTRIBUTING.md) for source-derived mechanics,
+observations/actions, controllers, state lifecycle, rewards and verification.
+For setup-only authoring, load the workspace's
+[GPU simulator setup skill](../.github/skills/gpu-sim-setup/SKILL.md) before
+changing definitions. It is also available as `/gpu-sim-setup` in supporting clients.
+
 | Scope | Guide |
 | --- | --- |
 | Native physics, CPU/CUDA, recording comparison | [simulator/AGENTS.md](simulator/AGENTS.md) |
@@ -79,9 +85,10 @@ not a fully GPU-resident PPO pipeline.
 	file containing them. The compiler produces one self-contained resolved
 	experiment for training, checkpoints and the dashboard.
 - Training plans provide scripted/frozen checkpoint/self-play opponent pools, constrained
-	curricula and reset-time scenario sampling. The equipment policy uses a fixed set of
-	78 named features, including shield presence, own slot metadata and visible
-	opponent equipment (not hidden opponent inventory).
+	curricula and reset-time scenario sampling. The shared catalogue defines 89
+	named features, including world-axis velocity in blocks per tick; relative
+	velocity is opponent minus self. Equipment features include shield presence,
+	own slot metadata and visible opponent equipment (not hidden opponent inventory).
 	Legacy 22/31-feature presets remain isolated for historical artifact readers
 	and regression fixtures, not a second public training configuration path.
 	Version-1 authoring plans must be rewritten; old checkpoint inference/replay

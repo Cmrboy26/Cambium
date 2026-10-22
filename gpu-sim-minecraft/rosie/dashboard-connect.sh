@@ -5,7 +5,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     printf 'Usage: %s [TRAINING_JOB_ID]\n' "$0"
     printf 'Open the Rosie dashboard locally; no training job is required.\n'
     printf 'By default, host it on the management node. An explicit job ID uses that allocation.\n'
-    printf 'Set ROSIE_PROJECT_DIR for a nonstandard remote gpu-sim-minecraft checkout.\n'
+    printf 'When connecting from another computer without a job ID, set ROSIE_PROJECT_DIR to the remote checkout.\n'
     exit 0
 fi
 if [[ "$#" -gt 1 ]]; then
@@ -89,7 +89,11 @@ REMOTE_INFO="$(ssh -T -l "$SSH_USER" "$SSH_JUMP" "bash -s -- $(printf '%q' "$JOB
 set -euo pipefail
 job_id="${1:-}"
 if [[ -z "$job_id" ]]; then
-    work_dir="${2:-$HOME/minecraftlol/Cambium/gpu-sim-minecraft}"
+    work_dir="${2:-}"
+    if [[ -z "$work_dir" ]]; then
+        echo 'ERROR: Set ROSIE_PROJECT_DIR to the remote gpu-sim-minecraft checkout, or run this script on Rosie to use its own checkout.' >&2
+        exit 1
+    fi
     if [[ "$work_dir" == "~/"* ]]; then
         work_dir="$HOME/${work_dir:2}"
     fi

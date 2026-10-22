@@ -13,7 +13,8 @@ import time
 import numpy as np
 import torch
 
-from backend.fast_rl_model import ActorCritic, FastRLAgent
+from backend.fast_rl_model import ActorCritic
+from simulator.training.compiler import LEARNER_DEFAULTS
 from simulator.training.contract import fingerprint
 from simulator.training.controllers import FrozenSelfPlayController, SelfPlayController, create_controller
 from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, actor_lost as _lost
@@ -311,18 +312,19 @@ class OpponentPool:
 
 
 @torch.no_grad()
-def collect(model, worlds, pool, observations, steps, device, fixed, profile=False):
+def collect(model, worlds, pool, observations, steps, device, fixed, profile=False, learner=None):
     timer = CollectionTimer(device, profile)
     timer.count("worlds", worlds.count)
     timer.count("steps", steps)
     with worlds.profile_collection(timer):
-        result = _collect(model, worlds, pool, observations, steps, device, fixed, timer)
+        result = _collect(model, worlds, pool, observations, steps, device, fixed, timer,
+                          LEARNER_DEFAULTS if learner is None else learner)
     if timer.enabled:
         result[0]["collection_profile"] = timer.finish()
     return result
 
 
-def _collect(model, worlds, pool, observations, steps, device, fixed, timer):
+def _collect(model, worlds, pool, observations, steps, device, fixed, timer, learner):
     with timer.phase("setup"):
         worlds.episode_metrics.begin_rollout()
         shape = (steps, worlds.count)
@@ -388,7 +390,7 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer):
     with timer.phase("gae", cuda=True):
         rollout["advantages"], rollout["returns"] = compute_gae(
             rollout["rewards"], rollout["values"], rollout["next_values"], rollout["terminated"],
-            rollout["truncated"], FastRLAgent.GAMMA, FastRLAgent.GAE_LAMBDA)
+            rollout["truncated"], learner["gamma"], learner["gae_lambda"])
     if reward_types is not None:
         rollout["reward_types"] = reward_types
     rollout["episode_metrics"] = {**worlds.episode_metrics.snapshot(),
@@ -520,7 +522,7 @@ def run(options, checkpoint=None):
     else:
         raise ValueError("Research training requires a plan")
     plan = resolve_plan(raw, base_dir=Path(options.plan).parent if options.plan else ROOT)
-    for name in ("hidden_dim", "lr", "epochs", "minibatch_size"):
+    for name in LEARNER_DEFAULTS:
         override = getattr(options, name)
         if override is not None:
             plan["learner"][name] = override
@@ -535,7 +537,10 @@ def run(options, checkpoint=None):
         options.max_ticks = saved.get("max_ticks_override")
     if checkpoint is not None:
         if checkpoint.get("research", {}).get("plan_hash") != plan_hash(plan):
-            raise ValueError("Training plan differs from checkpoint; use --initialize for a new experiment")
+            original = checkpoint.get("research", {}).get("plan")
+            if (original is None or plan_hash(original) != checkpoint["research"].get("plan_hash")
+                    or plan_hash(resolve_plan(original)) != plan_hash(plan)):
+                raise ValueError("Training plan differs from checkpoint; use --initialize for a new experiment")
         if checkpoint["research"]["world_count"] != options.envs:
             raise ValueError("Research resume requires the original world count")
     if options.replay_every and any(
@@ -599,7 +604,7 @@ def run(options, checkpoint=None):
         rounds = 0 if checkpoint is None else checkpoint.get("completed_rounds", 0)
         evaluations = saved.get("evaluations", {})
         config = vars(options).copy()
-        run_metadata = metadata(worlds.groups[0][1], options.hidden_dim)
+        run_metadata = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
         run_metadata.update(learner="opponent_pool", controls=stage["controls"],
                             experiment=deployment_summary(plan, stage, stage_index))
         (output / "config.json").write_text(json.dumps({"options": config, "metadata": run_metadata,
@@ -615,10 +620,12 @@ def run(options, checkpoint=None):
             fixed = fixed_indices(plan["policy"], stage["controls"])
             rollout, observations, endings, timeouts = collect(
                 model, worlds, pool, observations, options.rollout_steps, device, fixed,
-                profile=options.profile_every > 0 and update % options.profile_every == 0)
+                profile=options.profile_every > 0 and update % options.profile_every == 0,
+                learner=plan["learner"])
             collection_seconds = time.perf_counter() - start
             optimization_start = time.perf_counter()
-            statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs, options.minibatch_size))
+            statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs,
+                                                         options.minibatch_size, learner=plan["learner"]))
             optimization_seconds = time.perf_counter() - optimization_start
             if "reward_types" in rollout:
                 statistics["reward_types"] = rollout["reward_types"]
@@ -668,7 +675,7 @@ def run(options, checkpoint=None):
                     if rule.get("at_updates") != counter and not (rule.get("on_completion") and complete):
                         continue
                     scenario, _ = worlds.episode(0)
-                    manifest = metadata(worlds.groups[0][1], options.hidden_dim)
+                    manifest = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
                     manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario,
                                     scenario=scenario, learner="opponent_pool", controls=stage["controls"],
                                     experiment=deployment_summary(plan, stage, stage_index),
@@ -725,7 +732,7 @@ def run(options, checkpoint=None):
                 log.write(json.dumps(statistics, allow_nan=False) + "\n")
             if update % options.save_every == 0 or update == base_update + options.updates or completed:
                 scenario, _ = worlds.episode(0)
-                manifest = metadata(worlds.groups[0][1], options.hidden_dim)
+                manifest = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
                 manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario, scenario=scenario,
                                 learner="opponent_pool", controls=stage["controls"],
                                 experiment=deployment_summary(plan, stage, stage_index))

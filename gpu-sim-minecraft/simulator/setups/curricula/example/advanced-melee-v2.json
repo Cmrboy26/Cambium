@@ -1,0 +1,201 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "example-advanced-melee-v2",
+  "seed": 42,
+  "policy": "../../policies/example/advanced-melee-v2.json",
+  "environment": "../../environments/example/advanced-sword-duel.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024,
+              "ent_coef": 0.001},
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "walker": {"type": "scripted", "controller": "random_walk",
+               "options": {"change_interval": 20, "wall_margin": 1.25}},
+    "retaliator": {"type": "scripted", "controller": "stationary_melee",
+                   "options": {"attack_interval": 20}},
+    "fighter": {"type": "scripted", "controller": "basic_melee",
+                "options": {"attack_interval": 17, "strafe": true, "sprint": true}},
+    "guard": {"type": "scripted", "controller": "basic_melee",
+              "options": {"attack_interval": 17, "strafe": true, "shield": true,
+                          "axe_slot": 1, "sword_slot": 0}},
+    "past_learner": {"type": "frozen_self_play", "every_updates": 50},
+    "validation_pressure": {"type": "scripted", "controller": "tactical_melee",
+                "options": {"style": "aggressive", "attack_interval": 13, "sprint": true}},
+    "unseen_evasive": {"type": "scripted", "controller": "tactical_melee",
+                       "options": {"style": "evasive", "attack_interval": 11,
+                                   "melee_distance": 2.8, "strafe_interval": 11, "sprint": true}},
+    "unseen_pressure": {"type": "scripted", "controller": "tactical_melee",
+                        "options": {"style": "aggressive", "attack_interval": 9, "sprint": true}},
+    "unseen_patient": {"type": "scripted", "controller": "tactical_melee",
+                       "options": {"style": "patient", "attack_interval": 23,
+                                   "strafe_interval": 31, "shield": true,
+                                   "axe_slot": 1, "sword_slot": 0}}
+  },
+  "mixtures": {
+    "target": [{"id": "target", "weight": 1}],
+    "roaming": [{"id": "walker", "weight": 1}],
+    "retaliation": [{"id": "retaliator", "weight": 1}],
+    "combat": [{"id": "fighter", "weight": 1}],
+    "shield_combat": [{"id": "guard", "weight": 1}],
+    "mixed_training": [{"id": "fighter", "weight": 3}, {"id": "guard", "weight": 3},
+               {"id": "past_learner", "weight": 4}],
+    "scripted_training": [{"id": "fighter", "weight": 1}, {"id": "guard", "weight": 1}],
+    "pressure_validation": [{"id": "validation_pressure", "weight": 1}],
+    "heldout_evasive": [{"id": "unseen_evasive", "weight": 1}],
+    "heldout_pressure": [{"id": "unseen_pressure", "weight": 1}],
+    "heldout_patient": [{"id": "unseen_patient", "weight": 1}]
+  },
+  "evaluations": {
+    "heldout_evasive": {
+      "stage": "mixed", "overrides": {"opponents": "heldout_evasive"},
+      "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 2718
+    },
+    "heldout_pressure": {
+      "stage": "mixed", "overrides": {"opponents": "heldout_pressure"},
+      "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 3141
+    },
+    "heldout_patient": {
+      "stage": "mixed", "overrides": {"opponents": "heldout_patient"},
+      "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1618
+    }
+  },
+  "stages": [
+    {
+      "name": "aim",
+      "snapshots": [{"name": "aim-complete", "on_completion": true}],
+      "opponents": "target",
+      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false,
+                             "attack": false, "weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 100, "rewards": {"good_aim": 5, "aim_hold": 2}},
+      "evaluations": {
+        "aim_accuracy": {
+          "every_updates": 5, "worlds": 64, "episodes": 64, "seed": 1729
+        }
+      },
+      "advance": {
+        "evaluation": {
+          "suite": "aim_accuracy",
+          "metric": "reward_mean",
+          "at_least": 6.0
+        }
+      }
+    },
+    {
+      "name": "pursuit",
+      "snapshots": [{"name": "pursuit-complete", "on_completion": true}],
+      "opponents": "roaming",
+      "controls": {"fixed": {"weapon": 0, "shield": false}},
+      "task_override": {
+        "max_ticks": 600,
+        "rewards": {
+          "doing_damage": 10, "win_speed": 20, "episode_timeout": -5,
+          "no_damage_penalty": -10, "missed_attack": -0.05,
+          "good_aim": 0.5, "aim_hold": 0.25, "proximity": 1,
+          "pitch_control": 0.1, "extreme_pitch_penalty": -0.5
+        }
+      },
+      "evaluations": {
+        "pursuit_efficiency": {
+          "every_updates": 10, "worlds": 64, "episodes": 64, "seed": 1730,
+          "overrides": {"task_override": {"rewards": {"doing_damage": 10, "win_speed": 20}}}
+        }
+      },
+      "advance": {"all": [
+        {"evaluation": {"suite": "pursuit_efficiency", "metric": "reward_mean", "at_least": 20}},
+        {"evaluation": {"suite": "pursuit_efficiency", "metric": "win_rate", "at_least": 0.9}}
+      ]}
+    },
+    {
+      "name": "retaliation",
+      "snapshots": [{"name": "retaliation-complete", "on_completion": true}],
+      "opponents": "retaliation",
+      "controls": {"fixed": {"weapon": 0, "shield": false}},
+      "task_override": {
+        "max_ticks": 600,
+        "rewards": {
+          "doing_damage": 10, "taking_damage": -3, "won_duel": 50, "win_speed": 20,
+          "death": -25, "episode_timeout": -10, "no_damage_penalty": -10,
+          "missed_attack": -0.1, "good_aim": 0.5, "proximity": 0.5,
+          "pitch_control": 0.1, "extreme_pitch_penalty": -0.5
+        }
+      },
+      "evaluations": {
+        "retaliation_proficiency": {"every_updates": 10, "worlds": 64, "episodes": 64, "seed": 1731}
+      },
+      "advance": {"evaluation": {"suite": "retaliation_proficiency", "metric": "win_rate", "at_least": 0.85}}
+    },
+    {
+      "name": "moving_melee",
+      "snapshots": [{"name": "moving_melee-complete", "on_completion": true}],
+      "opponents": "combat",
+      "controls": {"fixed": {"weapon": 0, "shield": false}},
+      "task_override": {
+        "max_ticks": 900,
+        "rewards": {
+          "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "win_speed": 20,
+          "death": -25, "episode_timeout": -10, "no_damage_penalty": -10,
+          "missed_attack": -0.1, "good_aim": 0.25, "proximity": 0.25,
+          "pitch_control": 0.1, "extreme_pitch_penalty": -0.5
+        }
+      },
+      "evaluations": {
+        "moving_proficiency": {"every_updates": 10, "worlds": 64, "episodes": 64, "seed": 1732}
+      },
+      "advance": {"evaluation": {"suite": "moving_proficiency", "metric": "win_rate", "at_least": 0.75}}
+    },
+    {
+      "name": "shield_axe",
+      "snapshots": [{"name": "shield_axe-complete", "on_completion": true}],
+      "opponents": "shield_combat",
+      "controls": {"fixed": {}},
+      "task_override": {
+        "max_ticks": 900,
+        "rewards": {
+          "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "win_speed": 20,
+          "death": -25, "episode_timeout": -10, "no_damage_penalty": -10,
+          "missed_attack": -0.1, "shield_disabled": 2, "blocked_with_shield": 0.5,
+          "good_aim": 0.25, "proximity": 0.25, "pitch_control": 0.1,
+          "extreme_pitch_penalty": -0.5
+        }
+      },
+      "evaluations": {
+        "shield_proficiency": {"every_updates": 10, "worlds": 64, "episodes": 64, "seed": 1733}
+      },
+      "advance": {"evaluation": {"suite": "shield_proficiency", "metric": "win_rate", "at_least": 0.7}}
+    },
+    {
+      "name": "mixed",
+      "snapshots": [
+        {"name": "mixed-complete", "on_completion": true},
+        {"name": "mixed-half", "at_updates": 450}
+      ],
+      "opponents": "mixed_training",
+      "controls": {"fixed": {}},
+      "task_override": {
+        "max_ticks": 1200,
+        "rewards": {
+          "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "win_speed": 20,
+          "death": -25, "episode_timeout": -10, "no_damage_penalty": -10,
+          "missed_attack": -0.1, "shield_disabled": 2, "blocked_with_shield": 0.5,
+          "good_aim": 0.1, "proximity": 0.1, "pitch_control": 0.1,
+          "extreme_pitch_penalty": -0.5
+        }
+      },
+      "evaluations": {
+        "mixed_proficiency": {
+          "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1734,
+          "overrides": {"opponents": "scripted_training"}
+        },
+        "pressure_validation": {
+          "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1735,
+          "overrides": {"opponents": "pressure_validation"}
+        }
+      },
+      "advance": {"all": [
+        {"updates": 900},
+        {"evaluation": {"suite": "mixed_proficiency", "metric": "win_rate", "at_least": 0.75}},
+        {"evaluation": {"suite": "pressure_validation", "metric": "win_rate", "at_least": 0.8}}
+      ]}
+    }
+  ]
+}

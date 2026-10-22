@@ -5,9 +5,10 @@ Follow the repository [development guide](../AGENTS.md).
 ## Ownership
 
 - [fast_rl_model.py](fast_rl_model.py) provides the `ActorCritic` architecture for
-  standalone simulator training and policy inference. `FastRLAgent` also provides
-  PPO constants reused by the standalone trainer. The simulator does not run its
-  legacy agent loop.
+  standalone simulator training and policy inference. The standalone trainer's
+  resolved `learner` configuration owns PPO settings; `FastRLAgent` constants
+  belong only to the historical compatibility path. The simulator does not run
+  its legacy agent loop.
 - Default [reward weights](../simulator/training/reward_weights.json) belong to
   the training component, not this folder. Environment files can override
   individual weights; changed effective rewards require a compatible new run.

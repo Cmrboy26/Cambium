@@ -9,6 +9,11 @@ attack_interval (13), melee_distance (3 blocks), strafe (False),
 strafe_interval (20 ticks), sprint (False), shield (False), and optional
 axe_slot/sword_slot (explicit loadout slots, supplied together). Equipment
 behaviors require their relevant observations and controls, never guessed slots.
+stationary_melee retains aim/attacks/equipment without locomotion options.
+random_walk accepts change_interval (20 ticks) and wall_margin (1.25 blocks),
+using yaw/world rays and independent checkpointed RNG streams per actor.
+tactical_melee accepts basic_melee options plus style: evasive, aggressive or
+patient. These vary retreat/pressure/charge-based movement, not just timing.
 Checkpoint files are trusted standalone PPO archives, loaded with weights_only.
 Both shared-policy and opponent-pool checkpoints retain saved fixed controls.
 Self-play uses the bound learner's rollout-frozen weights and its own sampling RNG.
@@ -24,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 import numpy as np
 
-from simulator.training.contract import fingerprint, from_legacy, validate_contract
+from simulator.training.contract import fingerprint, from_legacy, observation_width, validate_contract
 
 if TYPE_CHECKING:
     import torch
@@ -163,6 +168,12 @@ class StationaryTargetController(_BatchedController):
         self._description.update(type="scripted", controller="stationary_target", options=self.options)
         self._heads = {head["name"]: (index, head["values"])
                        for index, head in enumerate(self.contract["actions"])}
+        self._features = {}
+        offset = 0
+        for observation in self.contract["observations"]:
+            if observation["scale"] != 0:
+                self._features.setdefault(observation["feature"], (offset, observation))
+            offset += observation_width(observation)
         neutral = []
         for name, (_, values) in self._heads.items():
             if name == "movement":
@@ -174,6 +185,30 @@ class StationaryTargetController(_BatchedController):
             else:
                 neutral.append(values.index(False) if False in values else 0)
         self._neutral = np.asarray(neutral, dtype=np.int64)
+
+    def _require_feature(self, name):
+        if name not in self._features:
+            raise ValueError(f"{self._description['controller']} requires a nonzero-scale feature: {name}")
+
+    def _require_choice(self, name, value):
+        if name not in self._heads or value not in self._heads[name][1]:
+            raise ValueError(f"{self._description['controller']} requires action {name} with choice {value!r}")
+
+    def _feature(self, observations, name):
+        index, descriptor = self._features[name]
+        if descriptor.get("encoding") == "one_hot":
+            values = observations[:, index:index + observation_width(descriptor)] / descriptor["scale"]
+            if (not np.isclose(values.sum(axis=1), 1).all()
+                    or not (np.isclose(values, 0) | np.isclose(values, 1)).all()):
+                raise ValueError(f"Cannot recover required controller feature {name} from one_hot inputs")
+            return np.asarray(descriptor["categories"], dtype=np.float64)[values.argmax(axis=1)]
+        return observations[:, index].astype(np.float64) / descriptor["scale"]
+
+    def _set(self, actions, name, values):
+        if name in self._heads:
+            column, choices = self._heads[name]
+            for index, choice in enumerate(choices):
+                actions[np.asarray(values) == choice, column] = index
 
     def act(self, observations, indices=None):
         observations, _ = self._batch(observations, indices)
@@ -197,10 +232,6 @@ class BasicMeleeController(StationaryTargetController):
         self.strafe = _boolean(options, "strafe")
         self.sprint = _boolean(options, "sprint")
         self.shield = _boolean(options, "shield")
-        self._features = {}
-        for index, observation in enumerate(self.contract["observations"]):
-            if observation["scale"] != 0:
-                self._features.setdefault(observation["feature"], (index, observation["scale"]))
         for feature in ("target.distance_fraction", "target.yaw_error", "target.pitch_error"):
             self._require_feature(feature)
         if "movement" in self._heads:
@@ -227,24 +258,6 @@ class BasicMeleeController(StationaryTargetController):
             self._require_feature("opponent.shield_using")
             self._require_feature("opponent.shield_disabled_observed")
         self._ticks = np.zeros(self.count, dtype=np.int64)
-
-    def _require_feature(self, name):
-        if name not in self._features:
-            raise ValueError(f"basic_melee requires a nonzero-scale feature: {name}")
-
-    def _require_choice(self, name, value):
-        if name not in self._heads or value not in self._heads[name][1]:
-            raise ValueError(f"basic_melee requires action {name} with choice {value!r}")
-
-    def _feature(self, observations, name):
-        index, scale = self._features[name]
-        return observations[:, index].astype(np.float64) / scale
-
-    def _set(self, actions, name, values):
-        if name in self._heads:
-            column, choices = self._heads[name]
-            for index, choice in enumerate(choices):
-                actions[np.asarray(values) == choice, column] = index
 
     def act(self, observations, indices=None):
         observations, indices = self._batch(observations, indices)
@@ -303,6 +316,137 @@ class BasicMeleeController(StationaryTargetController):
                 or any(type(tick) is not int or not 0 <= tick < period for tick in ticks)):
             raise ValueError("Invalid per-actor controller ticks")
         self._ticks[:] = ticks
+
+
+class StationaryMeleeController(BasicMeleeController):
+    def __init__(self, contract, count, seed=1, options=None):
+        options = _options({} if options is None else options,
+                           ("attack_interval", "melee_distance", "shield", "axe_slot", "sword_slot"))
+        super().__init__(contract, count, seed, options)
+        self._description.update(controller="stationary_melee")
+
+    def act(self, observations, indices=None):
+        actions = super().act(observations, indices)
+        self._set(actions, "movement", np.full(len(actions), "neutral"))
+        return actions
+
+
+class TacticalMeleeController(BasicMeleeController):
+    def __init__(self, contract, count, seed=1, options=None):
+        options = deepcopy({} if options is None else options)
+        if not isinstance(options, dict):
+            raise ValueError("Tactical controller options must be an object")
+        self.style = options.pop("style", "evasive")
+        if self.style not in ("evasive", "aggressive", "patient"):
+            raise ValueError("Tactical style must be evasive, aggressive or patient")
+        super().__init__(contract, count, seed, options)
+        self.options = {**options, "style": self.style}
+        self._description.update(controller="tactical_melee", options=self.options)
+        if self.style != "aggressive":
+            for movement in ("backward", "left", "right"):
+                self._require_choice("movement", movement)
+        if self.style == "patient":
+            self._require_feature("self.attack_charge")
+            if "attack" in self._heads:
+                self._require_choice("attack", False)
+
+    def act(self, observations, indices=None):
+        observations, indices = self._batch(observations, indices)
+        ticks = self._ticks[indices].copy()
+        actions = super().act(observations, indices)
+        distance = self._feature(observations, "target.distance_fraction") * 10
+        near = distance <= self.melee_distance
+        lateral = np.where((ticks // self.strafe_interval) % 2 == 0, "left", "right")
+        if self.style == "aggressive":
+            movement = np.full(len(actions), "forward")
+            if self.sprint:
+                self._set(actions, "sprint", np.ones(len(actions), dtype=bool))
+            self._set(actions, "jump", near & (ticks % self.attack_interval == 0))
+        elif self.style == "evasive":
+            movement = np.where(distance < self.melee_distance - 0.3, "backward",
+                                np.where(distance > self.melee_distance + 0.8, "forward", lateral))
+        else:
+            charged = self._feature(observations, "self.attack_charge") >= 0.95
+            movement = np.where(charged, np.where(near, lateral, "forward"), "backward")
+            if "attack" in self._heads:
+                column, choices = self._heads["attack"]
+                actions[~charged, column] = choices.index(False)
+        self._set(actions, "movement", movement)
+        return actions
+
+
+class RandomWalkController(StationaryTargetController):
+    def __init__(self, contract, count, seed=1, options=None):
+        super().__init__(contract, count, seed)
+        self.options = _options({} if options is None else options, ("change_interval", "wall_margin"))
+        self._description.update(controller="random_walk", options=self.options)
+        self.change_interval = _integer(self.options.get("change_interval", 20), "change_interval", 1, 1_000_000)
+        self.wall_margin = self.options.get("wall_margin", 1.25)
+        if (type(self.wall_margin) not in (int, float) or not math.isfinite(self.wall_margin)
+                or not 0 < self.wall_margin < 10):
+            raise ValueError("wall_margin must be finite and strictly between 0 and 10 blocks")
+        self._movements = ("forward", "forward_right", "right", "backward_right",
+                           "backward", "backward_left", "left", "forward_left")
+        for movement in self._movements:
+            self._require_choice("movement", movement)
+        self._require_feature("self.yaw_fraction")
+        for angle in range(0, 360, 45):
+            self._require_feature(f"arena.ray_world_{angle}")
+        for name in ("attack", "jump", "sprint", "shield"):
+            if name in self._heads:
+                self._require_choice(name, False)
+        self._directions = np.zeros(self.count, dtype=np.int64)
+        self._remaining = np.zeros(self.count, dtype=np.int64)
+        self._generators = [np.random.default_rng(np.random.SeedSequence([self.seed, actor]))
+                            for actor in range(self.count)]
+
+    def act(self, observations, indices=None):
+        observations, indices = self._batch(observations, indices)
+        actions = np.tile(self._neutral, (len(observations), 1))
+        rays = np.column_stack([self._feature(observations, f"arena.ray_world_{angle}")
+                                for angle in range(0, 360, 45)]) * 50
+        yaw = self._feature(observations, "self.yaw_fraction") * 180
+        offsets = np.array([0, -45, -90, -135, 180, 135, 90, 45])
+        ray_indices = (np.floor((yaw[:, None] + offsets) / 45 + 0.5).astype(np.int64) % 8)
+        clearances = np.take_along_axis(rays, ray_indices, axis=1)
+        for row, actor in enumerate(indices):
+            if self._remaining[actor] == 0 or clearances[row, self._directions[actor]] < self.wall_margin:
+                choices = np.flatnonzero(clearances[row] >= self.wall_margin)
+                self._directions[actor] = (self._generators[actor].choice(choices) if len(choices)
+                                           else clearances[row].argmax())
+                self._remaining[actor] = self.change_interval
+            self._remaining[actor] -= 1
+        self._set(actions, "movement", np.asarray(self._movements)[self._directions[indices]])
+        return actions
+
+    def reset(self, mask):
+        selected = self._mask(mask)
+        self._directions[selected] = 0
+        self._remaining[selected] = 0
+
+    def state_dict(self):
+        return {**super().state_dict(), "directions": self._directions.tolist(),
+                "remaining": self._remaining.tolist(),
+                "generators": [deepcopy(generator.bit_generator.state) for generator in self._generators]}
+
+    def load_state_dict(self, state):
+        self._state(state, ("directions", "remaining", "generators"))
+        for name, maximum in (("directions", 8), ("remaining", self.change_interval)):
+            values = state[name]
+            if (not isinstance(values, list) or len(values) != self.count
+                    or any(type(value) is not int or not 0 <= value < maximum for value in values)):
+                raise ValueError(f"Invalid per-actor random_walk {name}")
+        if not isinstance(state["generators"], list) or len(state["generators"]) != self.count:
+            raise ValueError("Invalid random_walk generators")
+        generators = [np.random.default_rng() for _ in range(self.count)]
+        try:
+            for generator, saved in zip(generators, state["generators"]):
+                generator.bit_generator.state = deepcopy(saved)
+        except (ValueError, TypeError, KeyError) as error:
+            raise ValueError("Invalid random_walk generator state") from error
+        self._directions[:] = state["directions"]
+        self._remaining[:] = state["remaining"]
+        self._generators = generators
 
 
 class _PolicyController(_BatchedController):
@@ -577,3 +721,6 @@ def create_controller(definition, contract, count, device="cpu", seed=1, *, lear
 
 register_controller("stationary_target", StationaryTargetController)
 register_controller("basic_melee", BasicMeleeController)
+register_controller("stationary_melee", StationaryMeleeController)
+register_controller("tactical_melee", TacticalMeleeController)
+register_controller("random_walk", RandomWalkController)

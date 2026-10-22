@@ -556,6 +556,39 @@ class SnapshotChecks(unittest.TestCase):
 
 
 class ResearchChecks(unittest.TestCase):
+    def test_learner_overrides_reach_training_metadata_and_resume(self):
+        from simulator.training.ppo import compute_gae
+        values = {"gamma": 0.8, "gae_lambda": 0.7, "clip_eps": 0.15,
+                  "vf_coef": 0.3, "ent_coef": 0.025, "max_grad_norm": 0.8}
+        flags = [item for name, value in values.items() for item in ("--" + name.replace("_", "-"), str(value))]
+        output = self.directory / "learner-settings"
+        with patch("simulator.training.research.compute_gae", wraps=compute_gae) as gae, \
+                patch("simulator.training.research.optimize", wraps=optimize) as optimizer, \
+                contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, *flags, "--updates", "1", "--output", str(output)])
+        self.assertEqual(gae.call_args.args[-2:], (values["gamma"], values["gae_lambda"]))
+        settings = optimizer.call_args.kwargs["learner"]
+        for key, value in values.items():
+            self.assertEqual(settings[key], value)
+        config = json.loads((output / "config.json").read_text())
+        checkpoint = torch.load(output / "latest.pt", weights_only=True)
+        self.assertEqual(config["metadata"]["learner_config"], settings)
+        self.assertEqual(checkpoint["metadata"]["learner_config"], settings)
+        self.assertEqual(checkpoint["research"]["plan"]["learner"], settings)
+        for key, value in values.items():
+            self.assertEqual(config["options"][key], value)
+            self.assertEqual(checkpoint["config"][key], value)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library, "--updates", "1"])
+        resumed = torch.load(output / "latest.pt", weights_only=True)
+        self.assertEqual(resumed["metadata"]["learner_config"], settings)
+        with self.assertRaisesRegex(ValueError, "differs from checkpoint"), contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library, "--gamma", "0.9"])
+        for key, value in (("gamma", "1.1"), ("gae-lambda", "-0.1"), ("clip-eps", "0"),
+                           ("vf-coef", "-1"), ("ent-coef", "nan"), ("max-grad-norm", "0")):
+            with self.subTest(key=key), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                arguments(["--" + key, value])
+
     def setUp(self):
         torch.set_num_threads(1)
         self.directory = ROOT / "simulator/training/runs" / f"test-research-{uuid4().hex}"
@@ -568,6 +601,47 @@ class ResearchChecks(unittest.TestCase):
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4",
                       "--hidden-dim", "8", "--rollout-steps", "3", "--epochs", "1",
                       "--minibatch-size", "8", "--max-ticks", "2", "--save-every", "1"]
+
+    def test_configured_ppo_coefficients_control_loss_and_gradient_clipping(self):
+        from simulator.training.compiler import LEARNER_DEFAULTS
+        model = ActorCritic(3, 8, action_sizes={"attack": 2})
+        observations = torch.zeros(2, 3)
+        actions = torch.tensor([[0], [1]])
+        with torch.no_grad():
+            log_probs, values, _ = model.evaluate_policy_actions(observations, actions)
+        rollout = {"observations": observations.unsqueeze(1), "actions": actions.unsqueeze(1),
+                   "log_probs": (log_probs - np.log(1.5)).unsqueeze(1), "values": (values + 1).unsqueeze(1),
+                   "advantages": torch.tensor([[1.], [-1.]]), "returns": values.unsqueeze(1)}
+        optimizer = torch.optim.SGD(model.parameters(), lr=0)
+        for clipping, value_coef, entropy_coef, norm in ((.1, .25, .03, .8), (.3, .75, 0, .2)):
+            settings = {**LEARNER_DEFAULTS, "clip_eps": clipping, "vf_coef": value_coef,
+                        "ent_coef": entropy_coef, "max_grad_norm": norm}
+            with patch("torch.nn.utils.clip_grad_norm_", wraps=torch.nn.utils.clip_grad_norm_) as clip:
+                result = optimize(model, optimizer, rollout, 1, 2, learner=settings)
+            self.assertAlmostEqual(result["policy_loss"], (.5 - clipping) / 2, places=5)
+            self.assertAlmostEqual(result["value_loss"], .5 * (1 - clipping) ** 2, places=5)
+            self.assertAlmostEqual(result["loss"], result["policy_loss"] + value_coef * result["value_loss"]
+                                   - entropy_coef * result["entropy"], places=5)
+            self.assertEqual(clip.call_args.args[1], norm)
+
+    def test_legacy_learner_defaults_resume_without_allowing_parameter_changes(self):
+        from simulator.training.compiler import LEARNER_DEFAULTS
+        output = self.directory / "legacy-learner"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(output)])
+        checkpoint = torch.load(output / "latest.pt", weights_only=True)
+        checkpoint["metadata"].pop("learner_config")
+        for name in set(LEARNER_DEFAULTS) - {"hidden_dim", "lr", "epochs", "minibatch_size"}:
+            checkpoint["research"]["plan"]["learner"].pop(name)
+            checkpoint["config"].pop(name)
+        checkpoint["research"]["plan_hash"] = plan_hash(checkpoint["research"]["plan"])
+        torch.save(checkpoint, output / "latest.pt")
+        with self.assertRaisesRegex(ValueError, "differs from checkpoint"), contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library, "--gamma", "0.5"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library, "--updates", "1"])
+        resumed = torch.load(output / "latest.pt", weights_only=True)
+        self.assertEqual(resumed["metadata"]["learner_config"]["gamma"], LEARNER_DEFAULTS["gamma"])
 
     def test_stage_local_evaluation_cadence_resume_advancement_and_timing(self):
         plan = short_plan()
@@ -870,6 +944,49 @@ class ResearchChecks(unittest.TestCase):
         self.assertEqual(result["episodes"], 3)
         self.assertEqual(result["win_rate"], 0)
         self.assertTrue(np.isfinite(result["reward_mean"]))
+
+    def test_heldout_styles_never_train_and_preserve_roaming_rng(self):
+        raw = short_plan()
+        raw["opponents"]["walker"] = {"type": "scripted", "controller": "random_walk",
+                                       "options": {"change_interval": 2}}
+        raw["mixtures"]["roaming"] = [{"id": "walker", "weight": 1}]
+        styles = ("evasive", "aggressive", "patient")
+        for style in styles:
+            raw["opponents"][style] = {"type": "scripted", "controller": "tactical_melee",
+                                       "options": {"style": style}}
+            raw["mixtures"][style] = [{"id": style, "weight": 1}]
+        for stage in raw["stages"]:
+            stage["opponents"] = "roaming"
+        self.path.write_text(json.dumps(raw))
+        baseline = self.directory / "unmonitored"
+        monitored = self.directory / "heldout-styles"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "2", "--output", str(baseline)])
+        raw["evaluations"] = {style: {
+            "stage": "combat", "every_updates": 1, "worlds": 2, "episodes": 3, "seed": 100 + index,
+            "overrides": {"opponents": style},
+        } for index, style in enumerate(styles)}
+        resolved = resolve_plan(raw)
+        for suite in resolved["evaluations"].values():
+            self.assertEqual(suite["controls"], resolved["stages"][1]["controls"])
+            self.assertNotEqual(suite["controls"], resolved["stages"][0]["controls"])
+        self.path.write_text(json.dumps(raw))
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "2", "--output", str(monitored)])
+        first = torch.load(baseline / "latest.pt", weights_only=True)
+        second = torch.load(monitored / "latest.pt", weights_only=True)
+        for name in first["model"]:
+            torch.testing.assert_close(first["model"][name], second["model"][name], rtol=0, atol=0)
+        self.assertEqual(first["research"]["pool"], second["research"]["pool"])
+        for line in (monitored / "metrics.jsonl").read_text().splitlines():
+            row = json.loads(line)
+            self.assertEqual(set(row["evaluations"]), set(styles))
+            self.assertEqual(set(row["training_opponents"]), {"walker"})
+            for result in row["evaluations"].values():
+                self.assertEqual(result["episodes"], 3)
+                self.assertEqual(result["worlds"], 2)
+                self.assertGreaterEqual(result["win_rate"], 0)
+                self.assertLessEqual(result["win_rate"], 1)
 
     def test_evaluation_counts_real_combat_wins(self):
         plan = resolve_plan(short_plan())

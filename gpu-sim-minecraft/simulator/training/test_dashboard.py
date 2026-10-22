@@ -97,13 +97,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 class Node {
-    constructor() {this.children=[]; this.dataset={}; this.attributes={}; this.style={setProperty(name,value){this[name]=value;}}; this.hidden=false; this.value='run';}
+    constructor() {this.children=[]; this.dataset={}; this.attributes={}; this.listeners=new Map(); this.style={setProperty(name,value){this[name]=value;}}; this.hidden=false; this.value='run';}
     set textContent(value) {this.text=String(value); this.children=[];}
     get textContent() {return this.text ?? this.children.map(child=>child.textContent).join(' ');}
     set innerHTML(value) {throw new Error('Untrusted content must never use innerHTML');}
     append(...children) {this.text=undefined; this.children.push(...children);}
     replaceChildren(...children) {this.text=undefined; this.children=children;}
-    addEventListener() {}
+    addEventListener(name,handler) {this.listeners.set(name,handler);}
+    removeEventListener(name,handler) {assert.equal(this.listeners.get(name),handler);this.listeners.delete(name);}
     setAttribute(name,value) {this.attributes[name]=value;}
 }
 const nodes = new Map();
@@ -112,11 +113,18 @@ const document = {getElementById(id) {if (!nodes.has(id)) nodes.set(id,new Node(
     addEventListener() {}, dispatchEvent() {}};
 const context = vm.createContext({document, Intl, CustomEvent:class {}, setInterval() {}, cancelAnimationFrame() {}});
 vm.runInContext(fs.readFileSync(path.join(process.argv[1],'dashboard.js'),'utf8'), context);
+for (const [name,label] of [['missed_attack','Missed attack'],['shield_disabled','Shield disabled'],['win_speed','Win speed']]) {
+    assert.equal(vm.runInContext(`rewardTypes.find(([key])=>key==='${name}')?.[1]`, context),label);
+}
 const conditionCharts=[];
 context.Chart=class {
-    constructor(canvas,config) {this.canvas=canvas; this.data=config.data; this.options=config.options; this.plugins=config.plugins; this.destroyed=false; conditionCharts.push(this);}
-    update() {}
-    destroy() {this.destroyed=true;}
+    constructor(canvas,config) {this.canvas=canvas; this.ctx={save(){}}; this.data=config.data; this.options=config.options; this.plugins=config.plugins; this.destroyed=false; conditionCharts.push(this);for(const plugin of this.plugins)plugin.afterInit?.(this);}
+    update() {this.ctx.save();}
+    destroy() {
+        for(const plugin of this.plugins)plugin.beforeDestroy?.(this);
+        this.canvas=null;this.ctx=null;this.destroyed=true;
+        for(const plugin of this.plugins)plugin.afterDestroy?.(this);
+    }
 };
 const text = id=>document.getElementById(id).textContent;
 const hidden = id=>document.getElementById(id).hidden;
@@ -191,6 +199,11 @@ assert.equal(text('milestone-name'),'fight','Live refresh must preserve the brow
 document.getElementById('milestone-return').onclick();
 assert.equal(text('milestone-name'),'aim');
 assert.equal(conditionCharts.every(chart=>chart.destroyed),true,'Returning to an update-only stage must release charts');
+assert.equal(vm.runInContext('milestoneCharts.size',context),0,'Chart destruction must finish clearing the stage cache');
+document.getElementById('milestone-next').onclick();
+vm.runInContext('renderCurriculum();',context);
+assert.ok(conditionCharts.slice(-2).every(chart=>chart.ctx),'Refreshing a revisited stage must not reuse destroyed contexts');
+document.getElementById('milestone-previous').onclick();
 assert.match(text('stage-context'),/Aim environment.*Flat.*target.*100%.*attack=false/);
 assert.match(text('config'),/Seed 17.*Learning rate 0.01/);
 assert.equal(hidden('experiment-details'),false);
@@ -639,8 +652,11 @@ assert.equal(prevented,4,'Right-clicks outside the legend must retain the native
 chart.visible=[false,false,false];
 vm.runInContext('soloLegend(chart,1);',context);
 assert.deepEqual(chart.visible,[false,true,false],'Soloing must also work when every series is hidden');
-vm.runInContext('soloLegend(chart,20); legendSolo.afterDestroy(chart);',context);
-assert.equal(chart.canvas.listeners.contextmenu,undefined,'Destroyed charts must release their handler');
+const canvas=chart.canvas;
+vm.runInContext('soloLegend(chart,20); legendSolo.beforeDestroy?.(chart); chart.canvas=null; legendSolo.afterDestroy?.(chart);',context);
+assert.equal(canvas.listeners.contextmenu,undefined,'Destroyed charts must release their handler before Chart.js clears the canvas');
+vm.runInContext('legendSolo.beforeDestroy?.(chart); legendSolo.afterDestroy?.(chart);',context);
+chart.canvas=canvas;
 chart.data.datasets=[{}];chart.visible=[true];
 vm.runInContext('soloLegend(chart,0);legendSolo.afterInit(chart);',context);
 assert.deepEqual(chart.visible,[true]);

@@ -15,12 +15,12 @@ import numpy as np
 import torch
 
 from backend.fast_rl_model import ActorCritic
-from simulator.training.contract import fingerprint, from_legacy, validate_contract
+from simulator.training.contract import FEATURES, fingerprint, from_legacy, project_observations, validate_contract
 from simulator.training.controllers import (
     BasicMeleeController, CheckpointController, Controller, CONTROLLER_REGISTRY, FrozenSelfPlayController,
     SelfPlayController, StationaryTargetController, checkpoint_sha256, create_controller, register_controller,
 )
-from simulator.training.environment import SCHEMA
+from simulator.training.environment import SCHEMA, SCHEMA_V2
 
 
 def policy(observations=None, actions=None):
@@ -44,8 +44,11 @@ def policy(observations=None, actions=None):
 
 def observations(contract, count=3, **features):
     result = np.zeros((count, contract["observation_dim"]), dtype=np.float32)
-    for index, descriptor in enumerate(contract["observations"]):
-        result[:, index] = np.asarray(features.get(descriptor["feature"], 0)) * descriptor["scale"]
+    catalogue = np.zeros((count, len(FEATURES)), dtype=np.float32)
+    for name, values in features.items():
+        catalogue[:, FEATURES.index(name)] = values
+    for index in range(count):
+        result[index] = project_observations(catalogue[index], contract)
     return result
 
 
@@ -55,6 +58,104 @@ def decoded(contract, actions, name):
 
 
 class ScriptedChecks(unittest.TestCase):
+    def test_encoded_features_preserve_scripted_actions_and_offsets(self):
+        scalar = from_legacy(SCHEMA_V2)
+        encoded = deepcopy(scalar)
+        encoded.pop("observation_dim")
+        for descriptor in encoded["observations"]:
+            if descriptor["feature"] in ("self.shield_using", "self.shield_disabled", "opponent.shield_using"):
+                descriptor.update(encoding="one_hot", categories=[1, 0], scale=-2)
+        encoded = validate_contract(encoded)
+        self.assertEqual(encoded["observation_dim"], scalar["observation_dim"] + 3)
+        options = {"shield": True, "axe_slot": 1, "sword_slot": 0}
+        original = BasicMeleeController(scalar, 3, options=options)
+        transformed = BasicMeleeController(encoded, 3, options=options)
+        features = {"target.distance_fraction": [0.2, 0.25, 0.6],
+                    "target.yaw_error": [0.1, -0.1, 0], "target.pitch_error": [0, 0.1, -0.1],
+                    "self.shield_using": [0, 1, 0], "self.shield_disabled": [0, 0, 1],
+                    "opponent.shield_using": [1, 0, 1], "self.attack_charge": [0.5, 1, 0.2]}
+        for _ in range(5):
+            np.testing.assert_array_equal(original.act(observations(scalar, **features)),
+                                          transformed.act(observations(encoded, **features)))
+        self.assertEqual(transformed.act(observations(encoded, 0)).shape, (0, 8))
+
+    def test_random_walk_avoids_walls_and_is_independent_of_batch_order(self):
+        contract = from_legacy(SCHEMA)
+        definition = {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 2}}
+        controller = create_controller(definition, contract, 3, seed=9)
+        clone = create_controller(definition, contract, 3, seed=9)
+        features = {f"arena.ray_world_{angle}": 1 for angle in range(0, 360, 45)}
+        obs = observations(contract, **features)
+        for _ in range(6):
+            batched = controller.act(obs)
+            for actor in (2, 0, 1):
+                np.testing.assert_array_equal(batched[actor], clone.act(obs[actor:actor + 1], [actor])[0])
+        before = controller.state_dict()
+        controller.reset(np.array([False, True, False]))
+        after = controller.state_dict()
+        self.assertEqual(after["remaining"][1], 0)
+        self.assertEqual(before["generators"], after["generators"])
+        blocked = observations(contract, 1, **{"arena.ray_world_90": 1})
+        actions = controller.act(blocked, [1])
+        self.assertEqual(decoded(contract, actions, "movement").tolist(), ["left"])
+        blocked = observations(contract, 1, **{"self.yaw_fraction": 0.5, "arena.ray_world_90": 1})
+        controller.reset(np.array([False, True, False]))
+        self.assertEqual(decoded(contract, controller.act(blocked, [1]), "movement").tolist(), ["forward"])
+        self.assertEqual(controller.act(observations(contract, 0)).shape, (0, 6))
+        saved = controller.state_dict()
+        for field in ("directions", "remaining", "generators"):
+            invalid = deepcopy(saved)
+            invalid[field] = [None] * 3
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                controller.load_state_dict(invalid)
+            self.assertEqual(controller.state_dict(), saved)
+
+    def test_stationary_retaliation_and_distinct_tactical_styles(self):
+        contract = from_legacy(SCHEMA_V2)
+        obs = observations(contract, **{"target.distance_fraction": [0.2, 0.35, 0.6],
+                                       "self.attack_charge": [1, 0.1, 1]})
+        stationary = create_controller({"type": "scripted", "controller": "stationary_melee"}, contract, 3)
+        actions = stationary.act(obs)
+        self.assertEqual(decoded(contract, actions, "movement").tolist(), ["neutral"] * 3)
+        self.assertEqual(decoded(contract, actions, "attack").tolist(), [True, False, False])
+        expected = {"evasive": ["backward", "left", "forward"],
+                    "aggressive": ["forward"] * 3,
+                    "patient": ["left", "backward", "forward"]}
+        for style, movements in expected.items():
+            definition = {"type": "scripted", "controller": "tactical_melee",
+                          "options": {"style": style, "sprint": True}}
+            controller = create_controller(definition, contract, 3)
+            actions = controller.act(obs)
+            self.assertEqual(decoded(contract, actions, "movement").tolist(), movements)
+            clone = create_controller(definition, contract, 3)
+            clone.load_state_dict(controller.state_dict())
+            np.testing.assert_array_equal(controller.act(obs), clone.act(obs))
+        for definition in (
+            {"controller": "random_walk", "options": {"change_interval": 0}},
+            {"controller": "random_walk", "options": {"wall_margin": float("nan")}},
+            {"controller": "stationary_melee", "options": {"sprint": True}},
+            {"controller": "tactical_melee", "options": {"style": "unknown"}},
+        ):
+            with self.subTest(definition=definition), self.assertRaises(ValueError):
+                create_controller({"type": "scripted", **definition}, contract, 3)
+
+    def test_random_walk_moves_without_attacking_and_resumes(self):
+        contract = from_legacy(SCHEMA)
+        definition = {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 3}}
+        controller = create_controller(definition, contract, 3, seed=17)
+        features = {f"arena.ray_world_{angle}": 1 for angle in range(0, 360, 45)}
+        obs = observations(contract, **features)
+        for _ in range(4):
+            actions = controller.act(obs)
+            self.assertTrue(np.all(decoded(contract, actions, "movement") != "neutral"))
+            self.assertFalse(decoded(contract, actions, "attack").any())
+            self.assertFalse(decoded(contract, actions, "jump").any())
+            self.assertFalse(decoded(contract, actions, "sprint").any())
+        clone = create_controller(definition, contract, 3, seed=17)
+        clone.load_state_dict(controller.state_dict())
+        for _ in range(8):
+            np.testing.assert_array_equal(controller.act(obs), clone.act(obs))
+
     def test_frozen_self_play_replacement_episode_pinning_and_resume(self):
         contract = policy()
         learner = ActorCritic(contract["observation_dim"], 8,

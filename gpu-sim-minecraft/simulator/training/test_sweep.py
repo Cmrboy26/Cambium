@@ -63,6 +63,21 @@ class SweepChecks(unittest.TestCase):
             self.assertEqual(Path(trial["output"]).parent, self.runs)
         self.assertEqual(json.loads((self.directory / "sweep.json").read_text()), manifest)
 
+    def test_learner_hyperparameters_can_be_frozen_single_variable_sweeps(self):
+        for key in ("gamma", "gae_lambda", "clip_eps", "vf_coef", "ent_coef", "max_grad_norm"):
+            with self.subTest(parameter=key):
+                manifest = self.prepare(parameter=key, values=["0.1", "0.2"], dry_run=True)
+                for trial, value in zip(manifest["trials"], (.1, .2)):
+                    self.assertEqual(trial["value"], value)
+                    self.assertEqual(trial["options"][key], value)
+                    self.assertEqual(trial["experiment"]["learner"][key], value)
+                first = manifest["trials"][0]["experiment"]["learner"].copy()
+                second = manifest["trials"][1]["experiment"]["learner"].copy()
+                first.pop(key)
+                second.pop(key)
+                self.assertEqual(first, second)
+        self.assertFalse(self.directory.exists())
+
     def test_rejects_duplicates_existing_outputs_and_resource_sweeps(self):
         for changes in ({"values": [".0001", "1e-4"]}, {"parameter": "memory"}, {"max_parallel": -1}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):

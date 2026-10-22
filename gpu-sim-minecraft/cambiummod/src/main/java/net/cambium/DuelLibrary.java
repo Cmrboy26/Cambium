@@ -161,13 +161,31 @@ final class DuelLibrary {
 	}
 
 	static JsonObject scriptedFighter(String controller, JsonObject options) {
-		if (!List.of("basic_melee", "stationary_target").contains(controller)) throw new IllegalArgumentException("Unknown scripted fighter");
+		String name = switch (controller) {
+			case "basic_melee" -> "Basic melee";
+			case "stationary_melee" -> "Stationary melee";
+			case "tactical_melee" -> "Tactical melee";
+			case "random_walk" -> "Random walk";
+			case "stationary_target" -> "Stationary target";
+			default -> throw new IllegalArgumentException("Unknown scripted fighter");
+		};
 		JsonObject fighter = new JsonObject();
 		fighter.addProperty("type", "scripted");
 		fighter.addProperty("controller", controller);
-		fighter.addProperty("name", controller.equals("basic_melee") ? "Basic melee" : "Stationary target");
-		if (controller.equals("basic_melee")) fighter.add("options", options.deepCopy());
+		fighter.addProperty("name", name);
+		if (!controller.equals("stationary_target")) fighter.add("options", options.deepCopy());
 		return fighter;
+	}
+
+	static String scriptedController(String mode) {
+		return switch (mode) {
+			case "Basic melee" -> "basic_melee";
+			case "Stationary melee" -> "stationary_melee";
+			case "Tactical melee" -> "tactical_melee";
+			case "Random walk" -> "random_walk";
+			case "Stationary target" -> "stationary_target";
+			default -> throw new IllegalArgumentException("Unknown scripted fighter mode: " + mode);
+		};
 	}
 
 	Path saveDuel(JsonObject environment, JsonObject first, JsonObject second) throws IOException {

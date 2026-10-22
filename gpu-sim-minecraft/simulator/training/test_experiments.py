@@ -1,23 +1,159 @@
 from copy import deepcopy
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
 import shutil
+import tempfile
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 import numpy as np
 
-from simulator.training._test_plans import example_plan
-from simulator.training.compiler import _opponents, _snapshots
-from simulator.training.environment import REWARD_NAMES, ROOT
+from simulator.training._test_plans import TEST_SETUPS, example_plan
+from simulator.training.compiler import LEARNER_DEFAULTS, _learner, _opponents, _policy, _snapshots
+from simulator.training.contract import fingerprint, from_legacy, project_observations, validate_contract
+from simulator.training.environment import REWARD_NAMES, ROOT, SCHEMA_V2
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
 from simulator.training.validate_plans import main as validate_plans
 
 
+class ObservationEncodingChecks(unittest.TestCase):
+    def test_existing_policy_files_keep_legacy_values_dimensions_and_fingerprints(self):
+        paths = sorted((ROOT / "simulator/setups/policies").rglob("*.json"))
+        self.assertTrue(paths)
+        fixture = json.loads((ROOT / "contracts/policy_fixtures.json").read_text())
+        from simulator.training.contract import FEATURES
+
+        checked = 0
+        for path in paths:
+            raw = json.loads(path.read_text())
+            if any(set(entry) - {"feature", "scale"} for entry in raw["observations"]):
+                continue
+            with self.subTest(path=path):
+                expected = deepcopy(raw)
+                for entry in expected["observations"]:
+                    entry["scale"] = float(entry.get("scale", 1))
+                expected["requires"] = sorted(set(expected.get("requires", [])))
+                expected["observation_dim"] = len(expected["observations"])
+                expected["action_names"] = [head["name"] for head in expected["actions"]]
+                expected["action_sizes"] = [len(head["values"]) for head in expected["actions"]]
+                self.assertEqual(_policy(raw), expected)
+                old_hash = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":"),
+                                                     allow_nan=False).encode()).hexdigest()
+                self.assertEqual(fingerprint(raw), old_hash)
+                self.assertEqual(project_observations(fixture["catalogue"], expected),
+                                 [fixture["catalogue"][FEATURES.index(entry["feature"])] * entry["scale"]
+                                  for entry in expected["observations"]])
+                explicit = deepcopy(raw)
+                for entry in explicit["observations"]:
+                    entry["encoding"] = "scalar"
+                self.assertEqual(fingerprint(explicit), old_hash)
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_shared_projection_and_invalid_encoding_fixtures(self):
+        fixture = json.loads((ROOT / "contracts/policy_fixtures.json").read_text())
+        for sample in fixture["projection_cases"]:
+            with self.subTest(sample=sample["name"]):
+                parsed = _policy({**fixture["policy"], "observations": sample["observations"]})
+                self.assertEqual(parsed["observation_dim"], len(sample["expected"]))
+                self.assertEqual(validate_contract(parsed), parsed)
+                np.testing.assert_allclose(project_observations(fixture["catalogue"], parsed),
+                                           sample["expected"], atol=fixture["tolerance"], rtol=0)
+        for change in fixture["invalid"]:
+            raw = deepcopy(fixture["policy"])
+            path = change["pointer"].strip("/").split("/")
+            parent = raw
+            for key in path[:-1]:
+                parent = parent[int(key)] if isinstance(parent, list) else parent[key]
+            parent[int(path[-1]) if isinstance(parent, list) else path[-1]] = change["value"]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                _policy(raw)
+
+    def test_expansion_limits_and_stale_dimensions_are_rejected(self):
+        fixture = json.loads((ROOT / "contracts/policy_fixtures.json").read_text())
+        entry = {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": list(range(9))}
+        with self.assertRaisesRegex(ValueError, "Expanded"):
+            validate_contract({**fixture["policy"], "observations": [entry] * 15})
+        with self.assertRaisesRegex(ValueError, "observation_dim"):
+            validate_contract({**fixture["policy"], "observations": [entry], "observation_dim": 1})
+        self.assertNotEqual(fingerprint({**fixture["policy"], "observations": [entry]}),
+                            fingerprint({**fixture["policy"], "observations": [
+                                {**entry, "categories": list(reversed(range(9)))}]}))
+
+
 class SnapshotRuleChecks(unittest.TestCase):
+    def test_learner_hyperparameters_validate_and_roundtrip(self):
+        self.assertEqual(_learner({}), LEARNER_DEFAULTS)
+        values = {"gamma": 0.9, "gae_lambda": 0.8, "clip_eps": 0.1,
+                  "vf_coef": 0.25, "ent_coef": 0.02, "max_grad_norm": 1.0}
+        raw = example_plan()
+        raw["learner"] = values
+        resolved = resolve_plan(raw)
+        self.assertEqual(resolved["learner"], {**LEARNER_DEFAULTS, **values})
+        self.assertEqual(resolve_plan(resolved), resolved)
+        for key in values:
+            for value in (True, float("nan"), float("inf"), -0.1):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    _learner({key: value})
+        for key, value in (("gamma", 1.1), ("gae_lambda", 1.1), ("clip_eps", 0),
+                           ("clip_eps", 1), ("max_grad_norm", 0)):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                _learner({key: value})
+        for key in ("gamma", "gae_lambda", "vf_coef", "ent_coef"):
+            self.assertEqual(_learner({key: 0})[key], 0)
+
+    def test_shared_plan_uses_test_owned_setup_files(self):
+        raw = example_plan()
+        references = [raw["environment"], raw["policy"],
+                      *(suite["environment"] for suite in raw["evaluations"].values())]
+        for reference in references:
+            with self.subTest(reference=reference):
+                self.assertTrue(Path(reference).is_relative_to(ROOT / "simulator/tests"))
+                self.assertTrue(Path(reference).is_file())
+        original = Path.read_text
+
+        def read_test_file(path, *args, **kwargs):
+            self.assertFalse(path.resolve().is_relative_to(ROOT / "simulator/setups"))
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read_test_file):
+            resolve_plan(raw)
+
+    def test_optional_combat_rewards_compile_and_stage_overrides_replace(self):
+        additions = {"missed_attack": -0.1, "shield_disabled": 2.0, "win_speed": 20.0}
+        scene = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        arena = {"format": "minecraft_sim_arena", "version": 1, "minecraft": "26.3",
+                 "name": "reward-arena", "bounds": scene["bounds"], "blocks": scene["blocks"]}
+        environment = {"format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+                       "name": "reward-duel", "arena": "arena.json",
+                       "players": {"shared": {"loadout": {
+                           "weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"],
+                           "offhand": "minecraft:shield"}}, "overrides": scene["players"]},
+                       "task": {"max_ticks": 100, "rewards": additions}}
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for name, value in (("arena.json", arena), ("environment.json", environment),
+                                ("policy.json", from_legacy(SCHEMA_V2))):
+                (base / name).write_text(json.dumps(value), encoding="utf-8")
+            raw = example_plan()
+            raw.update(environment="environment.json", policy="policy.json")
+            raw["evaluations"]["held_out_combat"]["environment"] = "environment.json"
+            resolved = resolve_plan(raw, base_dir=base)
+            for name, value in additions.items():
+                self.assertEqual(resolved["stages"][0]["rewards"]["weights"][name], 0.0)
+                self.assertEqual(resolved["stages"][1]["rewards"]["weights"][name], value)
+                self.assertEqual(resolved["evaluations"]["held_out_combat"]["rewards"]["weights"][name], value)
+            self.assertEqual(resolve_plan(resolved), resolved)
+            raw["stages"][0]["task_override"]["rewards"] = additions
+            weights = resolve_plan(raw, base_dir=base)["stages"][0]["rewards"]["weights"]
+            for name, value in additions.items():
+                self.assertEqual(weights[name], value)
+            self.assertEqual(weights["good_aim"], 0.0)
+
     def test_snapshot_rules_and_frozen_opponent_validation(self):
         names = set()
         _snapshots([{"name": "stage-100", "at_updates": 100}], names)
@@ -51,9 +187,9 @@ class ExperimentChecks(unittest.TestCase):
         self.environment_path = self.directory / "environments/duel.json"
         self.policy_path = self.directory / "policies/combat.json"
         self.plan_path = self.directory / "curricula/train.json"
-        self.arena = json.loads((ROOT / "simulator/setups/arenas/flat-duel.json").read_text())
-        self.environment = json.loads((ROOT / "simulator/setups/environments/gear-duel.json").read_text())
-        self.policy = json.loads((ROOT / "simulator/setups/policies/equipment-combat.json").read_text())
+        self.arena = json.loads((TEST_SETUPS / "arena.json").read_text())
+        self.environment = json.loads((TEST_SETUPS / "environment.json").read_text())
+        self.policy = json.loads((TEST_SETUPS / "policy.json").read_text())
         self.raw = example_plan()
         self.environment["arena"] = "../arenas/flat.json"
         self.raw["environment"] = "../environments/duel.json"
@@ -76,7 +212,9 @@ class ExperimentChecks(unittest.TestCase):
         self.assertEqual(resolved["version"], 1)
         self.assertEqual(resolved["name"], "test-curriculum")
         self.assertEqual(resolved["learner"],
-                         {"hidden_dim": 256, "lr": 0.0003, "epochs": 4, "minibatch_size": 1024})
+                         {"hidden_dim": 256, "lr": 0.0003, "epochs": 4, "minibatch_size": 1024,
+                          "gamma": 0.99, "gae_lambda": 0.95, "clip_eps": 0.2,
+                          "vf_coef": 0.5, "ent_coef": 0.01, "max_grad_norm": 0.5})
         self.assertEqual(resolved["policy"]["observation_dim"], 78)
         self.assertEqual(resolved["policy"]["action_sizes"], [9, 2, 2, 2, 9, 5, 9, 2])
         self.assertEqual(resolved["stages"][0]["opponents"], [{"id": "stationary", "weight": 1}])

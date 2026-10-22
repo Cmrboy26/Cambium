@@ -4,6 +4,9 @@ Follow the repository [development guide](../AGENTS.md). Training has additional
 [local guidance](training/AGENTS.md). Public build entry points are in
 [README.md](README.md).
 
+Use the [mechanics contribution workflow](../CONTRIBUTING.md#port-a-minecraft-mechanic)
+for source investigation, implementation ownership and parity/handoff gates.
+
 ## Ownership And Fidelity
 
 C++20/CUDA-compatible functions target supplied Minecraft Java 26.3 behavior.
@@ -67,7 +70,7 @@ Pure base observation math is in `apps/observation.hpp`; raycasts and equipment
 sampling stay in the training adapter. Native `shared_core_checks` consumes the
 same [fixture file](../contracts/policy_fixtures.json) as Java/Python.
 
-The training library exports ABI 2 plus JSON `mcsim_build_info()` and
+The training library exports ABI 3 plus JSON `mcsim_build_info()` and
 `mcsim_batch_info(handle)`. Build info contains catalogue/capabilities, scalar
 widths, reward input/total counts, compiler/revision/compile time, CUDA build flag
 and SHA-256 of native headers/support sources/training entry point/CMake input.
@@ -77,7 +80,7 @@ These checks protect the supported adapter, not arbitrary raw C callers.
 Selected library paths/device are recorded by Python; source/build identity is
 diagnostic, not a physics-parity or checkpoint-compatibility claim.
 
-The additive ABI 2 profiling calls are `mcsim_set_profiling(handle, enabled)`
+The profiling calls are `mcsim_set_profiling(handle, enabled)`
 and `mcsim_profile(handle)`. The setter accepts only 0/1, returns 0/-1, defaults
 off and clears all counters whenever enabled. Disabling preserves the last
 counters. The getter returns a thread-local JSON string with `version: 1` and
@@ -87,25 +90,27 @@ physics/reset calls wait for kernel completion. Profiling never draws random
 numbers or changes reset/physics ordering. See the
 [collection timing schema](training/AGENTS.md#collection-profiling).
 
-The additive ABI 2 `mcsim_losses(handle, uint8_t* losses)` fills one loss flag per
+The `mcsim_losses(handle, uint8_t* losses)` call fills one loss flag per
 player in world-major order (`[world_count, 2]`), returning 0 or -1. It reads current
 host player state with the same alive/outside predicate as terminal rewards,
 independently of reward weights; it neither steps nor resets worlds. Call after
 step and before reset to classify fight outcomes. Python uses this bulk path for
 completed-episode metrics and a terminal-snapshot fallback for older libraries.
 
-The additive ABI 2 `mcsim_set_max_ticks(handle, limit)` returns 0 on success,
+The `mcsim_set_max_ticks(handle, limit)` call returns 0 on success,
 -1 on error, and accepts limits in 1..1,000,000. Apply it at a stage reset
 boundary; it changes the existing batch's timeout without resetting players,
 counters or immutable terrain. Python reapplies timeout-normalized shaping
 weights. The setter does not rewrite the original scenario metadata.
 
 The additive `mcsim_step_reward_totals(handle, player_mask, totals)` returns the
-last successful tick's 12 reward contributions for selected actors. The mask
+last successful tick's 15 reward contributions for selected actors. The mask
 has `worlds*2` boolean entries; null selects both players. Resets clear selected
 worlds' last-step contributions, not cumulative batch totals. Opponent-pool
 training selects its learner actor before episode reset or side reassignment.
-Existing reward calculations and ABI 2 buffer layouts are unchanged.
+ABI 3 expands base reward inputs from six to nine and base totals from seven to
+ten for missed attacks, shield disables and win speed; shaping remains five.
+Rebuild older libraries; Python rejects earlier ABI versions before buffer use.
 
 The default remains an unarmored diamond sword without shield; v1 policies stay
 sword-only. [V2](training/AGENTS.md#swordaxeshield-v2) adds weapon/shield controls.
