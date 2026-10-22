@@ -550,7 +550,7 @@ const legendSolo = {
         legendSoloHandlers.set(chart, handler);
         chart.canvas.addEventListener("contextmenu", handler);
     },
-    afterDestroy(chart) {
+    beforeDestroy(chart) {
         const handler = legendSoloHandlers.get(chart);
         if (handler) chart.canvas.removeEventListener("contextmenu", handler);
         legendSoloHandlers.delete(chart);
