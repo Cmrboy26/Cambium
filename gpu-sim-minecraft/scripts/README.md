@@ -57,6 +57,28 @@ Alternatively pass `-MinecraftDirectory`. A single standard installation can be
 detected automatically; multiple candidates require a choice. No launcher or
 instance name is assumed. Remove differently named older Cambium JARs yourself.
 
+## Rosie Setup On A New Machine
+
+From the repository root, follow [First-Time Setup](#first-time-setup) once per
+machine or checkout. It creates `.venv` and installs the Python requirements.
+Then configure Rosie for the actual Minecraft game folder:
+
+```powershell
+$python = (Resolve-Path '.\.venv\Scripts\python.exe').Path
+& $python -c "import numpy, torch; print('NumPy:', numpy.__version__); print('PyTorch:', torch.__version__)"
+$game = Read-Host 'Full Minecraft game folder path (the folder containing mods)'
+.\scripts\rosie-play.ps1 -Setup -MinecraftDirectory $game -Python $python
+.\scripts\rosie-play.ps1 -Connect -MinecraftDirectory $game -Python $python
+```
+
+For Prism, `$game` should be the instance's `minecraft` subfolder, for example
+`%APPDATA%\PrismLauncher\instances\<instance>\minecraft`, not its parent
+folder. Setup prompts for the Rosie host and account when they are not supplied.
+Connect needs the required VPN/network access and SSH login; enter credentials
+in the terminal and leave it running while you play. Ctrl+C disconnects. If it
+exits instead of staying open, check the SSH error, VPN, host and account. Rosie
+configuration is per game folder, so repeat `-Setup` for each instance.
+
 ## Replays And Live Duels
 
 ```powershell

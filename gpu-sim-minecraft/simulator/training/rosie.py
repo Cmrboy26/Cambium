@@ -621,7 +621,12 @@ class Rosie:
         previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"policies": [], "environments": []}
         aliases = {entry["id"]: entry["name"] for entry in previous["policies"]}
         policies = [entry for entry in previous["policies"] if entry["run"] != run]
-        environments = [entry for entry in previous["environments"] if entry["run"] != run]
+        environments = []
+        for entry in previous["environments"]:
+            sources = entry.get("sources", [{"id": entry["id"], "name": entry["name"], "run": entry.get("run", "")}])
+            retained = [source for source in sources if source.get("run") != run]
+            if retained:
+                environments.append({**entry, **retained[0], "sources": retained})
         folder = self.cache / valid_name(run)
         checkpoints = [folder / "latest.pt", *sorted((folder / "snapshots").glob("*.pt"))]
         for checkpoint in checkpoints:
@@ -649,6 +654,21 @@ class Rosie:
                                              if len(stage["scenario"]["arenas"]) > 1 else ""),
                                          "run": run, "policy": contract,
                                          "contract_hash": fingerprint(contract), "environment": arena["environment"]})
+        grouped_environments = {}
+        for entry in environments:
+            definition = dict(entry["environment"])
+            definition.pop("name", None)
+            key = (entry["contract_hash"], json.dumps(definition, sort_keys=True, separators=(",", ":")))
+            if key not in grouped_environments:
+                grouped_environments[key] = {**entry, "sources": []}
+            group = grouped_environments[key]
+            known_ids = {source["id"] for source in group["sources"]}
+            sources = entry.get("sources", [{"id": entry["id"], "name": entry["name"], "run": entry.get("run", "")}])
+            for source in sources:
+                if source["id"] not in known_ids:
+                    group["sources"].append(source)
+                    known_ids.add(source["id"])
+        environments = list(grouped_environments.values())
         result = {"version": 1, "policies": policies, "environments": environments, "runs": previous.get("runs", [])}
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.cache, delete=False) as target:
             temporary = Path(target.name)

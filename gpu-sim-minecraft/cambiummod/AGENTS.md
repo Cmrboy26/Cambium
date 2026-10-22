@@ -206,30 +206,38 @@ owned helper. Externally served actors stop without killing their external serve
 Game `sim-rosie-cache/library.json` version 1 stores readable policy/environment
 entries. Policy IDs use `run:latest.pt` or `run:snapshots/<name>.pt`; each has a
 local checkpoint path, update/stage, semantic contract hash and policy descriptor.
-Environments include checkpoint scenes and every resolved stage/arena template
-from synced `config.json`. These are fixed templates, not distribution sampling
-or a live curriculum. The duel selector groups entries by contract hash and
-structurally equal environment data, ignoring only the environment's display name.
-Equivalent checkpoint/stage/cross-run copies appear once under their environment
-name; genuinely different geometry, loadouts, duration or policy layouts remain
-separate. Source labels disambiguate distinct setups with the same name. Grouping
-is a view over the existing cache: saved selection IDs and all indexed entries
-remain intact, with no re-sync or library migration required.
+Environments include checkpoint scenes and resolved stage/arena templates from
+synced `config.json`. These are fixed templates, not distribution sampling or a
+live curriculum. The index stores structurally equal environments once per
+contract hash and retains source IDs/names as aliases. The duel selector resolves
+saved IDs through those aliases, including IDs from older version-1 libraries.
+Genuinely different geometry, loadouts, duration or policy layouts remain
+separate and display their useful variant details; source labels disambiguate
+distinct setups with the same name. Re-indexing needs no library version bump.
 Sync preserves other runs and existing policy aliases.
 Library rows select runs; the bottom selector chooses Latest or a retained policy
 version. Local run and per-version display names are independent of remote IDs,
 paths and files; sync preserves both. Renaming is disabled while the helper runs.
 Cached checkpoints must exist inside
 the cache's real path; mismatched contracts are rejected before starting.
+Arena environment candidates must match the semantic contract hashes of both
+selected policy fighters; scripted fighters add no layout constraint. World
+mode does not select a cached environment preset, but two policy fighters must
+still share one contract.
 
 `selections.json` stores both fighter modes/policy IDs, scripted options, chosen
-environment, arena/world mode, sync scope and optional round duration. Duration
+environment, arena/world mode, sync scope, optional round duration, and World
+mode's per-fighter nine-slot hotbar, selected slot, offhand and armor. Duration
 uses seconds in the panel, rounded to twenty controlled ticks per second;
-positive limits up to 1,000,000 ticks are supported. Environment Default removes
-the override; changing it affects the next launch, not the running round.
-Inference delays can extend wall-clock duration.
-`duel.json` is a `minecraft_sim_duel` version 1
-configuration with concrete policy/environment and exactly two fighter entries.
+positive limits up to 1,000,000 ticks are supported. Arena may use Environment
+Default; World requires a chosen duration and both current-dimension spawn marks.
+Changing selections affects the next launch, not the running round. Inference
+delays can extend wall-clock duration.
+`duel.json` is a `minecraft_sim_duel` version 1 configuration with two fighter
+entries. Arena keeps its concrete cached policy/environment; World carries the
+shared policy descriptor, explicit duration and loadouts in a runtime-only
+empty scenario. Marked positions replace its placeholder spawns before actors
+are created. World terrain is not edited.
 Launching invokes the configured local interpreter/repository with Rosie action
 `local --duel <file> --offline`; CPU inference uses a free loopback port and no
 native simulator library. `/simrosie local` starts the last saved arena setup.
