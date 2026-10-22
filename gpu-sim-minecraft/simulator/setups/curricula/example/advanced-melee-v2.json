@@ -1,11 +1,12 @@
 {
   "format": "minecraft_sim_training_plan",
   "version": 2,
-  "name": "example-advanced-melee",
+  "name": "example-advanced-melee-v2",
   "seed": 42,
   "policy": "../../policies/example/advanced-melee-v2.json",
   "environment": "../../environments/example/advanced-sword-duel.json",
-  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024,
+              "ent_coef": 0.001},
   "opponents": {
     "target": {"type": "scripted", "controller": "stationary_target"},
     "walker": {"type": "scripted", "controller": "random_walk",
@@ -18,6 +19,8 @@
               "options": {"attack_interval": 17, "strafe": true, "shield": true,
                           "axe_slot": 1, "sword_slot": 0}},
     "past_learner": {"type": "frozen_self_play", "every_updates": 50},
+    "validation_pressure": {"type": "scripted", "controller": "tactical_melee",
+                "options": {"style": "aggressive", "attack_interval": 13, "sprint": true}},
     "unseen_evasive": {"type": "scripted", "controller": "tactical_melee",
                        "options": {"style": "evasive", "attack_interval": 11,
                                    "melee_distance": 2.8, "strafe_interval": 11, "sprint": true}},
@@ -34,10 +37,10 @@
     "retaliation": [{"id": "retaliator", "weight": 1}],
     "combat": [{"id": "fighter", "weight": 1}],
     "shield_combat": [{"id": "guard", "weight": 1}],
-    "mixed_training": [{"id": "walker", "weight": 1}, {"id": "retaliator", "weight": 1},
-                       {"id": "fighter", "weight": 3}, {"id": "guard", "weight": 3},
-                       {"id": "past_learner", "weight": 2}],
+    "mixed_training": [{"id": "fighter", "weight": 3}, {"id": "guard", "weight": 3},
+               {"id": "past_learner", "weight": 4}],
     "scripted_training": [{"id": "fighter", "weight": 1}, {"id": "guard", "weight": 1}],
+    "pressure_validation": [{"id": "validation_pressure", "weight": 1}],
     "heldout_evasive": [{"id": "unseen_evasive", "weight": 1}],
     "heldout_pressure": [{"id": "unseen_pressure", "weight": 1}],
     "heldout_patient": [{"id": "unseen_patient", "weight": 1}]
@@ -150,7 +153,7 @@
         "rewards": {
           "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "win_speed": 20,
           "death": -25, "episode_timeout": -10, "no_damage_penalty": -10,
-          "missed_attack": -0.1, "shield_disabled": 2, "blocked_with_shield": 0.3,
+          "missed_attack": -0.1, "shield_disabled": 2, "blocked_with_shield": 0.5,
           "good_aim": 0.25, "proximity": 0.25, "pitch_control": 0.1,
           "extreme_pitch_penalty": -0.5
         }
@@ -171,9 +174,9 @@
       "task_override": {
         "max_ticks": 1200,
         "rewards": {
-          "doing_damage": 20, "taking_damage": -4, "won_duel": 40, "win_speed": 20,
-          "death": -15, "episode_timeout": -15, "no_damage_penalty": -20,
-          "missed_attack": -0.1, "shield_disabled": 4, "blocked_with_shield": 0.3, 
+          "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "win_speed": 20,
+          "death": -25, "episode_timeout": -10, "no_damage_penalty": -10,
+          "missed_attack": -0.1, "shield_disabled": 2, "blocked_with_shield": 0.5,
           "good_aim": 0.1, "proximity": 0.1, "pitch_control": 0.1,
           "extreme_pitch_penalty": -0.5
         }
@@ -182,11 +185,16 @@
         "mixed_proficiency": {
           "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1734,
           "overrides": {"opponents": "scripted_training"}
+        },
+        "pressure_validation": {
+          "every_updates": 25, "worlds": 64, "episodes": 64, "seed": 1735,
+          "overrides": {"opponents": "pressure_validation"}
         }
       },
       "advance": {"all": [
         {"updates": 900},
-        {"evaluation": {"suite": "mixed_proficiency", "metric": "win_rate", "at_least": 0.75}}
+        {"evaluation": {"suite": "mixed_proficiency", "metric": "win_rate", "at_least": 0.75}},
+        {"evaluation": {"suite": "pressure_validation", "metric": "win_rate", "at_least": 0.8}}
       ]}
     }
   ]
