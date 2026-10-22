@@ -47,16 +47,26 @@ void checkPolicyFixtures() {
         PlayerState player;
         const auto position = value.at("position").get<std::array<double, 3>>();
         player.position = {position[0], position[1], position[2]};
+        const auto velocity = value.at("velocity").get<std::array<double, 3>>();
+        player.velocity = {velocity[0], velocity[1], velocity[2]};
         player.health = value.at("health"); player.yaw = value.at("yaw"); player.pitch = value.at("pitch");
         return player;
     };
     for (const auto& sample : fixture.at("observations")) {
-        const auto actual = app::baseObservation(state(sample.at("source")), state(sample.at("target")),
+        const auto source = state(sample.at("source"));
+        const auto target = state(sample.at("target"));
+        const auto actual = app::baseObservation(source, target,
             sample.at("rays").get<std::array<float, 8>>());
         const auto expected = sample.at("expected").get<std::vector<float>>();
         require(actual.size() == expected.size(), "shared base observation size");
         for (std::size_t index = 0; index < actual.size(); ++index) {
             near(actual[index], expected[index], tolerance, sample.at("name").get_ref<const std::string&>().c_str());
+        }
+        std::array<float, app::feature_names.size()> catalogue{};
+        app::velocityObservation(catalogue.data(), source, target);
+        const auto expected_velocity = sample.at("expected_velocity").get<std::array<float, 6>>();
+        for (std::size_t index = 0; index < expected_velocity.size(); ++index) {
+            near(catalogue[79 + index], expected_velocity[index], tolerance, "shared velocity observation");
         }
     }
     std::array<std::vector<WeaponItem>, 2> slots;

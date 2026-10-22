@@ -2,7 +2,8 @@ package net.cambium;
 
 final class ObservationEncoder {
 
-	record State(double x, double y, double z, float health, float yaw, float pitch, boolean alive) {}
+	record State(double x, double y, double z, float health, float yaw, float pitch, boolean alive,
+			double velocityX, double velocityY, double velocityZ) {}
 	record Weapon(boolean present, boolean axe, double damage, double speed) {}
 	record Equipment(boolean shield, double damage, double speed, double armor, double toughness) {}
 
@@ -25,6 +26,15 @@ final class ObservationEncoder {
 			catalogue[start + 2] = equipmentFraction(weapon.damage(), 10);
 			catalogue[start + 3] = equipmentFraction(weapon.speed(), 4);
 		}
+	}
+
+	static void velocityObservation(float[] catalogue, State source, State target) {
+		catalogue[79] = (float) source.velocityX();
+		catalogue[80] = (float) source.velocityY();
+		catalogue[81] = (float) source.velocityZ();
+		catalogue[82] = (float) (target.velocityX() - source.velocityX());
+		catalogue[83] = (float) (target.velocityY() - source.velocityY());
+		catalogue[84] = (float) (target.velocityZ() - source.velocityZ());
 	}
 
 	private static float equipmentFraction(double value, double maximum) {

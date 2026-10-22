@@ -4,30 +4,34 @@
   "observations": [
     {
       "name": "forward-and-wrapped-yaw",
-      "source": {"position": [0.5, 1, -1.5], "health": 20, "yaw": 0, "pitch": 0},
-      "target": {"position": [0.5, 1, 2.5], "health": 10, "yaw": 180, "pitch": 0},
+      "source": {"position": [0.5, 1, -1.5], "velocity": [0.1, -0.2, 0.3], "health": 20, "yaw": 0, "pitch": 0},
+      "target": {"position": [0.5, 1, 2.5], "velocity": [-0.2, 0.4, -0.1], "health": 10, "yaw": 180, "pitch": 0},
       "rays": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+      "expected_velocity": [0.1, -0.2, 0.3, -0.3, 0.6, -0.4],
       "expected": [1, 0, 0, 1, 0.5, 0, 0, 0.4, -1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.4, 1, 0, 0]
     },
     {
       "name": "elevation-and-dead-opponent",
-      "source": {"position": [0, 0, 0], "health": 15, "yaw": 90, "pitch": 0},
-      "target": {"position": [4, 3, 0], "health": 0, "yaw": -540, "pitch": -45},
+      "source": {"position": [0, 0, 0], "velocity": [0, 1, 0], "health": 15, "yaw": 90, "pitch": 0},
+      "target": {"position": [4, 3, 0], "velocity": [0, -1, 0], "health": 0, "yaw": -540, "pitch": -45},
       "rays": [0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
+      "expected_velocity": [0, 1, 0, 0, -2, 0],
       "expected": [0.75, 0.5, 0, 0, 0, 0.4, 0.3, 0, -1, -0.5, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.5, -0.8, -1, -0.4096655294]
     },
     {
       "name": "coincident-positions",
-      "source": {"position": [-1, 2, 3], "health": 20, "yaw": 450, "pitch": 45},
-      "target": {"position": [-1, 2, 3], "health": 10, "yaw": 0, "pitch": 90},
+      "source": {"position": [-1, 2, 3], "velocity": [0.5, 0, 0.25], "health": 20, "yaw": 450, "pitch": 45},
+      "target": {"position": [-1, 2, 3], "velocity": [-0.5, 0.2, -0.25], "health": 10, "yaw": 0, "pitch": 90},
       "rays": [1, 1, 1, 1, 1, 1, 1, 1],
+      "expected_velocity": [0.5, 0, 0.25, -1, 0.2, -0.5],
       "expected": [1, 0.5, 0.5, 1, 0.5, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0]
     },
     {
       "name": "distance-clamp-and-pitch",
-      "source": {"position": [0, 0, 0], "health": 20, "yaw": -180, "pitch": 90},
-      "target": {"position": [0, 0, 20], "health": 20, "yaw": 0, "pitch": 0},
+      "source": {"position": [0, 0, 0], "velocity": [0, 0, -0.0784], "health": 20, "yaw": -180, "pitch": 90},
+      "target": {"position": [0, 0, 20], "velocity": [0, 0.42, 0], "health": 20, "yaw": 0, "pitch": 0},
       "rays": [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1],
+      "expected_velocity": [0, 0, -0.0784, 0, 0.42, 0.0784],
       "expected": [1, -1, 1, 1, 1, 0, 0, 2, 0, 0, 0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1, 1, 0, -1, -1]
     }
   ],

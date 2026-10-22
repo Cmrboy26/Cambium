@@ -258,6 +258,7 @@ struct TrainingBatch {
                 if (layout) {
                     catalogue[31] = static_cast<float>(selected_slots[index]);
                     catalogue[32] = static_cast<float>(selected_slots[index ^ 1]);
+                    app::velocityObservation(catalogue, source, target);
                     app::equipmentObservation(catalogue, source, target,
                         episode_players[environment].weapon_slots[player]);
                     for (int feature = 0; feature < features; ++feature) {

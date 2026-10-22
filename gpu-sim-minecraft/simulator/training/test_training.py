@@ -22,6 +22,7 @@ from simulator.training.environment import (
     resolve_reward_weights,
 )
 from simulator.training.contract import FEATURES, from_legacy, validate_contract, resolve_scenario
+from simulator.training.controllers import CONTROLLER_REGISTRY
 from simulator.training.serve import DuelPolicy, Policy, make_server
 from simulator.training.compatibility_training import ReplaySamples, collect_rollout, compute_gae, main
 
@@ -50,6 +51,30 @@ class InferenceChecks(unittest.TestCase):
                                    "environment": json.loads((ROOT / "simulator/environments/duel.json").read_text())},
                       "model": ActorCritic(22, 16, 9).state_dict()}
         torch.save(self.saved, self.path)
+
+    def test_live_duels_accept_only_builtin_scripted_controllers(self):
+        contract = from_legacy(SCHEMA_V2)
+        environment = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        environment["profile"] = "configured"
+        for player in environment["players"]:
+            player["loadout"] = {"weapons": ["minecraft:iron_sword"] + ["minecraft:air"] * 8, "selected": 0}
+        path = self.path.parent / "duel.json"
+        for controller in ("stationary_target", "basic_melee", "stationary_melee", "tactical_melee", "random_walk"):
+            definition = {"format": "minecraft_sim_duel", "version": 1, "policy": contract,
+                          "environment": environment,
+                          "fighters": [{"type": "scripted", "controller": controller},
+                                       {"type": "scripted", "controller": "stationary_target"}]}
+            path.write_text(json.dumps(definition))
+            duel = DuelPolicy(path)
+            self.assertEqual(duel.info["fighters"][0]["controller"], controller)
+
+        definition["fighters"][0]["controller"] = "custom"
+        path.write_text(json.dumps(definition))
+        custom_factory = mock.Mock(side_effect=AssertionError("custom factory must not run"))
+        with mock.patch.dict(CONTROLLER_REGISTRY, {"custom": custom_factory}):
+            with self.assertRaisesRegex(ValueError, "built-in scripted controllers"):
+                DuelPolicy(path)
+        custom_factory.assert_not_called()
 
     def test_independent_fighters_and_scripted_round_reset(self):
         definition = {"format": "minecraft_sim_duel", "version": 1, "reference": "policy.pt",

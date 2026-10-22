@@ -103,8 +103,12 @@ final class LivePolicy implements AutoCloseable {
 	}
 
 	float[] encode(ServerPlayer source, ServerPlayer target, float[] rays, int sourceIndex) {
-		var own = new ObservationEncoder.State(source.getX(), source.getY(), source.getZ(), source.getHealth(), source.getYRot(), source.getXRot(), source.isAlive());
-		var other = new ObservationEncoder.State(target.getX(), target.getY(), target.getZ(), target.getHealth(), target.getYRot(), target.getXRot(), target.isAlive());
+		var ownVelocity = source.getDeltaMovement();
+		var targetVelocity = target.getDeltaMovement();
+		var own = new ObservationEncoder.State(source.getX(), source.getY(), source.getZ(), source.getHealth(), source.getYRot(), source.getXRot(),
+				source.isAlive(), ownVelocity.x, ownVelocity.y, ownVelocity.z);
+		var other = new ObservationEncoder.State(target.getX(), target.getY(), target.getZ(), target.getHealth(), target.getYRot(), target.getXRot(),
+				target.isAlive(), targetVelocity.x, targetVelocity.y, targetVelocity.z);
 		float[] base = ObservationEncoder.observe(own, other, rays);
 		if (contract == null) return base;
 		float[] catalogue = java.util.Arrays.copyOf(base, SimulationContract.FEATURES.size());
@@ -120,6 +124,7 @@ final class LivePolicy implements AutoCloseable {
 		catalogue[30] = source.isUsingItem() ? Math.min(source.getTicksUsingItem() / 5.0F, 1) : 0;
 		catalogue[31] = source.getInventory().getSelectedSlot();
 		catalogue[32] = target.getInventory().getSelectedSlot();
+		ObservationEncoder.velocityObservation(catalogue, own, other);
 		ObservationEncoder.equipment(catalogue, equipment(source), equipment(target), weaponSlots(source));
 		return contract.project(catalogue);
 	}

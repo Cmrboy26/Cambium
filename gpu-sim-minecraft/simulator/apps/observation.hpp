@@ -31,6 +31,15 @@ inline void equipmentObservation(float* catalogue, const PlayerState& source, co
     }
 }
 
+inline void velocityObservation(float* catalogue, const PlayerState& source, const PlayerState& target) {
+    catalogue[79] = static_cast<float>(source.velocity.x);
+    catalogue[80] = static_cast<float>(source.velocity.y);
+    catalogue[81] = static_cast<float>(source.velocity.z);
+    catalogue[82] = static_cast<float>(target.velocity.x - source.velocity.x);
+    catalogue[83] = static_cast<float>(target.velocity.y - source.velocity.y);
+    catalogue[84] = static_cast<float>(target.velocity.z - source.velocity.z);
+}
+
 inline std::array<float, 22> baseObservation(const PlayerState& source, const PlayerState& target,
                                            const std::array<float, 8>& rays) {
     constexpr double radians = 0.017453292519943295;

@@ -26,7 +26,9 @@
     "self.weapon_slot_5.present", "self.weapon_slot_5.is_axe", "self.weapon_slot_5.damage_fraction", "self.weapon_slot_5.speed_fraction",
     "self.weapon_slot_6.present", "self.weapon_slot_6.is_axe", "self.weapon_slot_6.damage_fraction", "self.weapon_slot_6.speed_fraction",
     "self.weapon_slot_7.present", "self.weapon_slot_7.is_axe", "self.weapon_slot_7.damage_fraction", "self.weapon_slot_7.speed_fraction",
-    "self.weapon_slot_8.present", "self.weapon_slot_8.is_axe", "self.weapon_slot_8.damage_fraction", "self.weapon_slot_8.speed_fraction"
+    "self.weapon_slot_8.present", "self.weapon_slot_8.is_axe", "self.weapon_slot_8.damage_fraction", "self.weapon_slot_8.speed_fraction",
+    "self.velocity.x", "self.velocity.y", "self.velocity.z",
+    "relative.velocity.x", "relative.velocity.y", "relative.velocity.z"
   ],
   "actions": [
     {"name": "movement", "kind": "movement"},

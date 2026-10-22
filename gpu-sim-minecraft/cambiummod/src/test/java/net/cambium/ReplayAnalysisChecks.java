@@ -438,8 +438,8 @@ public final class ReplayAnalysisChecks {
 	}
 
 	private static void checkLivePolicy() {
-		var source = new ObservationEncoder.State(0.5, 1, -1.5, 20, 0, 0, true);
-		var target = new ObservationEncoder.State(0.5, 1, 2.5, 10, 180, 0, true);
+		var source = new ObservationEncoder.State(0.5, 1, -1.5, 20, 0, 0, true, 0.1, -0.2, 0.3);
+		var target = new ObservationEncoder.State(0.5, 1, 2.5, 10, 180, 0, true, -0.2, 0.4, -0.1);
 		float[] rays = {0.1F, 0.2F, 0.3F, 0.4F, 0.5F, 0.6F, 0.7F, 0.8F};
 		float[] observation = ObservationEncoder.observe(source, target, rays);
 		require(observation.length == 22 && observation[0] == 1 && observation[4] == 0.5F
@@ -447,6 +447,13 @@ public final class ReplayAnalysisChecks {
 				&& observation[19] == 1 && observation[20] == 0 && observation[21] == 0,
 				"Live feature normalization and wrapped opponent yaw must match training");
 		for (int ray = 0; ray < 8; ray++) require(observation[10 + ray] == rays[ray], "Wall-ray ordering must stay world-relative");
+		float[] velocityCatalogue = new float[PolicyCatalogue.FEATURE_NAMES.size()];
+		ObservationEncoder.velocityObservation(velocityCatalogue, source, target);
+		require(velocityCatalogue[79] == 0.1F && velocityCatalogue[80] == -0.2F && velocityCatalogue[81] == 0.3F
+				&& Math.abs(velocityCatalogue[82] + 0.3F) < 1e-6F
+				&& Math.abs(velocityCatalogue[83] - 0.6F) < 1e-6F
+				&& Math.abs(velocityCatalogue[84] + 0.4F) < 1e-6F,
+				"Self and opponent-relative velocities must use world-axis blocks per tick");
 		float[] coincident = ObservationEncoder.observe(source, source, rays);
 		require(coincident[18] == 0 && coincident[19] == 0 && coincident[20] == 0 && coincident[21] == 0,
 				"Coincident players must not produce undefined aiming observations");
@@ -472,8 +479,10 @@ public final class ReplayAnalysisChecks {
 
 	private static ObservationEncoder.State fixtureState(JsonObject value) {
 		JsonArray position = value.getAsJsonArray("position");
+		JsonArray velocity = value.getAsJsonArray("velocity");
 		return new ObservationEncoder.State(position.get(0).getAsDouble(), position.get(1).getAsDouble(), position.get(2).getAsDouble(),
-				value.get("health").getAsFloat(), value.get("yaw").getAsFloat(), value.get("pitch").getAsFloat(), value.get("health").getAsFloat() > 0);
+				value.get("health").getAsFloat(), value.get("yaw").getAsFloat(), value.get("pitch").getAsFloat(), value.get("health").getAsFloat() > 0,
+				velocity.get(0).getAsDouble(), velocity.get(1).getAsDouble(), velocity.get(2).getAsDouble());
 	}
 
 	private static void checkPolicyFixtures() throws Exception {
@@ -481,15 +490,26 @@ public final class ReplayAnalysisChecks {
 		float tolerance = fixture.get("tolerance").getAsFloat();
 		for (var sample : fixture.getAsJsonArray("observations")) {
 			JsonObject value = sample.getAsJsonObject();
-			float[] actual = ObservationEncoder.observe(fixtureState(value.getAsJsonObject("source")), fixtureState(value.getAsJsonObject("target")),
+			var source = fixtureState(value.getAsJsonObject("source"));
+			var target = fixtureState(value.getAsJsonObject("target"));
+			float[] actual = ObservationEncoder.observe(source, target,
 					ReplayAnalysis.JSON.fromJson(value.get("rays"), float[].class));
 			float[] expected = ReplayAnalysis.JSON.fromJson(value.get("expected"), float[].class);
 			require(actual.length == expected.length, "Shared observation size");
 			for (int index = 0; index < actual.length; index++) require(Math.abs(actual[index] - expected[index]) <= tolerance,
 					value.get("name").getAsString() + ": " + index + " actual=" + actual[index] + " expected=" + expected[index]);
+			float[] velocityCatalogue = new float[PolicyCatalogue.FEATURE_NAMES.size()];
+			ObservationEncoder.velocityObservation(velocityCatalogue, source, target);
+			float[] expectedVelocity = ReplayAnalysis.JSON.fromJson(value.get("expected_velocity"), float[].class);
+			for (int index = 0; index < expectedVelocity.length; index++) require(Math.abs(velocityCatalogue[79 + index] - expectedVelocity[index]) <= tolerance,
+					value.get("name").getAsString() + ": velocity " + index);
 		}
 		SimulationContract contract = new SimulationContract(fixture.getAsJsonObject("policy"));
-		float[] actual = contract.project(ReplayAnalysis.JSON.fromJson(fixture.get("catalogue"), float[].class));
+		float[] catalogue = ReplayAnalysis.JSON.fromJson(fixture.get("catalogue"), float[].class);
+		if (catalogue.length == PolicyCatalogue.FEATURE_NAMES.size() - 6) {
+			catalogue = java.util.Arrays.copyOf(catalogue, PolicyCatalogue.FEATURE_NAMES.size());
+		}
+		float[] actual = contract.project(catalogue);
 		float[] expected = ReplayAnalysis.JSON.fromJson(fixture.get("projected"), float[].class);
 		require(actual.length == expected.length, "Shared projection size");
 		for (int index = 0; index < actual.length; index++) require(Math.abs(actual[index] - expected[index]) <= tolerance, "Shared projection values");
