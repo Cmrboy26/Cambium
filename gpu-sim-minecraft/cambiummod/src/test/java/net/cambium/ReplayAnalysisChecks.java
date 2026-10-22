@@ -503,6 +503,17 @@ public final class ReplayAnalysisChecks {
 			float[] expectedVelocity = ReplayAnalysis.JSON.fromJson(value.get("expected_velocity"), float[].class);
 			for (int index = 0; index < expectedVelocity.length; index++) require(Math.abs(velocityCatalogue[79 + index] - expectedVelocity[index]) <= tolerance,
 					value.get("name").getAsString() + ": velocity " + index);
+			JsonObject sourceState = value.getAsJsonObject("source");
+			JsonObject targetState = value.getAsJsonObject("target");
+			ObservationEncoder.movementObservation(velocityCatalogue, sourceState.get("on_ground").getAsBoolean(),
+					targetState.get("on_ground").getAsBoolean(), sourceState.get("sprinting").getAsBoolean(), targetState.get("sprinting").getAsBoolean());
+			float[] expectedMovement = ReplayAnalysis.JSON.fromJson(value.get("expected_movement"), float[].class);
+			for (int index = 0; index < expectedMovement.length; index++) require(velocityCatalogue[85 + index] == expectedMovement[index],
+					value.get("name").getAsString() + ": movement " + index);
+			ObservationEncoder.movementObservation(velocityCatalogue, targetState.get("on_ground").getAsBoolean(),
+					sourceState.get("on_ground").getAsBoolean(), targetState.get("sprinting").getAsBoolean(), sourceState.get("sprinting").getAsBoolean());
+			for (int index = 0; index < expectedMovement.length; index++) require(velocityCatalogue[85 + index] == expectedMovement[index ^ 1],
+					value.get("name").getAsString() + ": movement perspective " + index);
 		}
 		SimulationContract contract = new SimulationContract(fixture.getAsJsonObject("policy"));
 		float[] catalogue = ReplayAnalysis.JSON.fromJson(fixture.get("catalogue"), float[].class);
@@ -513,6 +524,25 @@ public final class ReplayAnalysisChecks {
 		float[] expected = ReplayAnalysis.JSON.fromJson(fixture.get("projected"), float[].class);
 		require(actual.length == expected.length, "Shared projection size");
 		for (int index = 0; index < actual.length; index++) require(Math.abs(actual[index] - expected[index]) <= tolerance, "Shared projection values");
+		for (var element : fixture.getAsJsonArray("projection_cases")) {
+			JsonObject sample = element.getAsJsonObject();
+			JsonObject descriptor = fixture.getAsJsonObject("policy").deepCopy();
+			descriptor.add("observations", sample.get("observations"));
+			float[] projected = new SimulationContract(descriptor).project(catalogue);
+			float[] wanted = ReplayAnalysis.JSON.fromJson(sample.get("expected"), float[].class);
+			require(projected.length == wanted.length, "Expanded observation projection size");
+			for (int index = 0; index < projected.length; index++) require(Math.abs(projected[index] - wanted[index]) <= tolerance,
+					sample.get("name").getAsString() + ": " + index);
+		}
+		JsonObject oversized = fixture.getAsJsonObject("policy").deepCopy();
+		JsonArray expanded = new JsonArray();
+		for (int index = 0; index < 15; index++) expanded.add(JsonParser.parseString("""
+			{"feature":"self.weapon_slot","encoding":"one_hot","categories":[0,1,2,3,4,5,6,7,8]}
+			"""));
+		oversized.add("observations", expanded);
+		boolean overflowRejected = false;
+		try { new SimulationContract(oversized); } catch (IllegalArgumentException error) { overflowRejected = true; }
+		require(overflowRejected, "Expanded observation limit must be enforced");
 		JsonObject loadout = new JsonObject();
 		loadout.add("weapons", fixture.get("weapons"));
 		contract.validateLoadouts(java.util.List.of(loadout, loadout));

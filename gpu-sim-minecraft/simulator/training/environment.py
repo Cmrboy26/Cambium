@@ -135,6 +135,10 @@ class Environment:
             raise ValueError("Reward weights must be finite")
         self.native = load_library(library, device)
         self.build_info = self.native._build_info.copy()
+        if (any(observation.get("encoding") == "one_hot" or "clip" in observation
+                for observation in self.contract["observations"])
+                and self.build_info.get("observation_projection_version", 0) < 1):
+            raise RuntimeError("Rebuild minecraft_sim_training to enable observation encodings and clipping")
         pointer = ctypes.c_void_p
         self.native.mcsim_last_error.restype = ctypes.c_char_p
         set_block_reward = self.native.mcsim_set_block_reward

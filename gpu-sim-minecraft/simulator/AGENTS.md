@@ -4,6 +4,9 @@ Follow the repository [development guide](../AGENTS.md). Training has additional
 [local guidance](training/AGENTS.md). Public build entry points are in
 [README.md](README.md).
 
+Use the [mechanics contribution workflow](../CONTRIBUTING.md#port-a-minecraft-mechanic)
+for source investigation, implementation ownership and parity/handoff gates.
+
 ## Ownership And Fidelity
 
 C++20/CUDA-compatible functions target supplied Minecraft Java 26.3 behavior.

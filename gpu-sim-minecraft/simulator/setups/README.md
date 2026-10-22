@@ -1,8 +1,11 @@
 # Create Training Setups
 
 Use JSON to define a task, its policy and the sequence of training stages.
-Start with the self-contained [example plan](curricula/example/melee.json).
+Start with the [advanced-melee example](curricula/example/advanced-melee.json).
 Paths resolve relative to the JSON file containing them, not the working directory.
+
+For a guided authoring and validation workflow, use the
+[setup skill](../../../.github/skills/gpu-sim-setup/SKILL.md) (`/gpu-sim-setup`).
 
 Create your own person-named subfolder inside each of the four folders below
 for definitions you author; use the same name across all four. Keep intentionally
@@ -21,6 +24,101 @@ Copy their files into your folders, rename JSON `name` values and update referen
 
 Reuse shared definitions when appropriate; do not depend on another person's files.
 One policy layout stays fixed throughout a plan; new plans should use version 2.
+
+## Choose Observations
+
+The policy's `observations` list selects inputs in order; unlisted features are
+not supplied to the policy. Each entry is `{"feature": "self.velocity.x"}`.
+The supported names come from the [shared catalogue](../../contracts/policy_catalogue.json).
+In the table, `self`/`opponent` means both prefixes are supported; `x/y/z`
+and slot `N` expand into separate feature names.
+
+All model inputs are `float32` numbers. "Binary" below means `0.0` or `1.0`,
+not a separate boolean tensor. By default, each feature produces one scalar input,
+including integer-valued slot indices. Ranges below describe the original feature
+before optional clipping and the `scale` multiplier (default `1`). Timer/progress
+inputs are normalized floats, not raw tick counts.
+
+Existing feature-only entries need no changes. Optional encodings can be mixed:
+
+```json
+"observations": [
+	{"feature": "self.health_fraction"},
+	{"feature": "self.weapon_slot", "encoding": "one_hot", "categories": [0, 1]},
+	{"feature": "self.velocity.x", "clip": [-0.5, 0.5], "scale": 2}
+]
+```
+
+This example produces four inputs: health, two selected-slot flags and clipped/
+scaled velocity. `encoding` defaults to `scalar`; `one_hot` supports slot indices
+and binary features, with distinct integer `categories` in the desired input order.
+An unlisted category produces all zeros. Scalar `clip: [min, max]` runs before
+`scale`; one-hot applies `scale` to its flags and does not allow clipping.
+The total expanded layout is limited to 128 inputs. Encoding/clip changes need a
+new compatible checkpoint and rebuilt native library/updated mod; plain scalar
+policies retain their existing layout and fingerprint. See the
+[encoding contract](../../docs/simulation_contract.md#policy-layout) for details.
+
+| Observation | Feature names | Input type / range | Meaning |
+| --- | --- | --- | --- |
+| Health | `self.health_fraction`, `opponent.health_fraction` | Float, 0..1 | Current health / 20 |
+| Alive | `opponent.alive` | Binary | 1 while opponent health is above zero |
+| Facing | `self.yaw_fraction`, `opponent.yaw_fraction`, `self.pitch_fraction`, `opponent.pitch_fraction` | Signed float | Wrapped yaw / 180 ([-1,1)); pitch / 90 ([-1,1]) |
+| Relative position | `relative.x/y/z` | Signed float | Opponent minus self feet position / 10 blocks; not clamped |
+| Own velocity | `self.velocity.x/y/z` | Signed float | World-axis blocks per tick, not normalized |
+| Relative velocity | `relative.velocity.x/y/z` | Signed float | Opponent minus self world-axis velocity; add own velocity to recover opponent velocity |
+| Ground contact | `self.on_ground`, `opponent.on_ground` | Binary, 0 or 1 | Actual current ground-contact state; not inferred from vertical velocity or the jump action |
+| Sprint state | `self.sprinting`, `opponent.sprinting` | Binary, 0 or 1 | Actual sprinting state after eligibility/cancellation checks, not the requested sprint action |
+| Terrain | `arena.ray_world_0`, `arena.ray_world_45`, ..., `arena.ray_world_315` | Float, 0..1 | Eight world-fixed rays at 45-degree intervals; terrain hit distance / 50 blocks; 1 if no nearer hit |
+| Target distance | `target.distance_fraction` | Float, 0..1 | Feet-to-feet distance / 10, capped at 1 |
+| Target alignment | `target.aim_dot` | Float, -1..1 | Facing alignment: 1 toward opponent, 0 perpendicular, -1 away |
+| Target angle errors | `target.yaw_error`, `target.pitch_error` | Signed float | Yaw error / 180 ([-1,1)); pitch error / 90 ([-2,2]) |
+| Attack readiness | `self.attack_charge` | Recharge progress, 0..1 | Weapon-dependent recharge progress; 1 is fully charged, not elapsed time since a successful hit |
+| Weapon type | `self.weapon_is_axe`, `opponent.weapon_is_axe` | Binary | 1 if the current weapon is an axe |
+| Selected slot | `self.weapon_slot`, `opponent.weapon_slot` | Discrete index, 0..8 | Actual selected hotbar slot, encoded as one float |
+| Weapon attributes | `self`/`opponent.weapon_damage_fraction`, `self`/`opponent.weapon_speed_fraction` | Float, 0..1 | Selected weapon damage / 10 and attack speed / 4, clamped; base attributes, not timers |
+| Shield presence/use | `self`/`opponent.has_shield`, `self`/`opponent.shield_using` | Binary | Shield equipped and actively using it; using is not necessarily fully raised |
+| Own shield disabled | `self.shield_disabled` | Binary | 1 while own disable cooldown is greater than zero |
+| Opponent disable observed | `opponent.shield_disabled_observed` | Binary | Remembered observed axe-disable flag; not the opponent's exact remaining cooldown |
+| Shield cooldown | `self.shield_cooldown_fraction` | Countdown, 0..1 | Remaining shield-disable ticks / 100, capped at 1; 0 means no disable cooldown |
+| Shield raising | `self.shield_raise_fraction` | Elapsed progress, 0..1 | Completed shield-use ticks / 5, capped at 1; 0 when not using, 1 when fully raised |
+| Armor | `self`/`opponent.armor_defense_fraction`, `self`/`opponent.armor_toughness_fraction` | Float, 0..1 | Defense / 20 and toughness / 12, clamped |
+| Own slot flags | `self.weapon_slot_N.present`, `.is_axe` | Binary | Item present and axe flags for N=0..8; no hidden opponent inventory |
+| Own slot attributes | `self.weapon_slot_N.damage_fraction`, `.speed_fraction` | Float, 0..1 | Slot damage / 10 and speed / 4, clamped; empty slots give zero |
+
+At 20 simulation ticks per second, shield cooldown `0.5` means 50 ticks
+(2.5 seconds) remaining; shield raising `0.4` means two of five use ticks
+completed. No feature directly reports time since the last attack or hit.
+
+`advanced-melee-v2` appends the four ground-contact/sprint flags to its previous
+36 inputs, for 40 scalar inputs. Start a fresh run for this changed layout;
+36-input checkpoints are not compatible with the updated policy. Rebuild the
+native library and live mod for the expanded shared catalogue.
+
+## Available Actions
+
+The policy's `actions` list chooses which heads exist and the allowed `values`
+for each head, in order. Each head selects one choice; all heads combine in the
+same tick, so movement, aiming and attacking can happen together.
+
+| Action head | Available choices | Effect |
+| --- | --- | --- |
+| `movement` | `neutral`, `forward`, `forward_right`, `right`, `backward_right`, `backward`, `backward_left`, `left`, `forward_left` | Movement relative to facing |
+| `jump` | `false`, `true` | Request a jump |
+| `sprint` | `false`, `true` | Request sprinting |
+| `attack` | `false`, `true` | Attempt a melee attack |
+| `yaw` | Configured degree deltas | Turn horizontally |
+| `pitch` | Configured degree deltas | Look up/down |
+| `weapon` | Configured slot indices 0..8 | Select a hotbar slot |
+| `shield` | `false`, `true` | Release/use the shield |
+| `sneak` | `false`, `true` | Release/hold sneak |
+
+The model outputs one score (logit) per configured choice in each head, not a
+direct angle, slot number or boolean. Training samples a choice index from that
+head's softmax probabilities; deterministic inference selects the highest-scoring
+index. The decoder looks up `values[index]`: with yaw `values: [-10, 0, 10]`,
+index `2` means a `+10` degree turn. Boolean heads work the same way, not via a
+threshold. Stage `controls.fixed` overrides selection for the named heads.
 
 ## Rewards
 

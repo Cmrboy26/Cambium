@@ -28,7 +28,8 @@
     "self.weapon_slot_7.present", "self.weapon_slot_7.is_axe", "self.weapon_slot_7.damage_fraction", "self.weapon_slot_7.speed_fraction",
     "self.weapon_slot_8.present", "self.weapon_slot_8.is_axe", "self.weapon_slot_8.damage_fraction", "self.weapon_slot_8.speed_fraction",
     "self.velocity.x", "self.velocity.y", "self.velocity.z",
-    "relative.velocity.x", "relative.velocity.y", "relative.velocity.z"
+    "relative.velocity.x", "relative.velocity.y", "relative.velocity.z",
+    "self.on_ground", "opponent.on_ground", "self.sprinting", "opponent.sprinting"
   ],
   "actions": [
     {"name": "movement", "kind": "movement"},

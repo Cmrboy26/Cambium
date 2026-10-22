@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 import numpy as np
 
-from simulator.training.contract import fingerprint, from_legacy, validate_contract
+from simulator.training.contract import fingerprint, from_legacy, observation_width, validate_contract
 
 if TYPE_CHECKING:
     import torch
@@ -169,9 +169,11 @@ class StationaryTargetController(_BatchedController):
         self._heads = {head["name"]: (index, head["values"])
                        for index, head in enumerate(self.contract["actions"])}
         self._features = {}
-        for index, observation in enumerate(self.contract["observations"]):
+        offset = 0
+        for observation in self.contract["observations"]:
             if observation["scale"] != 0:
-                self._features.setdefault(observation["feature"], (index, observation["scale"]))
+                self._features.setdefault(observation["feature"], (offset, observation))
+            offset += observation_width(observation)
         neutral = []
         for name, (_, values) in self._heads.items():
             if name == "movement":
@@ -193,8 +195,14 @@ class StationaryTargetController(_BatchedController):
             raise ValueError(f"{self._description['controller']} requires action {name} with choice {value!r}")
 
     def _feature(self, observations, name):
-        index, scale = self._features[name]
-        return observations[:, index].astype(np.float64) / scale
+        index, descriptor = self._features[name]
+        if descriptor.get("encoding") == "one_hot":
+            values = observations[:, index:index + observation_width(descriptor)] / descriptor["scale"]
+            if (not np.isclose(values.sum(axis=1), 1).all()
+                    or not (np.isclose(values, 0) | np.isclose(values, 1)).all()):
+                raise ValueError(f"Cannot recover required controller feature {name} from one_hot inputs")
+            return np.asarray(descriptor["categories"], dtype=np.float64)[values.argmax(axis=1)]
+        return observations[:, index].astype(np.float64) / descriptor["scale"]
 
     def _set(self, actions, name, values):
         if name in self._heads:

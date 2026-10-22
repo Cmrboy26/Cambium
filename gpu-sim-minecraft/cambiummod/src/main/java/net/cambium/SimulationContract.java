@@ -16,10 +16,11 @@ final class SimulationContract {
 	static final List<String> ARMOR_SLOTS = PolicyCatalogue.ARMOR_SLOT_NAMES;
 	private static final Set<String> HEADS = Set.copyOf(PolicyCatalogue.ACTION_NAMES);
 	private static final Set<String> WEAPONS = weaponItems();
-	private final int[] features;
-	private final float[] scales;
+	private final List<Observation> observations = new ArrayList<>();
+	private int observationCount;
 	private final List<Head> heads = new ArrayList<>();
 	record Head(String name, JsonArray values) {}
+	record Observation(int feature, float scale, int[] categories, float lower, float upper) {}
 
 	SimulationContract(JsonObject descriptor) {
 		if (!descriptor.get("format").getAsString().equals("minecraft_sim_policy") || integer(descriptor.get("version")) != 1
@@ -27,18 +28,69 @@ final class SimulationContract {
 			throw new IllegalArgumentException("Unsupported policy contract format/version/build/tick rate");
 		}
 		capabilities(descriptor);
-		JsonArray observations = descriptor.getAsJsonArray("observations");
-		if (observations.size() < 1 || observations.size() > PolicyCatalogue.MAX_OBSERVATIONS) throw new IllegalArgumentException("Invalid observation count");
-		features = new int[observations.size()];
-		scales = new float[observations.size()];
-		for (int index = 0; index < features.length; index++) {
-			JsonObject observation = observations.get(index).getAsJsonObject();
-			features[index] = FEATURES.indexOf(observation.get("feature").getAsString());
-			scales[index] = observation.has("scale") ? observation.get("scale").getAsFloat() : 1;
-			if (features[index] < 0 || !Float.isFinite(scales[index]) || Math.abs(scales[index]) > PolicyCatalogue.MAX_SCALE) {
+		JsonArray entries = descriptor.getAsJsonArray("observations");
+		if (entries.size() < 1 || entries.size() > PolicyCatalogue.MAX_OBSERVATIONS) throw new IllegalArgumentException("Invalid observation count");
+		for (JsonElement element : entries) {
+			JsonObject observation = element.getAsJsonObject();
+			for (String key : observation.keySet()) if (!Set.of("feature", "scale", "encoding", "categories", "clip").contains(key)) {
+				throw new IllegalArgumentException("Unsupported observation field: " + key);
+			}
+			String name = observation.get("feature").getAsString();
+			int feature = FEATURES.indexOf(name);
+			if (observation.has("scale") && !observation.get("scale").getAsJsonPrimitive().isNumber()) {
+				throw new IllegalArgumentException("Invalid observation scale");
+			}
+			float scale = observation.has("scale") ? observation.get("scale").getAsFloat() : 1;
+			if (feature < 0 || !Float.isFinite(scale) || Math.abs(scale) > PolicyCatalogue.MAX_SCALE) {
 				throw new IllegalArgumentException("Unsupported observation primitive or scale: " + observation);
 			}
+			String encoding = observation.has("encoding") ? observation.get("encoding").getAsString() : "scalar";
+			float lower = Float.NEGATIVE_INFINITY;
+			float upper = Float.POSITIVE_INFINITY;
+			if (observation.has("clip")) {
+				JsonElement clip = observation.get("clip");
+				if (!encoding.equals("scalar") || !clip.isJsonArray() || clip.getAsJsonArray().size() != 2) {
+					throw new IllegalArgumentException("Invalid observation clip");
+				}
+				JsonArray bounds = clip.getAsJsonArray();
+				for (JsonElement bound : bounds) if (!bound.isJsonPrimitive() || !bound.getAsJsonPrimitive().isNumber()) {
+					throw new IllegalArgumentException("Clip bounds must be numeric");
+				}
+				if (bounds.get(0).getAsDouble() >= bounds.get(1).getAsDouble()) throw new IllegalArgumentException("Invalid clip bounds");
+				lower = bounds.get(0).getAsFloat();
+				upper = bounds.get(1).getAsFloat();
+				if (!Float.isFinite(lower) || !Float.isFinite(upper)) throw new IllegalArgumentException("Invalid clip bounds");
+			}
+			int[] categories = null;
+			if (encoding.equals("scalar")) {
+				if (observation.has("categories")) throw new IllegalArgumentException("Scalar observations cannot have categories");
+			} else if (encoding.equals("one_hot")) {
+				boolean slot = name.equals("self.weapon_slot") || name.equals("opponent.weapon_slot");
+				boolean binary = name.endsWith(".alive") || name.endsWith(".weapon_is_axe") || name.endsWith(".shield_using")
+						|| name.endsWith(".shield_disabled") || name.endsWith(".shield_disabled_observed") || name.endsWith(".has_shield")
+						|| name.endsWith(".present") || name.endsWith(".is_axe") || name.endsWith(".on_ground") || name.endsWith(".sprinting");
+				if ((!slot && !binary) || !observation.has("categories") || !observation.get("categories").isJsonArray()
+						|| observation.getAsJsonArray("categories").isEmpty()) throw new IllegalArgumentException("Invalid one_hot observation");
+				JsonArray choices = observation.getAsJsonArray("categories");
+				categories = new int[choices.size()];
+				Set<Integer> seen = new HashSet<>();
+				for (int index = 0; index < categories.length; index++) {
+					JsonElement choice = choices.get(index);
+					if (!choice.isJsonPrimitive() || !choice.getAsJsonPrimitive().isNumber()
+							|| !choice.getAsString().matches("-?[0-9]+")) throw new IllegalArgumentException("Categories must be integer literals");
+					int category = integer(choices.get(index));
+					if (category < 0 || category >= (slot ? PolicyCatalogue.MAX_WEAPON_SLOTS : 2) || !seen.add(category)) {
+						throw new IllegalArgumentException("Invalid/duplicate observation category");
+					}
+					categories[index] = category;
+				}
+			} else {
+				throw new IllegalArgumentException("Unsupported observation encoding: " + encoding);
+			}
+			observations.add(new Observation(feature, scale, categories, lower, upper));
+			observationCount += categories == null ? 1 : categories.length;
 		}
+		if (observationCount > PolicyCatalogue.MAX_OBSERVATIONS) throw new IllegalArgumentException("Expanded observation count exceeds limit");
 		JsonArray actions = descriptor.getAsJsonArray("actions");
 		if (actions.size() < 1 || actions.size() > HEADS.size()) throw new IllegalArgumentException("Invalid action head count");
 		Set<String> seen = new HashSet<>();
@@ -68,7 +120,7 @@ final class SimulationContract {
 			}
 			heads.add(new Head(name, values.deepCopy()));
 		}
-		if (descriptor.has("observation_dim") && integer(descriptor.get("observation_dim")) != features.length) {
+		if (descriptor.has("observation_dim") && integer(descriptor.get("observation_dim")) != observationCount) {
 			throw new IllegalArgumentException("Observation dimension disagrees with descriptors");
 		}
 		if (descriptor.has("action_names") || descriptor.has("action_sizes")) {
@@ -84,15 +136,21 @@ final class SimulationContract {
 		}
 	}
 
-	int observationCount() { return features.length; }
+	int observationCount() { return observationCount; }
 
 	float[] project(float[] catalogue) {
 		if (catalogue.length != FEATURES.size()) throw new IllegalArgumentException("Incomplete observation catalogue");
-		float[] result = new float[features.length];
-		for (int index = 0; index < features.length; index++) {
-			result[index] = catalogue[features[index]] * scales[index];
-			if (!Float.isFinite(result[index])) throw new IllegalArgumentException("Non-finite observation");
+		float[] result = new float[observationCount];
+		int offset = 0;
+		for (Observation observation : observations) {
+			float value = catalogue[observation.feature];
+			if (observation.categories == null) {
+				result[offset++] = Math.clamp(value, observation.lower, observation.upper) * observation.scale;
+			} else {
+				for (int category : observation.categories) result[offset++] = (value == category ? 1 : 0) * observation.scale;
+			}
 		}
+		for (float value : result) if (!Float.isFinite(value)) throw new IllegalArgumentException("Non-finite observation");
 		return result;
 	}
 

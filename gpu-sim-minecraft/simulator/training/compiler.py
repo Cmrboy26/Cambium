@@ -178,7 +178,8 @@ def _policy(value):
     _version(value, "minecraft_sim_policy", 1, "policy")
     if type(value.get("ticks_per_action")) is not int:
         raise ValueError("Policy tick rate must be an integer")
-    for key, allowed in (("observations", ("feature", "scale")), ("actions", ("name", "values"))):
+    for key, allowed in (("observations", ("feature", "scale", "encoding", "categories", "clip")),
+                         ("actions", ("name", "values"))):
         if not isinstance(value.get(key), list):
             raise ValueError(f"Policy {key} must be a list")
         for entry in value[key]:

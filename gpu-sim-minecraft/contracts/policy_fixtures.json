@@ -4,34 +4,38 @@
   "observations": [
     {
       "name": "forward-and-wrapped-yaw",
-      "source": {"position": [0.5, 1, -1.5], "velocity": [0.1, -0.2, 0.3], "health": 20, "yaw": 0, "pitch": 0},
-      "target": {"position": [0.5, 1, 2.5], "velocity": [-0.2, 0.4, -0.1], "health": 10, "yaw": 180, "pitch": 0},
+      "source": {"position": [0.5, 1, -1.5], "velocity": [0.1, -0.2, 0.3], "health": 20, "yaw": 0, "pitch": 0, "on_ground": true, "sprinting": true},
+      "target": {"position": [0.5, 1, 2.5], "velocity": [-0.2, 0.4, -0.1], "health": 10, "yaw": 180, "pitch": 0, "on_ground": false, "sprinting": false},
       "rays": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
       "expected_velocity": [0.1, -0.2, 0.3, -0.3, 0.6, -0.4],
+      "expected_movement": [1, 0, 1, 0],
       "expected": [1, 0, 0, 1, 0.5, 0, 0, 0.4, -1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.4, 1, 0, 0]
     },
     {
       "name": "elevation-and-dead-opponent",
-      "source": {"position": [0, 0, 0], "velocity": [0, 1, 0], "health": 15, "yaw": 90, "pitch": 0},
-      "target": {"position": [4, 3, 0], "velocity": [0, -1, 0], "health": 0, "yaw": -540, "pitch": -45},
+      "source": {"position": [0, 0, 0], "velocity": [0, 1, 0], "health": 15, "yaw": 90, "pitch": 0, "on_ground": false, "sprinting": false},
+      "target": {"position": [4, 3, 0], "velocity": [0, -1, 0], "health": 0, "yaw": -540, "pitch": -45, "on_ground": true, "sprinting": true},
       "rays": [0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
       "expected_velocity": [0, 1, 0, 0, -2, 0],
+      "expected_movement": [0, 1, 0, 1],
       "expected": [0.75, 0.5, 0, 0, 0, 0.4, 0.3, 0, -1, -0.5, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.5, -0.8, -1, -0.4096655294]
     },
     {
       "name": "coincident-positions",
-      "source": {"position": [-1, 2, 3], "velocity": [0.5, 0, 0.25], "health": 20, "yaw": 450, "pitch": 45},
-      "target": {"position": [-1, 2, 3], "velocity": [-0.5, 0.2, -0.25], "health": 10, "yaw": 0, "pitch": 90},
+      "source": {"position": [-1, 2, 3], "velocity": [0.5, 0, 0.25], "health": 20, "yaw": 450, "pitch": 45, "on_ground": false, "sprinting": true},
+      "target": {"position": [-1, 2, 3], "velocity": [-0.5, 0.2, -0.25], "health": 10, "yaw": 0, "pitch": 90, "on_ground": true, "sprinting": false},
       "rays": [1, 1, 1, 1, 1, 1, 1, 1],
       "expected_velocity": [0.5, 0, 0.25, -1, 0.2, -0.5],
+      "expected_movement": [0, 1, 1, 0],
       "expected": [1, 0.5, 0.5, 1, 0.5, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0]
     },
     {
       "name": "distance-clamp-and-pitch",
-      "source": {"position": [0, 0, 0], "velocity": [0, 0, -0.0784], "health": 20, "yaw": -180, "pitch": 90},
-      "target": {"position": [0, 0, 20], "velocity": [0, 0.42, 0], "health": 20, "yaw": 0, "pitch": 0},
+      "source": {"position": [0, 0, 0], "velocity": [0, 0, -0.0784], "health": 20, "yaw": -180, "pitch": 90, "on_ground": true, "sprinting": false},
+      "target": {"position": [0, 0, 20], "velocity": [0, 0.42, 0], "health": 20, "yaw": 0, "pitch": 0, "on_ground": false, "sprinting": true},
       "rays": [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1],
       "expected_velocity": [0, 0, -0.0784, 0, 0.42, 0.0784],
+      "expected_movement": [1, 0, 0, 1],
       "expected": [1, -1, 1, 1, 1, 0, 0, 2, 0, 0, 0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1, 1, 0, -1, -1]
     }
   ],
@@ -48,9 +52,52 @@
   "catalogue": [
     1, 0, 0, 1, 0.5, 0, 0, 0.4, -1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.4, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0.5, 0.75, 0.4, 2, 1,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0,
+    1, 0, 0, 1
   ],
   "projected": [1.5, -0.8, 1, 1],
+  "projection_cases": [
+    {
+      "name": "one-hot-order-unknown-and-clip-before-scale",
+      "observations": [
+        {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": [1, 2, 0], "scale": 2},
+        {"feature": "relative.z", "clip": [-0.25, 0.25], "scale": -2},
+        {"feature": "opponent.weapon_slot", "encoding": "one_hot", "categories": [0, 2]},
+        {"feature": "self.weapon_is_axe", "encoding": "one_hot", "categories": [1, 0]},
+        {"feature": "self.health_fraction", "encoding": "scalar"}
+      ],
+      "expected": [0, 2, 0, -0.5, 0, 0, 1, 0, 1]
+    },
+    {
+      "name": "negative-scale-and-lower-clipping",
+      "observations": [
+        {"feature": "opponent.weapon_slot", "encoding": "one_hot", "categories": [1, 0], "scale": -2},
+        {"feature": "relative.x", "clip": [0.25, 1], "scale": 2},
+        {"feature": "self.attack_charge", "encoding": "scalar", "scale": 0}
+      ],
+      "expected": [-2, 0, 0.5, 0]
+    },
+    {
+      "name": "clip-bounds-round-to-same-float32",
+      "observations": [{"feature": "relative.z", "clip": [1, 1.00000001]}],
+      "expected": [1]
+    },
+    {
+      "name": "grounded-and-sprinting-scalar-and-one-hot",
+      "observations": [
+        {"feature": "self.on_ground"},
+        {"feature": "opponent.on_ground"},
+        {"feature": "self.sprinting"},
+        {"feature": "opponent.sprinting"},
+        {"feature": "self.on_ground", "encoding": "one_hot", "categories": [0, 1]},
+        {"feature": "opponent.on_ground", "encoding": "one_hot", "categories": [1, 0]},
+        {"feature": "self.sprinting", "encoding": "one_hot", "categories": [0, 1]},
+        {"feature": "opponent.sprinting", "encoding": "one_hot", "categories": [1, 0]}
+      ],
+      "expected": [1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0]
+    }
+  ],
   "weapons": ["minecraft:iron_sword", "minecraft:netherite_axe", "minecraft:air"],
   "action": [2, 1, 1, 1, 1, 0, 1, 0, 0],
   "controls": {"forward": true, "backward": false, "left": false, "right": true, "jump": true, "sprint": true, "sneak": true, "attack": true, "yaw_delta": 15, "pitch_delta": -5, "select_weapon": true, "weapon": "minecraft:netherite_axe", "use_item": true},
@@ -62,6 +109,21 @@
     {"pointer": "/actions/1/name", "value": "yaw"},
     {"pointer": "/actions/3/values", "value": [9]},
     {"pointer": "/actions/4/values", "value": [2]},
-    {"pointer": "/requires", "value": ["server"]}
+    {"pointer": "/requires", "value": ["server"]},
+    {"pointer": "/observations/0", "value": {"feature": "self.health_fraction", "encoding": "one_hot", "categories": [0, 1]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": [1, 1]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": [9]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": [true]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": [1.0]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": []}},
+    {"pointer": "/observations/0", "value": {"feature": "self.weapon_slot", "encoding": "one_hot"}},
+    {"pointer": "/observations/0", "value": {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": [0, 1], "clip": [0, 1]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "categories": [0, 1]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "encoding": "unknown"}},
+    {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "clip": [1, 0]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "clip": [true, 1]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "clip": [0, 0]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "typo": 1}},
+    {"pointer": "/observation_dim", "value": 3}
   ]
 }

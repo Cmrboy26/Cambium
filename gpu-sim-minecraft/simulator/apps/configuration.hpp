@@ -4,6 +4,7 @@
 #include "policy_catalogue.generated.hpp"
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -114,6 +115,9 @@ struct PolicyLayout {
     struct Head { int kind; std::vector<float> values; };
     std::vector<int> observations;
     std::vector<float> scales;
+    std::vector<float> categories;
+    std::vector<float> lower_bounds;
+    std::vector<float> upper_bounds;
     std::vector<Head> actions;
 
     PolicyLayout(const nlohmann::json& value, const std::array<std::vector<WeaponItem>, 2>& slots) {
@@ -130,11 +134,61 @@ struct PolicyLayout {
         const auto& features = value.at("observations");
         if (!features.is_array() || features.empty() || features.size() > policy_max_observations) throw std::invalid_argument("Invalid observation count");
         for (const auto& feature : features) {
-            observations.push_back(nameIndex(feature_names, feature.at("feature").get<std::string>()));
+            for (const auto& entry : feature.items()) {
+                if (entry.key() != "feature" && entry.key() != "scale" && entry.key() != "encoding"
+                    && entry.key() != "categories" && entry.key() != "clip") throw std::invalid_argument("Unsupported observation field");
+            }
+            const auto name = feature.at("feature").get<std::string>();
+            const auto source = nameIndex(feature_names, name);
+            if (feature.contains("scale") && !feature.at("scale").is_number()) throw std::invalid_argument("Invalid observation scale");
             const auto scale = feature.value("scale", 1.0F);
             if (!std::isfinite(scale) || std::abs(scale) > policy_max_scale) throw std::invalid_argument("Invalid observation scale");
-            scales.push_back(scale);
+            const auto encoding = feature.value("encoding", std::string("scalar"));
+            float lower = -std::numeric_limits<float>::infinity();
+            float upper = std::numeric_limits<float>::infinity();
+            if (feature.contains("clip")) {
+                const auto& bounds = feature.at("clip");
+                if (encoding != "scalar" || !bounds.is_array() || bounds.size() != 2
+                    || !bounds[0].is_number() || !bounds[1].is_number()) throw std::invalid_argument("Invalid observation clip");
+                if (bounds[0].get<double>() >= bounds[1].get<double>()) throw std::invalid_argument("Invalid observation clip bounds");
+                lower = bounds[0].get<float>();
+                upper = bounds[1].get<float>();
+                if (!std::isfinite(lower) || !std::isfinite(upper)) throw std::invalid_argument("Invalid observation clip bounds");
+            }
+            const auto append = [&](float category) {
+                observations.push_back(source);
+                scales.push_back(scale);
+                categories.push_back(category);
+                lower_bounds.push_back(lower);
+                upper_bounds.push_back(upper);
+            };
+            if (encoding == "scalar") {
+                if (feature.contains("categories")) throw std::invalid_argument("Scalar observations cannot have categories");
+                append(std::numeric_limits<float>::quiet_NaN());
+            } else if (encoding == "one_hot") {
+                const bool slot = name == "self.weapon_slot" || name == "opponent.weapon_slot";
+                const bool binary = name.ends_with(".alive") || name.ends_with(".weapon_is_axe") || name.ends_with(".shield_using")
+                    || name.ends_with(".shield_disabled") || name.ends_with(".shield_disabled_observed") || name.ends_with(".has_shield")
+                    || name.ends_with(".present") || name.ends_with(".is_axe") || name.ends_with(".on_ground") || name.ends_with(".sprinting");
+                const auto& choices = feature.at("categories");
+                if ((!slot && !binary) || !choices.is_array() || choices.empty()) throw std::invalid_argument("Invalid one_hot observation");
+                std::vector<int> seen;
+                for (const auto& choice : choices) {
+                    if (!choice.is_number_integer() || choice < 0 || choice >= (slot ? policy_max_weapon_slots : 2)) {
+                        throw std::invalid_argument("Invalid observation category");
+                    }
+                    const int category = choice.get<int>();
+                    if (std::find(seen.begin(), seen.end(), category) != seen.end()) throw std::invalid_argument("Duplicate observation category");
+                    seen.push_back(category);
+                    append(static_cast<float>(category));
+                }
+            } else {
+                throw std::invalid_argument("Unsupported observation encoding");
+            }
         }
+        if (observations.size() > policy_max_observations) throw std::invalid_argument("Expanded observation count exceeds limit");
+        if (value.contains("observation_dim") && (!value.at("observation_dim").is_number_integer()
+            || value.at("observation_dim") != observations.size())) throw std::invalid_argument("Observation dimension disagrees with descriptors");
         const auto& heads = value.at("actions");
         if (!heads.is_array() || heads.empty() || heads.size() > action_names.size()) throw std::invalid_argument("Invalid action head count");
         std::array<bool, action_names.size()> seen{};
@@ -168,6 +222,14 @@ struct PolicyLayout {
                 head.values.push_back(number);
             }
             actions.push_back(std::move(head));
+        }
+    }
+
+    void project(const float* catalogue, float* output) const {
+        for (std::size_t index = 0; index < observations.size(); ++index) {
+            const float value = catalogue[observations[index]];
+            output[index] = (std::isnan(categories[index]) ? std::clamp(value, lower_bounds[index], upper_bounds[index])
+                : (value == categories[index] ? 1.0F : 0.0F)) * scales[index];
         }
     }
 

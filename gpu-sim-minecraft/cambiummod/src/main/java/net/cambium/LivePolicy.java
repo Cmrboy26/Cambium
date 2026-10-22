@@ -125,6 +125,7 @@ final class LivePolicy implements AutoCloseable {
 		catalogue[31] = source.getInventory().getSelectedSlot();
 		catalogue[32] = target.getInventory().getSelectedSlot();
 		ObservationEncoder.velocityObservation(catalogue, own, other);
+		ObservationEncoder.movementObservation(catalogue, source.onGround(), target.onGround(), source.isSprinting(), target.isSprinting());
 		ObservationEncoder.equipment(catalogue, equipment(source), equipment(target), weaponSlots(source));
 		return contract.project(catalogue);
 	}

@@ -259,11 +259,10 @@ struct TrainingBatch {
                     catalogue[31] = static_cast<float>(selected_slots[index]);
                     catalogue[32] = static_cast<float>(selected_slots[index ^ 1]);
                     app::velocityObservation(catalogue, source, target);
+                    app::movementObservation(catalogue, source, target);
                     app::equipmentObservation(catalogue, source, target,
                         episode_players[environment].weapon_slots[player]);
-                    for (int feature = 0; feature < features; ++feature) {
-                        output[index * features + feature] = catalogue[layout->observations[feature]] * layout->scales[feature];
-                    }
+                    layout->project(catalogue, output + index * features);
                 }
             }
         }
@@ -464,6 +463,7 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"source_hash", MCSIM_SOURCE_HASH}, {"revision", MCSIM_SOURCE_REVISION},
         {"compiler", MCSIM_BUILD_COMPILER}, {"compiled", __DATE__ " " __TIME__},
         {"catalogue_hash", app::catalogue_hash}, {"capabilities", app::capability_names},
+        {"observation_projection_version", 1},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
                            {"reward_total", sizeof(double)}, {"done", sizeof(std::uint8_t)}}},

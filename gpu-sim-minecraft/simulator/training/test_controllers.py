@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from backend.fast_rl_model import ActorCritic
-from simulator.training.contract import fingerprint, from_legacy, validate_contract
+from simulator.training.contract import FEATURES, fingerprint, from_legacy, project_observations, validate_contract
 from simulator.training.controllers import (
     BasicMeleeController, CheckpointController, Controller, CONTROLLER_REGISTRY, FrozenSelfPlayController,
     SelfPlayController, StationaryTargetController, checkpoint_sha256, create_controller, register_controller,
@@ -44,8 +44,11 @@ def policy(observations=None, actions=None):
 
 def observations(contract, count=3, **features):
     result = np.zeros((count, contract["observation_dim"]), dtype=np.float32)
-    for index, descriptor in enumerate(contract["observations"]):
-        result[:, index] = np.asarray(features.get(descriptor["feature"], 0)) * descriptor["scale"]
+    catalogue = np.zeros((count, len(FEATURES)), dtype=np.float32)
+    for name, values in features.items():
+        catalogue[:, FEATURES.index(name)] = values
+    for index in range(count):
+        result[index] = project_observations(catalogue[index], contract)
     return result
 
 
@@ -55,6 +58,27 @@ def decoded(contract, actions, name):
 
 
 class ScriptedChecks(unittest.TestCase):
+    def test_encoded_features_preserve_scripted_actions_and_offsets(self):
+        scalar = from_legacy(SCHEMA_V2)
+        encoded = deepcopy(scalar)
+        encoded.pop("observation_dim")
+        for descriptor in encoded["observations"]:
+            if descriptor["feature"] in ("self.shield_using", "self.shield_disabled", "opponent.shield_using"):
+                descriptor.update(encoding="one_hot", categories=[1, 0], scale=-2)
+        encoded = validate_contract(encoded)
+        self.assertEqual(encoded["observation_dim"], scalar["observation_dim"] + 3)
+        options = {"shield": True, "axe_slot": 1, "sword_slot": 0}
+        original = BasicMeleeController(scalar, 3, options=options)
+        transformed = BasicMeleeController(encoded, 3, options=options)
+        features = {"target.distance_fraction": [0.2, 0.25, 0.6],
+                    "target.yaw_error": [0.1, -0.1, 0], "target.pitch_error": [0, 0.1, -0.1],
+                    "self.shield_using": [0, 1, 0], "self.shield_disabled": [0, 0, 1],
+                    "opponent.shield_using": [1, 0, 1], "self.attack_charge": [0.5, 1, 0.2]}
+        for _ in range(5):
+            np.testing.assert_array_equal(original.act(observations(scalar, **features)),
+                                          transformed.act(observations(encoded, **features)))
+        self.assertEqual(transformed.act(observations(encoded, 0)).shape, (0, 8))
+
     def test_random_walk_avoids_walls_and_is_independent_of_batch_order(self):
         contract = from_legacy(SCHEMA)
         definition = {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 2}}

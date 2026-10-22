@@ -10,7 +10,7 @@ public final class EquipmentEncoderChecks {
 	}
 
 	static void check() {
-		if (PolicyCatalogue.FEATURE_NAMES.size() != 85
+		if (PolicyCatalogue.FEATURE_NAMES.size() != 89
 				|| !PolicyCatalogue.FEATURE_NAMES.contains("opponent.weapon_slot")
 				|| PolicyCatalogue.FEATURE_NAMES.stream().anyMatch(name -> name.startsWith("opponent.weapon_slot_"))) {
 			throw new AssertionError("Catalogue must preserve legacy features but exclude hidden opponent hotbar metadata");
@@ -59,7 +59,7 @@ public final class EquipmentEncoderChecks {
 		for (int index = 0; index < 33; index++) {
 			if (catalogue[index] != -1) throw new AssertionError("Legacy catalogue changed at " + index);
 		}
-		System.out.println("PASS: 85-feature catalogue, equipment normalization, own hotbar, empty slots and legacy isolation");
+		System.out.println("PASS: 89-feature catalogue, equipment normalization, own hotbar, empty slots and legacy isolation");
 	}
 
 	private static void near(float[] catalogue, String name, double expected) {

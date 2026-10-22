@@ -37,6 +37,14 @@ final class ObservationEncoder {
 		catalogue[84] = (float) (target.velocityZ() - source.velocityZ());
 	}
 
+	static void movementObservation(float[] catalogue, boolean sourceGrounded, boolean targetGrounded,
+			boolean sourceSprinting, boolean targetSprinting) {
+		catalogue[85] = sourceGrounded ? 1 : 0;
+		catalogue[86] = targetGrounded ? 1 : 0;
+		catalogue[87] = sourceSprinting ? 1 : 0;
+		catalogue[88] = targetSprinting ? 1 : 0;
+	}
+
 	private static float equipmentFraction(double value, double maximum) {
 		return (float) Math.clamp(value / maximum, 0.0, 1.0);
 	}

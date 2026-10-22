@@ -1,5 +1,6 @@
 from copy import deepcopy
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -12,11 +13,76 @@ from uuid import uuid4
 import numpy as np
 
 from simulator.training._test_plans import TEST_SETUPS, example_plan
-from simulator.training.compiler import LEARNER_DEFAULTS, _learner, _opponents, _snapshots
-from simulator.training.contract import from_legacy
+from simulator.training.compiler import LEARNER_DEFAULTS, _learner, _opponents, _policy, _snapshots
+from simulator.training.contract import fingerprint, from_legacy, project_observations, validate_contract
 from simulator.training.environment import REWARD_NAMES, ROOT, SCHEMA_V2
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
 from simulator.training.validate_plans import main as validate_plans
+
+
+class ObservationEncodingChecks(unittest.TestCase):
+    def test_existing_policy_files_keep_legacy_values_dimensions_and_fingerprints(self):
+        paths = sorted((ROOT / "simulator/setups/policies").rglob("*.json"))
+        self.assertTrue(paths)
+        fixture = json.loads((ROOT / "contracts/policy_fixtures.json").read_text())
+        from simulator.training.contract import FEATURES
+
+        checked = 0
+        for path in paths:
+            raw = json.loads(path.read_text())
+            if any(set(entry) - {"feature", "scale"} for entry in raw["observations"]):
+                continue
+            with self.subTest(path=path):
+                expected = deepcopy(raw)
+                for entry in expected["observations"]:
+                    entry["scale"] = float(entry.get("scale", 1))
+                expected["requires"] = sorted(set(expected.get("requires", [])))
+                expected["observation_dim"] = len(expected["observations"])
+                expected["action_names"] = [head["name"] for head in expected["actions"]]
+                expected["action_sizes"] = [len(head["values"]) for head in expected["actions"]]
+                self.assertEqual(_policy(raw), expected)
+                old_hash = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":"),
+                                                     allow_nan=False).encode()).hexdigest()
+                self.assertEqual(fingerprint(raw), old_hash)
+                self.assertEqual(project_observations(fixture["catalogue"], expected),
+                                 [fixture["catalogue"][FEATURES.index(entry["feature"])] * entry["scale"]
+                                  for entry in expected["observations"]])
+                explicit = deepcopy(raw)
+                for entry in explicit["observations"]:
+                    entry["encoding"] = "scalar"
+                self.assertEqual(fingerprint(explicit), old_hash)
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_shared_projection_and_invalid_encoding_fixtures(self):
+        fixture = json.loads((ROOT / "contracts/policy_fixtures.json").read_text())
+        for sample in fixture["projection_cases"]:
+            with self.subTest(sample=sample["name"]):
+                parsed = _policy({**fixture["policy"], "observations": sample["observations"]})
+                self.assertEqual(parsed["observation_dim"], len(sample["expected"]))
+                self.assertEqual(validate_contract(parsed), parsed)
+                np.testing.assert_allclose(project_observations(fixture["catalogue"], parsed),
+                                           sample["expected"], atol=fixture["tolerance"], rtol=0)
+        for change in fixture["invalid"]:
+            raw = deepcopy(fixture["policy"])
+            path = change["pointer"].strip("/").split("/")
+            parent = raw
+            for key in path[:-1]:
+                parent = parent[int(key)] if isinstance(parent, list) else parent[key]
+            parent[int(path[-1]) if isinstance(parent, list) else path[-1]] = change["value"]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                _policy(raw)
+
+    def test_expansion_limits_and_stale_dimensions_are_rejected(self):
+        fixture = json.loads((ROOT / "contracts/policy_fixtures.json").read_text())
+        entry = {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": list(range(9))}
+        with self.assertRaisesRegex(ValueError, "Expanded"):
+            validate_contract({**fixture["policy"], "observations": [entry] * 15})
+        with self.assertRaisesRegex(ValueError, "observation_dim"):
+            validate_contract({**fixture["policy"], "observations": [entry], "observation_dim": 1})
+        self.assertNotEqual(fingerprint({**fixture["policy"], "observations": [entry]}),
+                            fingerprint({**fixture["policy"], "observations": [
+                                {**entry, "categories": list(reversed(range(9)))}]}))
 
 
 class SnapshotRuleChecks(unittest.TestCase):

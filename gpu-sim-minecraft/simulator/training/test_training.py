@@ -287,11 +287,23 @@ class InferenceChecks(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("MCSIM_LIVE_JAVA_CHECK") == "1", "Explicit Java/Python integration check")
     def test_java_bridge(self):
-        for configured in (False, True):
+        for configured in (False, True, "encoded"):
             with self.subTest(configured=configured):
                 folder = Path(self.directory.name) / str(configured)
                 if configured:
-                    main(["--environment", str(ROOT / "simulator/environments/research-duel.json"),
+                    environment_path = ROOT / "simulator/environments/research-duel.json"
+                    if configured == "encoded":
+                        definition = json.loads(environment_path.read_text())
+                        definition["policy"]["observations"] = [
+                            {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": list(range(9))},
+                            {"feature": "self.health_fraction", "clip": [0, 0.75]},
+                            {"feature": "self.on_ground"}, {"feature": "opponent.on_ground"},
+                            {"feature": "self.sprinting", "encoding": "one_hot", "categories": [0, 1]},
+                            {"feature": "opponent.sprinting", "encoding": "one_hot", "categories": [1, 0]}]
+                        definition["policy"].pop("observation_dim", None)
+                        environment_path = Path(self.directory.name) / "encoded.json"
+                        environment_path.write_text(json.dumps(definition))
+                    main(["--environment", str(environment_path),
                           "--envs", "1", "--updates", "1", "--rollout-steps", "2", "--max-ticks", "2",
                           "--hidden-dim", "16", "--epochs", "1", "--threads", "1",
                           "--output", str(folder), "--replay-every", "1"])
@@ -306,7 +318,8 @@ class InferenceChecks(unittest.TestCase):
                     worker.start()
                     try:
                         wrapper = ROOT / "cambiummod" / ("gradlew.bat" if os.name == "nt" else "gradlew")
-                        subprocess.run([str(wrapper), "-p", str(ROOT / "cambiummod"), "replayAnalysisChecks",
+                        command = [str(wrapper)] if os.name == "nt" else ["bash", str(wrapper)]
+                        subprocess.run([*command, "-p", str(ROOT / "cambiummod"), "replayAnalysisChecks",
                                         f"-PlivePolicyPort={server.server_port}", f"-PreplayFile={replay}",
                                         "--console=plain", "--no-daemon"], cwd=ROOT, check=True)
                     finally:
@@ -467,6 +480,33 @@ class TrainingChecks(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_contract(invalid)
 
+    def test_movement_flags_track_actual_state(self):
+        contract = validate_contract({"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": feature} for feature in
+                ("self.on_ground", "opponent.on_ground", "self.sprinting", "opponent.sprinting")],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "sprint", "values": [False, True]}, {"name": "jump", "values": [False, True]}]})
+        with Environment(1, contract=contract) as environment:
+            np.testing.assert_array_equal(environment.observe()[0], [[1, 1, 0, 0], [1, 1, 0, 0]])
+            actions = np.zeros((1, 2, 3), dtype=np.int32)
+            actions[:, :, 1] = 1
+            observed, *_ = environment.step(actions)
+            np.testing.assert_array_equal(observed[0], [[1, 1, 0, 0], [1, 1, 0, 0]])
+            actions[0, 0, 0] = 1
+            observed, *_ = environment.step(actions)
+            np.testing.assert_array_equal(observed[0], [[1, 1, 1, 0], [1, 1, 0, 1]])
+            actions[0, 0, 2] = 1
+            observed, *_ = environment.step(actions)
+            np.testing.assert_array_equal(observed[0], [[0, 1, 1, 0], [1, 0, 0, 1]])
+            actions.fill(0)
+            observed, *_ = environment.step(actions)
+            np.testing.assert_array_equal(observed[0], [[0, 1, 0, 0], [1, 0, 0, 0]])
+            for _ in range(30):
+                observed, *_ = environment.step(actions)
+            np.testing.assert_array_equal(observed[0], [[1, 1, 0, 0], [1, 1, 0, 0]])
+            environment.reset()
+            np.testing.assert_array_equal(environment.observe()[0], [[1, 1, 0, 0], [1, 1, 0, 0]])
+
     def test_environment_json_max_ticks_and_cli_override(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
@@ -495,6 +535,12 @@ class TrainingChecks(unittest.TestCase):
                 self.assertEqual(saved["options"]["max_ticks"], expected)
 
     def test_configured_training_resume_replay_and_inference(self):
+        self._configured_training_resume_replay_and_inference(False)
+
+    def test_encoded_training_resume_replay_and_inference(self):
+        self._configured_training_resume_replay_and_inference(True)
+
+    def _configured_training_resume_replay_and_inference(self, encoded):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             output = Path(directory) / "run"
             definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
@@ -507,8 +553,17 @@ class TrainingChecks(unittest.TestCase):
                                  {"feature": "self.health_fraction", "scale": 2}],
                 "actions": [{"name": "weapon", "values": [2, 1, 0]}, {"name": "yaw", "values": [0, 15]},
                             {"name": "shield", "values": [False, True]}]}
+            if encoded:
+                definition["policy"]["observations"][0].update(encoding="one_hot", categories=[2, 1, 0])
+                definition["policy"]["observations"][1]["clip"] = [0, 0.5]
             path = Path(directory) / "experiment.json"
             path.write_text(json.dumps(definition))
+            if encoded:
+                with Environment(1, environment=path) as environment:
+                    np.testing.assert_allclose(environment.observe()[0], [[0, 1, 0, 0.5, 2]] * 2)
+                with mock.patch("simulator.training.environment.load_library", return_value=mock.Mock(_build_info={})), \
+                        self.assertRaisesRegex(RuntimeError, "observation encodings"):
+                    Environment(1, environment=path)
             options = ["--environment", str(path), "--envs", "2", "--updates", "1", "--rollout-steps", "4",
                        "--max-ticks", "2", "--hidden-dim", "16", "--epochs", "1", "--threads", "1",
                        "--output", str(output), "--replay-every", "4"]
@@ -530,7 +585,9 @@ class TrainingChecks(unittest.TestCase):
                 self.assertEqual(frames[0]["actors"][0]["weapon"], "minecraft:netherite_axe")
                 self.assertIn(frames[-1]["actors"][0]["controls"]["weapon"], definition["players"][0]["loadout"]["weapons"])
             policy = Policy(checkpoint, deterministic=True)
-            request = {"protocol": 1, "session": "custom", "tick": 0, "observations": np.zeros((2, 3)).tolist(),
+            dimension = saved["metadata"]["contract"]["observation_dim"]
+            self.assertEqual(dimension, 5 if encoded else 3)
+            request = {"protocol": 1, "session": "custom", "tick": 0, "observations": np.zeros((2, dimension)).tolist(),
                        "contract_hash": policy.info["contract_hash"]}
             self.assertEqual(np.asarray(policy.act(request)["actions"]).shape, (2, 3))
             with self.assertRaisesRegex(ValueError, "contract"):

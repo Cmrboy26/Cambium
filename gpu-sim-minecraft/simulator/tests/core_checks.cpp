@@ -50,6 +50,8 @@ void checkPolicyFixtures() {
         const auto velocity = value.at("velocity").get<std::array<double, 3>>();
         player.velocity = {velocity[0], velocity[1], velocity[2]};
         player.health = value.at("health"); player.yaw = value.at("yaw"); player.pitch = value.at("pitch");
+        player.on_ground = value.at("on_ground");
+        player.sprinting = value.at("sprinting");
         return player;
     };
     for (const auto& sample : fixture.at("observations")) {
@@ -68,14 +70,46 @@ void checkPolicyFixtures() {
         for (std::size_t index = 0; index < expected_velocity.size(); ++index) {
             near(catalogue[79 + index], expected_velocity[index], tolerance, "shared velocity observation");
         }
+        app::movementObservation(catalogue.data(), source, target);
+        const auto expected_movement = sample.at("expected_movement").get<std::array<float, 4>>();
+        for (std::size_t index = 0; index < expected_movement.size(); ++index) {
+            near(catalogue[85 + index], expected_movement[index], tolerance, "shared movement observation");
+        }
+        app::movementObservation(catalogue.data(), target, source);
+        for (std::size_t index = 0; index < expected_movement.size(); ++index) {
+            near(catalogue[85 + index], expected_movement[index ^ 1], tolerance, "opponent movement perspective");
+        }
     }
     std::array<std::vector<WeaponItem>, 2> slots;
     for (auto& actor : slots) for (const auto& item : fixture.at("weapons")) actor.push_back(app::parseWeapon(item));
     const app::PolicyLayout layout(fixture.at("policy"), slots);
+    const auto catalogue = fixture.at("catalogue").get<std::vector<float>>();
+    std::vector<float> projected(layout.observations.size());
+    layout.project(catalogue.data(), projected.data());
     for (std::size_t index = 0; index < layout.observations.size(); ++index) {
-        near(fixture.at("catalogue").at(layout.observations[index]).get<float>() * layout.scales[index],
+        near(projected[index],
             fixture.at("projected").at(index).get<float>(), tolerance, "shared policy projection");
     }
+    for (const auto& sample : fixture.at("projection_cases")) {
+        auto descriptor = fixture.at("policy");
+        descriptor["observations"] = sample.at("observations");
+        const app::PolicyLayout encoded(descriptor, slots);
+        std::vector<float> actual(encoded.observations.size());
+        encoded.project(catalogue.data(), actual.data());
+        const auto expected = sample.at("expected").get<std::vector<float>>();
+        require(actual.size() == expected.size(), "expanded observation projection size");
+        for (std::size_t index = 0; index < actual.size(); ++index) {
+            near(actual[index], expected[index], tolerance, sample.at("name").get_ref<const std::string&>().c_str());
+        }
+    }
+    auto oversized = fixture.at("policy");
+    oversized["observations"] = nlohmann::json::array();
+    for (int index = 0; index < 15; ++index) oversized["observations"].push_back(
+        {{"feature", "self.weapon_slot"}, {"encoding", "one_hot"}, {"categories", {0, 1, 2, 3, 4, 5, 6, 7, 8}}});
+    bool overflow_rejected = false;
+    try { const app::PolicyLayout unused(oversized, slots); }
+    catch (const std::exception&) { overflow_rejected = true; }
+    require(overflow_rejected, "expanded observation limit must be enforced");
     const auto action = fixture.at("action").get<std::vector<std::int32_t>>();
     const auto control = layout.decode(action.data(), slots[0]);
     const std::array<PlayerState, 2> actors{};

@@ -369,6 +369,11 @@ Implement `act(observations, indices=None)`, `reset(mask)`, `state_dict`,
 actions `[N,H]`; indices address persistent slots within the full world count.
 Reset masks always span the full count. State must be `weights_only`-safe.
 Controllers use contract feature scales and semantic choices, not preset indices.
+Observation offsets count expanded columns via `contract.observation_width`, not
+descriptor indices. Builtins undo nonzero scale and decode one-hot categories;
+required features with an all-zero unknown encoding raise rather than guess.
+Clipped scalar features remain clipped; controllers cannot recover discarded
+values. Custom controllers must follow the same expanded layout.
 Module factories execute local Python: only configure trusted code.
 
 Each world's opponent and learner side are sampled per episode and held fixed
@@ -1095,6 +1100,10 @@ pass does not exercise CUDA; successful training does not prove combat fidelity.
 Real-game conformance captures remain required.
 
 ## Extension Recipes
+
+Use the [contribution playbook](../../CONTRIBUTING.md) for the cross-component
+file/symbol lookup, source-derived mechanics, controller additions and state
+lifecycle. The recipes below remain the local contract reference.
 
 Start with configuration: existing feature names, head choices/order, terrain,
 loadouts and weights need experiment JSON, not another preset or mod code.
