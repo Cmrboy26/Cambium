@@ -1,6 +1,7 @@
 package net.cambium;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonParser;
 import com.mojang.blaze3d.platform.InputConstants;
 import java.io.IOException;
@@ -8,6 +9,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
@@ -35,6 +37,7 @@ final class ControlPanel extends Screen {
 	private final String[] policyIds = {"", ""};
 	private final String[] modes = {"Policy", "Basic melee"};
 	private final JsonObject[] scriptOptions = {new JsonObject(), new JsonObject()};
+	private final JsonObject[] loadouts = {DuelLibrary.defaultWorldLoadout(), DuelLibrary.defaultWorldLoadout()};
 	private boolean arena = true;
 	private int tab;
 	private int page;
@@ -47,6 +50,7 @@ final class ControlPanel extends Screen {
 	private String status = "";
 	private boolean helperBusy;
 	private boolean helperServing;
+	private final boolean[] markedSpawns = {false, false};
 	private int left;
 	private int contentWidth;
 
@@ -67,6 +71,7 @@ final class ControlPanel extends Screen {
 					String mode = fighter.get("mode").getAsString();
 					modes[index] = MODES.contains(mode) ? mode : "Policy";
 					scriptOptions[index] = fighter.getAsJsonObject("options").deepCopy();
+					if (saved.has("loadouts")) loadouts[index] = saved.getAsJsonArray("loadouts").get(index).getAsJsonObject().deepCopy();
 				}
 			}
 		} catch (IOException | RuntimeException error) { status = "Could not restore selections: " + error.getMessage(); }
@@ -102,7 +107,7 @@ final class ControlPanel extends Screen {
 			library = new DuelLibrary(Minecraft.getInstance().gameDirectory.toPath());
 			if (library.find(library.runs, libraryRun) == null && !library.runs.isEmpty()) libraryRun = identity(library.runs.getFirst());
 			selectVersion();
-			if (library.find(library.environments, environmentId) == null && !library.environments.isEmpty()) environmentId = identity(library.environments.getFirst());
+			if (environment() == null && !library.environments.isEmpty()) environmentId = identity(library.environments.getFirst());
 			for (int index = 0; index < 2; index++) {
 				if (library.find(library.policies, policyIds[index]) == null && !library.policies.isEmpty()) policyIds[index] = identity(library.policies.getFirst());
 			}
@@ -114,7 +119,12 @@ final class ControlPanel extends Screen {
 
 	@Override
 	public void tick() {
-		if (helperBusy != RosieLauncher.isBusy() || helperServing != RosieLauncher.isServing()) {
+		boolean spawnsChanged = false;
+		for (int index = 0; index < markedSpawns.length; index++) {
+			boolean ready = !arena && LiveDuel.worldSpawnReady(minecraft, index);
+			if (ready != markedSpawns[index]) { markedSpawns[index] = ready; spawnsChanged = true; }
+		}
+		if (helperBusy != RosieLauncher.isBusy() || helperServing != RosieLauncher.isServing() || spawnsChanged) {
 			helperBusy = RosieLauncher.isBusy();
 			helperServing = RosieLauncher.isServing();
 			rebuildWidgets();
@@ -144,10 +154,12 @@ final class ControlPanel extends Screen {
 	}
 
 	private void duel() {
-		JsonObject environment = environment();
+		JsonObject environment = arena ? compatibleEnvironment() : null;
 		label("Environment", left, 63, contentWidth, 0xFFB5C2BE);
-		button(environment == null ? "No local environments" : name(environment), left, 76, contentWidth - 100,
-				() -> choose("Environment", library == null ? List.of() : library.environmentChoices(environmentId), entry -> { environmentId = identity(entry); persist(); }));
+		List<JsonObject> environmentChoices = compatibleEnvironmentChoices();
+		String environmentLabel = !arena ? "Not used in World mode" : environment != null ? name(environment)
+				: library == null || library.environments.isEmpty() ? "No local environments" : "No compatible environment";
+		button(environmentLabel, left, 76, contentWidth - 100, this::chooseEnvironment).active = arena && !environmentChoices.isEmpty();
 		addRenderableWidget(CycleButton.builder(value -> Component.literal(value ? "Arena" : "World"), arena)
 				.withValues(true, false).displayOnlyValue().create(left + contentWidth - 96, 76, 96, 20, Component.literal("Location"),
 						(widget, value) -> { arena = value; persist(); rebuildWidgets(); }));
@@ -168,18 +180,19 @@ final class ControlPanel extends Screen {
 					: modes[index].equals("Stationary target") ? "Idle target" : "Script settings";
 			Button selection = button(title, column, 146, columnWidth, () -> {
 				if (modes[fighter].equals("Policy")) {
-					List<JsonObject> compatible = library == null ? List.of() : library.policies.stream()
-							.filter(entry -> environment == null || entry.get("contract_hash").equals(environment.get("contract_hash"))).toList();
+					List<JsonObject> compatible = library == null ? List.of() : library.policies;
 					choose("Fighter " + (fighter == 0 ? "A" : "B"), compatible, entry -> { policyIds[fighter] = identity(entry); persist(); });
 				} else minecraft.gui.setScreen(new ScriptScreen(fighter));
 			});
 			selection.active = !modes[index].equals("Stationary target");
-			if (!arena) button("Mark spawn " + (index + 1), column, 172, columnWidth, () -> LiveDuel.markSpawn(minecraft, fighter));
+			if (!arena) button((LiveDuel.worldSpawnReady(minecraft, fighter) ? "Spawn " + (index + 1) + " marked" : "Mark spawn " + (index + 1)),
+					column, 172, columnWidth, () -> LiveDuel.markSpawn(minecraft, fighter));
 			else if (modes[index].equals("Policy") && policy != null) label("Update " + policy.get("update").getAsLong() + " / " + policy.get("stage").getAsString(), column, 176, columnWidth, 0xFFACBDB5);
+			if (!arena) button("Loadout: " + loadoutSummary(loadouts[index]), column, 198, columnWidth, () -> minecraft.gui.setScreen(new LoadoutScreen(fighter)));
 		}
 		button(RosieLauncher.isServing() ? "Replace live duel" : "Start live duel", left, height - 30, contentWidth - 124, this::launch)
-				.active = environment != null && RosieLauncher.canStartLocalMatch();
-		button(maxTicks == 0 ? "Duration: Default" : String.format(Locale.ROOT, "Duration: %.1f s", maxTicks / 20.0), left + contentWidth - 120, height - 30, 120,
+				.active = RosieLauncher.canStartLocalMatch() && (arena ? environment != null && canStartArena(environment) : canStartWorld());
+		button(maxTicks == 0 ? arena ? "Duration: Default" : "Set duration" : String.format(Locale.ROOT, "Duration: %.1f s", maxTicks / 20.0), left + contentWidth - 120, height - 30, 120,
 				() -> minecraft.gui.setScreen(new DurationScreen()));
 	}
 
@@ -284,12 +297,18 @@ final class ControlPanel extends Screen {
 
 	private void launch() {
 		try {
-			JsonObject environment = environment();
+			JsonObject environment = arena ? compatibleEnvironment() : null;
 			JsonObject[] fighters = new JsonObject[2];
-			for (int index = 0; index < 2; index++) fighters[index] = modes[index].equals("Policy")
-					? library.policyFighter(library.find(library.policies, policyIds[index]), environment)
-					: DuelLibrary.scriptedFighter(DuelLibrary.scriptedController(modes[index]), scriptOptions[index]);
-			library.saveDuel(environment, fighters[0], fighters[1], maxTicks);
+			JsonObject[] policyEntries = new JsonObject[2];
+			for (int index = 0; index < 2; index++) {
+				policyEntries[index] = modes[index].equals("Policy") ? library.find(library.policies, policyIds[index]) : null;
+				fighters[index] = modes[index].equals("Policy")
+						? arena ? library.policyFighter(policyEntries[index], environment)
+								: library.policyFighter(policyEntries[index], policyEntries[index].get("contract_hash").getAsString())
+						: DuelLibrary.scriptedFighter(modes[index].equals("Basic melee") ? "basic_melee" : "stationary_target", scriptOptions[index]);
+			}
+			if (arena) library.saveDuel(environment, fighters[0], fighters[1], maxTicks);
+			else library.saveWorldDuel(library.worldPolicy(policyEntries[0], policyEntries[1]), fighters[0], fighters[1], loadouts[0], loadouts[1], maxTicks);
 			persist();
 			RosieLauncher.start(minecraft, arena ? "local" : "local-world", "latest", "latest");
 			tab = 3;
@@ -313,6 +332,9 @@ final class ControlPanel extends Screen {
 			fighters.add(fighter);
 		}
 		saved.add("fighters", fighters);
+		var savedLoadouts = new com.google.gson.JsonArray();
+		for (JsonObject loadout : loadouts) savedLoadouts.add(loadout.deepCopy());
+		saved.add("loadouts", savedLoadouts);
 		try { DuelLibrary.write(library.root.resolve("selections.json"), saved); }
 		catch (IOException error) { status = "Could not save selections: " + error.getMessage(); }
 	}
@@ -321,9 +343,155 @@ final class ControlPanel extends Screen {
 		minecraft.gui.setScreen(new ChoiceScreen(title, entries, entry -> { selected.accept(entry); status = ""; }));
 	}
 
+	private void chooseEnvironment() {
+		List<JsonObject> choices = compatibleEnvironmentChoices();
+		var families = new java.util.LinkedHashMap<String, List<JsonObject>>();
+		for (JsonObject choice : choices) {
+			JsonObject environment = choice.getAsJsonObject("environment");
+			String family = environment.has("name") && !environment.get("name").getAsString().isBlank()
+					? environment.get("name").getAsString() : name(choice);
+			families.computeIfAbsent(family, ignored -> new ArrayList<>()).add(choice);
+		}
+		List<JsonObject> familyEntries = new ArrayList<>();
+		families.forEach((family, variants) -> {
+			JsonObject entry = new JsonObject();
+			entry.addProperty("id", family);
+			entry.addProperty("name", family + " (" + variants.size() + ")");
+			entry.addProperty("family", family);
+			familyEntries.add(entry);
+		});
+		minecraft.gui.setScreen(new ChoiceScreen("Environment families", familyEntries, (familyEntry, familyScreen) -> {
+			String family = familyEntry.get("family").getAsString();
+			List<JsonObject> variants = families.get(family).stream().map(choice -> {
+				JsonObject entry = choice.deepCopy();
+				String label = name(entry);
+				String prefix = family + " / ";
+				if (label.startsWith(prefix)) label = label.substring(prefix.length());
+				else if (label.equals(family)) label = "Default";
+				entry.addProperty("name", label);
+				return entry;
+			}).toList();
+			minecraft.gui.setScreen(new ChoiceScreen(family, variants, (entry, screen) -> {
+				environmentId = identity(entry);
+				persist();
+				status = "";
+			}, familyScreen, ControlPanel.this));
+		}, ControlPanel.this, null));
+	}
+
 	private JsonObject environment() { return library == null ? null : library.find(library.environmentChoices(environmentId), environmentId); }
+
+	private List<String> selectedPolicyHashes() {
+		if (library == null) return List.of();
+		List<String> hashes = new ArrayList<>();
+		for (int index = 0; index < 2; index++) {
+			JsonObject policy = modes[index].equals("Policy") ? library.find(library.policies, policyIds[index]) : null;
+			if (policy != null) hashes.add(policy.get("contract_hash").getAsString());
+		}
+		return hashes;
+	}
+
+	private List<JsonObject> compatibleEnvironmentChoices() {
+		return library == null ? List.of() : library.environmentChoices(environmentId, selectedPolicyHashes());
+	}
+
+	private JsonObject compatibleEnvironment() {
+		return library == null ? null : library.find(compatibleEnvironmentChoices(), environmentId);
+	}
+
+	private boolean canStartWorld() {
+		if (library == null || maxTicks < 1 || !LiveDuel.worldSpawnsReady(minecraft)) return false;
+		JsonObject[] entries = new JsonObject[2];
+		try {
+			for (int index = 0; index < 2; index++) {
+				entries[index] = modes[index].equals("Policy") ? library.find(library.policies, policyIds[index]) : null;
+				if (modes[index].equals("Policy") && entries[index] == null) return false;
+			}
+			JsonObject policy = library.worldPolicy(entries[0], entries[1]);
+			String contractHash = library.worldPolicyHash(entries[0], entries[1]);
+			var contract = new SimulationContract(policy);
+			List<JsonObject> layouts = new ArrayList<>();
+			for (int index = 0; index < 2; index++) {
+				layouts.add(DuelLibrary.normalizeLoadout(loadouts[index]));
+				if (entries[index] != null) library.policyFighter(entries[index], contractHash);
+			}
+			contract.validateLoadouts(layouts);
+			return true;
+		} catch (IOException | RuntimeException invalid) { return false; }
+	}
+
+	private boolean canStartArena(JsonObject environment) {
+		if (library == null) return false;
+		try {
+			for (int index = 0; index < 2; index++) {
+				if (modes[index].equals("Policy")) library.policyFighter(library.find(library.policies, policyIds[index]), environment);
+			}
+			return true;
+		} catch (IOException | RuntimeException invalid) { return false; }
+	}
+
+	private static String loadoutSummary(JsonObject loadout) {
+		List<String> items = new ArrayList<>();
+		for (var weapon : loadout.getAsJsonArray("weapons")) if (!weapon.getAsString().equals("minecraft:air")) items.add(shortItem(weapon.getAsString()));
+		if (!loadout.get("offhand").getAsString().equals("minecraft:air")) items.add(shortItem(loadout.get("offhand").getAsString()));
+		for (String slot : SimulationContract.ARMOR_SLOTS) {
+			String item = loadout.getAsJsonObject("armor").get(slot).getAsString();
+			if (!item.equals("minecraft:air")) items.add(shortItem(item));
+		}
+		return items.isEmpty() ? "empty" : String.join(" + ", items);
+	}
 	private static String identity(JsonObject entry) { return entry.get("id").getAsString(); }
 	private static String name(JsonObject entry) { return entry.get("name").getAsString(); }
+
+	private static String environmentVariant(JsonObject entry) {
+		JsonObject environment = entry.getAsJsonObject("environment");
+		List<String> details = new ArrayList<>();
+		JsonObject task = environment.has("task") ? environment.getAsJsonObject("task") : environment;
+		if (task.has("max_ticks")) details.add(task.get("max_ticks").getAsString() + " ticks");
+		if (environment.has("bounds") && environment.getAsJsonObject("bounds").has("size")) {
+			var size = environment.getAsJsonObject("bounds").getAsJsonArray("size");
+			details.add(size.get(0).getAsString() + "x" + size.get(1).getAsString() + "x" + size.get(2).getAsString());
+		} else if (environment.has("arena") && environment.get("arena").isJsonObject()
+				&& environment.getAsJsonObject("arena").has("width")) {
+			details.add(environment.getAsJsonObject("arena").get("width").getAsString() + " wide");
+		}
+		JsonObject players = environment.has("players") && environment.get("players").isJsonObject()
+				? environment.getAsJsonObject("players") : null;
+		JsonObject player = players == null ? null : players.has("shared") ? players.getAsJsonObject("shared") : null;
+		if (player == null && environment.has("players") && environment.get("players").isJsonArray()
+				&& !environment.getAsJsonArray("players").isEmpty()) {
+			player = environment.getAsJsonArray("players").get(0).getAsJsonObject();
+		}
+		JsonObject loadout = player != null && player.has("loadout") ? player.getAsJsonObject("loadout") :
+				environment.has("loadout") ? environment.getAsJsonObject("loadout") : null;
+		if (loadout != null) {
+			List<String> gear = new ArrayList<>();
+			if (loadout.has("weapon")) {
+				String weapon = loadout.get("weapon").getAsString();
+				if (!weapon.equals("minecraft:air")) gear.add(shortItem(weapon));
+			} else if (loadout.has("weapons")) {
+				for (var weapon : loadout.getAsJsonArray("weapons")) {
+					if (weapon.isJsonPrimitive() && !weapon.getAsString().equals("minecraft:air")) gear.add(shortItem(weapon.getAsString()));
+				}
+			}
+			if (loadout.has("offhand") && !loadout.get("offhand").getAsString().equals("minecraft:air")) {
+				gear.add(shortItem(loadout.get("offhand").getAsString()));
+			}
+			if (loadout.has("armor") && loadout.get("armor").isJsonObject()) {
+				for (var armor : loadout.getAsJsonObject("armor").entrySet()) {
+					if (armor.getValue().isJsonPrimitive() && !armor.getValue().getAsString().equals("minecraft:air")) {
+						gear.add(shortItem(armor.getValue().getAsString()));
+					}
+				}
+			}
+			if (!gear.isEmpty()) details.add(String.join("+", gear));
+		}
+		return String.join(" / ", details);
+	}
+
+	private static String shortItem(String item) {
+		return item.substring(item.indexOf(':') + 1);
+	}
 	private void label(String text, int position, int top, int limit, int color) { labels.add(new Label(text, position, top, limit, color)); }
 
 	private Button button(String text, int position, int top, int size, Runnable action) {
@@ -366,7 +534,9 @@ final class ControlPanel extends Screen {
 
 	private final class ChoiceScreen extends Screen {
 		private final List<JsonObject> entries;
-		private final Consumer<JsonObject> selected;
+		private final BiConsumer<JsonObject, Screen> selected;
+		private final Screen returnScreen;
+		private final Screen selectionScreen;
 		private String filter = "";
 		private int selectedPage;
 		private int position;
@@ -374,9 +544,15 @@ final class ControlPanel extends Screen {
 		private boolean empty;
 
 		ChoiceScreen(String title, List<JsonObject> entries, Consumer<JsonObject> selected) {
+			this(title, entries, (entry, screen) -> selected.accept(entry), ControlPanel.this, ControlPanel.this);
+		}
+
+		ChoiceScreen(String title, List<JsonObject> entries, BiConsumer<JsonObject, Screen> selected, Screen returnScreen, Screen selectionScreen) {
 			super(Component.literal(title));
 			this.entries = List.copyOf(entries);
 			this.selected = selected;
+			this.returnScreen = returnScreen;
+			this.selectionScreen = selectionScreen;
 		}
 
 		@Override protected void init() {
@@ -387,14 +563,21 @@ final class ControlPanel extends Screen {
 			search.setValue(filter);
 			search.setResponder(value -> { filter = value; selectedPage = 0; rebuildWidgets(); });
 			setInitialFocus(search);
-			List<JsonObject> filtered = entries.stream().filter(entry -> name(entry).toLowerCase(Locale.ROOT).contains(filter.toLowerCase(Locale.ROOT))).toList();
+			List<JsonObject> filtered = entries.stream().filter(entry -> {
+				String searchText = name(entry) + (entry.has("environment") ? " " + environmentVariant(entry) : "");
+				return searchText.toLowerCase(Locale.ROOT).contains(filter.toLowerCase(Locale.ROOT));
+			}).toList();
 			empty = filtered.isEmpty();
 			int rows = Math.max(1, (height - 122) / 24);
 			selectedPage = Math.min(selectedPage, Math.max(0, (filtered.size() - 1) / rows));
 			for (int index = selectedPage * rows; index < Math.min(filtered.size(), (selectedPage + 1) * rows); index++) {
 				JsonObject entry = filtered.get(index);
-				String title = name(entry) + (entry.has("update") ? " / update " + entry.get("update").getAsLong() : "");
-				addRenderableWidget(Button.builder(Component.literal(fit(title, size - 12)), widget -> { selected.accept(entry); onClose(); })
+				String title = name(entry) + (entry.has("environment") && !environmentVariant(entry).isEmpty()
+						? " / " + environmentVariant(entry) : entry.has("update") ? " / update " + entry.get("update").getAsLong() : "");
+				addRenderableWidget(Button.builder(Component.literal(fit(title, size - 12)), widget -> {
+					selected.accept(entry, this);
+					if (selectionScreen != null) minecraft.gui.setScreen(selectionScreen);
+				})
 						.bounds(position, 74 + index % rows * 24, size, 20).tooltip(Tooltip.create(Component.literal(title))).build());
 			}
 			addRenderableWidget(Button.builder(Component.literal("Previous"), widget -> { selectedPage--; rebuildWidgets(); }).bounds(position, height - 32, 90, 20).build()).active = selectedPage > 0;
@@ -409,7 +592,7 @@ final class ControlPanel extends Screen {
 			super.extractRenderState(graphics, mouseX, mouseY, delta);
 		}
 		@Override public boolean isPauseScreen() { return false; }
-		@Override public void onClose() { minecraft.gui.setScreen(ControlPanel.this); }
+		@Override public void onClose() { minecraft.gui.setScreen(returnScreen); }
 	}
 
 	private final class RenameScreen extends Screen {
@@ -445,7 +628,7 @@ final class ControlPanel extends Screen {
 			int size = Math.min(400, width - 40);
 			int position = (width - size) / 2;
 			JsonObject environment = environment();
-			int initial = maxTicks > 0 ? maxTicks : environment != null && environment.getAsJsonObject("environment").has("max_ticks")
+			int initial = maxTicks > 0 ? maxTicks : arena && environment != null && environment.getAsJsonObject("environment").has("max_ticks")
 					? environment.getAsJsonObject("environment").get("max_ticks").getAsInt() : 300;
 			EditBox duration = addRenderableWidget(new EditBox(font, position, 74, size, 20, title));
 			duration.setMaxLength(12);
@@ -456,13 +639,199 @@ final class ControlPanel extends Screen {
 				catch (IllegalArgumentException invalid) { error = invalid.getMessage(); }
 			}).bounds(position, 108, (size - 8) / 2, 20).build());
 			addRenderableWidget(Button.builder(Component.literal("Cancel"), widget -> onClose()).bounds(position + (size + 8) / 2, 108, (size - 8) / 2, 20).build());
-			addRenderableWidget(Button.builder(Component.literal("Environment default"), widget -> { maxTicks = 0; persist(); onClose(); }).bounds(position, 136, size, 20).build());
+			if (arena) addRenderableWidget(Button.builder(Component.literal("Environment default"), widget -> { maxTicks = 0; persist(); onClose(); }).bounds(position, 136, size, 20).build());
 		}
 		@Override public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
 			graphics.fill(0, 0, width, height, 0xF0181E20);
 			graphics.text(font, fit(title.getString(), width - 40), (width - Math.min(400, width - 40)) / 2, 48, 0xFF92DDB3);
 			graphics.text(font, fit(error, width - 40), 20, height - 35, 0xFFF3B298);
 			super.extractRenderState(graphics, mouseX, mouseY, delta);
+		}
+		@Override public boolean isPauseScreen() { return false; }
+		@Override public void onClose() { minecraft.gui.setScreen(ControlPanel.this); }
+	}
+
+	private final class LoadoutScreen extends Screen {
+		private final int fighter;
+		private final JsonObject edited;
+		private int position;
+		private int size;
+		private int editorWidth;
+		private int columnWidth;
+		private int labelWidth;
+		private int pickerWidth;
+		private int pickerLeft;
+		private int pageRows;
+		private int fieldPage;
+		private int openDropdown = -1;
+		private int optionPage;
+		private String error = "";
+
+		LoadoutScreen(int fighter) {
+			super(Component.literal("Fighter " + (fighter == 0 ? "A" : "B") + " loadout"));
+			this.fighter = fighter;
+			this.edited = loadouts[fighter].deepCopy();
+		}
+
+		@Override protected void init() {
+			size = Math.min(900, width - 24);
+			position = (width - size) / 2;
+			pickerWidth = openDropdown >= 0 ? Math.min(300, Math.max(160, size / 3)) : 0;
+			editorWidth = size - (pickerWidth == 0 ? 0 : pickerWidth + 12);
+			pickerLeft = position + editorWidth + 12;
+			columnWidth = (editorWidth - 12) / 2;
+			labelWidth = Math.min(90, Math.max(32, columnWidth / 3));
+			pageRows = Math.max(1, Math.min(8, (height - 150) / 24));
+			int fieldPages = (8 + pageRows - 1) / pageRows;
+			fieldPage = Math.max(0, Math.min(fieldPage, fieldPages - 1));
+			int buttonWidth = columnWidth - labelWidth - 6;
+			int visibleRows = Math.min(pageRows, 8 - fieldPage * pageRows);
+			for (int row = 0; row < visibleRows; row++) {
+				int fieldRow = fieldPage * pageRows + row;
+				for (int column = 0; column < 2; column++) {
+					int field = column * 8 + fieldRow;
+					if (field >= 15) continue;
+					int fieldX = position + column * (columnWidth + 12);
+					int fieldY = 52 + row * 24;
+					int dropdown = field;
+					String label = fieldName(field);
+					String value = fieldDisplay(field);
+					addRenderableWidget(Button.builder(Component.literal(fit(value, buttonWidth - 12)), widget -> {
+						openDropdown = openDropdown == dropdown ? -1 : dropdown;
+						optionPage = 0;
+						rebuildWidgets();
+					})
+						.bounds(fieldX + labelWidth, fieldY, buttonWidth, 20)
+						.tooltip(Tooltip.create(Component.literal(label + ": " + value)))
+						.build());
+				}
+			}
+			if (fieldPages > 1) {
+				int navigationY = height - 58;
+				addRenderableWidget(Button.builder(Component.literal("Previous"), widget -> {
+					fieldPage--;
+					openDropdown = -1;
+					rebuildWidgets();
+				}).bounds(position, navigationY, 90, 20).build()).active = fieldPage > 0;
+				addRenderableWidget(Button.builder(Component.literal("Next"), widget -> {
+					fieldPage++;
+					openDropdown = -1;
+					rebuildWidgets();
+				}).bounds(position + editorWidth - 90, navigationY, 90, 20).build()).active = fieldPage + 1 < fieldPages;
+			}
+			int half = (size - 8) / 2;
+			addRenderableWidget(Button.builder(Component.literal("Apply"), widget -> apply()).bounds(position, height - 30, half, 20).build());
+			addRenderableWidget(Button.builder(Component.literal("Cancel"), widget -> onClose()).bounds(position + half + 8, height - 30, half, 20).build());
+			if (openDropdown >= 0) addDropdownWidgets();
+		}
+
+		private String fieldName(int field) {
+			if (field < 9) return "Hotbar " + (field + 1);
+			if (field == 9) return "Selected slot";
+			if (field == 10) return "Offhand";
+			String slot = SimulationContract.ARMOR_SLOTS.get(field - 11);
+			return slot.substring(0, 1).toUpperCase(Locale.ROOT) + slot.substring(1);
+		}
+
+		private String fieldValue(int field) {
+			JsonArray weapons = edited.getAsJsonArray("weapons");
+			if (field < 9) return weapons.get(field).getAsString();
+			if (field == 9) return Integer.toString(edited.get("selected").getAsInt());
+			if (field == 10) return edited.get("offhand").getAsString();
+			return edited.getAsJsonObject("armor").get(SimulationContract.ARMOR_SLOTS.get(field - 11)).getAsString();
+		}
+
+		private String fieldDisplay(int field) {
+			return field == 9 ? "Slot " + (Integer.parseInt(fieldValue(field)) + 1) : shortItem(fieldValue(field));
+		}
+
+		private List<String> fieldChoices(int field) {
+			if (field < 9) return SimulationContract.weaponChoices();
+			if (field == 9) return java.util.stream.IntStream.range(0, 9).mapToObj(Integer::toString).toList();
+			if (field == 10) return List.of("minecraft:air", "minecraft:shield");
+			return SimulationContract.armorChoices(SimulationContract.ARMOR_SLOTS.get(field - 11));
+		}
+
+		private void chooseFieldValue(int field, String value) {
+			if (field < 9) edited.getAsJsonArray("weapons").set(field, ReplayAnalysis.JSON.toJsonTree(value));
+			else if (field == 9) edited.addProperty("selected", Integer.parseInt(value));
+			else if (field == 10) edited.addProperty("offhand", value);
+			else edited.getAsJsonObject("armor").addProperty(SimulationContract.ARMOR_SLOTS.get(field - 11), value);
+		}
+
+		private void addDropdownWidgets() {
+			List<String> choices = fieldChoices(openDropdown);
+			int visibleRows = Math.max(1, Math.min(8, (height - 150) / 22));
+			int pageCount = (choices.size() + visibleRows - 1) / visibleRows;
+			optionPage = Math.max(0, Math.min(optionPage, pageCount - 1));
+			int first = optionPage * visibleRows;
+			int rows = Math.min(visibleRows, choices.size() - first);
+			for (int row = 0; row < rows; row++) {
+				String value = choices.get(first + row);
+				int optionIndex = first + row;
+				int y = 78 + row * 22;
+				String display = fieldDisplayForChoice(openDropdown, value);
+				addRenderableWidget(Button.builder(Component.literal(fit(display, pickerWidth - 12)), widget -> {
+					chooseFieldValue(openDropdown, choices.get(optionIndex));
+					openDropdown = -1;
+					rebuildWidgets();
+				}).bounds(pickerLeft, y, pickerWidth, 20)
+					.tooltip(Tooltip.create(Component.literal(value)))
+					.build());
+			}
+			if (pageCount > 1) {
+				int navigationY = 78 + rows * 22 + 4;
+				int half = (pickerWidth - 4) / 2;
+				addRenderableWidget(Button.builder(Component.literal("Previous"), widget -> {
+					optionPage--;
+					rebuildWidgets();
+				}).bounds(pickerLeft, navigationY, half, 20).build()).active = optionPage > 0;
+				addRenderableWidget(Button.builder(Component.literal("Next"), widget -> {
+					optionPage++;
+					rebuildWidgets();
+				}).bounds(pickerLeft + half + 4, navigationY, pickerWidth - half - 4, 20).build()).active = optionPage + 1 < pageCount;
+			}
+		}
+
+		private void apply() {
+			try {
+				JsonObject player = new JsonObject();
+				player.add("loadout", edited.deepCopy());
+				loadouts[fighter] = SimulationContract.loadout(player, "configured");
+				persist();
+				status = "";
+				onClose();
+			} catch (IllegalArgumentException invalid) { error = invalid.getMessage(); }
+		}
+
+		@Override public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
+			graphics.fill(0, 0, width, height, 0xF0181E20);
+			graphics.text(font, title, position, 22, 0xFF92DDB3);
+			int visibleRows = Math.min(pageRows, 8 - fieldPage * pageRows);
+			for (int row = 0; row < visibleRows; row++) {
+				int fieldRow = fieldPage * pageRows + row;
+				for (int column = 0; column < 2; column++) {
+					int field = column * 8 + fieldRow;
+					if (field >= 15) continue;
+					int fieldX = position + column * (columnWidth + 12);
+					graphics.text(font, fit(fieldName(field), labelWidth), fieldX, 58 + row * 24, 0xFFB5C2BE);
+				}
+			}
+			if (openDropdown >= 0) drawDropdownBackground(graphics);
+			super.extractRenderState(graphics, mouseX, mouseY, delta);
+			int fieldPages = (8 + pageRows - 1) / pageRows;
+			if (fieldPages > 1) graphics.text(font, "Page " + (fieldPage + 1) + " / " + fieldPages,
+					position + (size - font.width("Page " + (fieldPage + 1) + " / " + fieldPages)) / 2, height - 52, 0xFFB5C2BE);
+			graphics.text(font, fit(error, size), position, height - 78, 0xFFF3B298);
+		}
+
+		private void drawDropdownBackground(GuiGraphicsExtractor graphics) {
+			graphics.fill(pickerLeft - 6, 42, pickerLeft + pickerWidth + 6, height - 64, 0xFF07100F);
+			graphics.text(font, fit("Choose " + fieldName(openDropdown), pickerWidth), pickerLeft, 54, 0xFF92DDB3);
+		}
+
+		private String fieldDisplayForChoice(int field, String value) {
+			return field == 9 ? "Slot " + (Integer.parseInt(value) + 1) : shortItem(value);
 		}
 		@Override public boolean isPauseScreen() { return false; }
 		@Override public void onClose() { minecraft.gui.setScreen(ControlPanel.this); }

@@ -203,6 +203,11 @@ public final class ReplayAnalysisChecks {
 			entry.addProperty("name", "My fighter");
 			entry.addProperty("path", checkpoint.toString());
 			entry.addProperty("contract_hash", "a".repeat(64));
+			entry.add("policy", JsonParser.parseString("""
+				{"format":"minecraft_sim_policy","version":1,"minecraft":"26.3","ticks_per_action":1,
+				 "observations":[{"feature":"self.health_fraction"}],
+				 "actions":[{"name":"weapon","values":[0,2]}]}
+				""").getAsJsonObject());
 			JsonObject first = library.policyFighter(entry, environment);
 			JsonObject meleeOptions = new JsonObject();
 			meleeOptions.addProperty("attack_interval", 5);
@@ -228,6 +233,29 @@ public final class ReplayAnalysisChecks {
 			JsonObject limited = JsonParser.parseString(Files.readString(library.saveDuel(environment, first, second, 1200))).getAsJsonObject();
 			require(limited.get("max_ticks").getAsInt() == 1200 && !environment.has("max_ticks"), "Duration override must not mutate the library environment");
 			require(DuelLibrary.durationTicks("60") == 1200 && DuelLibrary.durationTicks("0.05") == 1, "Duration uses twenty controlled ticks per second");
+			JsonObject worldLoadout = DuelLibrary.defaultWorldLoadout();
+			worldLoadout.getAsJsonArray("weapons").set(2, JsonParser.parseString("\"minecraft:iron_sword\""));
+			worldLoadout.addProperty("selected", 2);
+			worldLoadout.addProperty("offhand", "minecraft:shield");
+			worldLoadout.getAsJsonObject("armor").addProperty("chestplate", "minecraft:diamond_chestplate");
+			JsonObject worldDuel = JsonParser.parseString(Files.readString(library.saveWorldDuel(library.worldPolicy(entry, null), first, second,
+					worldLoadout, DuelLibrary.defaultWorldLoadout(), 1200))).getAsJsonObject();
+			JsonObject worldScenario = worldDuel.getAsJsonObject("environment");
+			JsonObject worldPlayer = new JsonObject();
+			worldPlayer.add("loadout", worldLoadout.deepCopy());
+			require(worldDuel.get("max_ticks").getAsInt() == 1200 && worldDuel.getAsJsonObject("policy").equals(entry.getAsJsonObject("policy")),
+					"World duel must carry the policy contract and explicit duration");
+			require(worldScenario.getAsJsonArray("blocks").isEmpty() && !worldDuel.has("environment_id"),
+					"World duel must use a runtime-only scenario rather than a cached environment preset");
+			require(worldScenario.getAsJsonArray("players").get(0).getAsJsonObject().getAsJsonObject("loadout").equals(
+					SimulationContract.loadout(worldPlayer, "configured")),
+					"World duel must serialize the explicitly selected weapon, offhand and armor layout");
+			require(DuelLibrary.defaultWorldLoadout().getAsJsonArray("weapons").size() == 9,
+					"World loadouts must expose all nine physical hotbar slots");
+			boolean worldDurationRequired = false;
+			try { library.saveWorldDuel(library.worldPolicy(entry, null), first, second, worldLoadout, worldLoadout, 0); }
+			catch (java.io.IOException expected) { worldDurationRequired = true; }
+			require(worldDurationRequired, "World duels must reject an implicit duration");
 			for (String invalid : java.util.List.of("0", "-2", "NaN", "Infinity", "50001")) {
 				boolean invalidDuration = false;
 				try { DuelLibrary.durationTicks(invalid); } catch (IllegalArgumentException expected) { invalidDuration = true; }
@@ -282,13 +310,44 @@ public final class ReplayAnalysisChecks {
 			DuelLibrary.write(library.root.resolve("library.json"), index);
 			DuelLibrary reopened = new DuelLibrary(game);
 			var choices = reopened.environmentChoices("another:snapshots/early.pt");
+			var compatibleChoices = reopened.environmentChoices("another:snapshots/early.pt", java.util.List.of("a".repeat(64)));
 			require(choices.size() == 5 && reopened.environments.size() == 6, "Environment choices must group policy copies without removing cached entries or distinct duration, geometry, loadout and contract variants");
+			require(compatibleChoices.size() == 4 && compatibleChoices.stream().allMatch(choice -> choice.get("contract_hash").getAsString().equals("a".repeat(64))),
+					"Environment candidates must be filtered by selected policy layouts");
 			require(choices.getFirst().get("id").getAsString().equals("another:snapshots/early.pt"), "Grouping must preserve an already selected duplicate's identity");
 			require(choices.getFirst().get("name").getAsString().equals("Another label"), "Environment choices must use environment names rather than checkpoint labels");
 			require(choices.stream().map(choice -> choice.get("name").getAsString()).distinct().count() == choices.size(), "Different setups sharing an environment name must retain distinguishable source labels");
 			require(reopened.environments.getFirst().get("name").getAsString().equals("Fixture / latest environment"), "Selector grouping must not modify cached display names");
 			require(reopened.runs.size() == 1 && reopened.versions("fixture").size() == 2, "Legacy libraries must group downloaded versions by run");
 			require(reopened.versions("fixture").getFirst().get("id").getAsString().endsWith(":latest.pt"), "Latest must appear before named policy versions");
+			JsonObject compact = environment.deepCopy();
+			compact.add("sources", JsonParser.parseString("""
+				[{"id":"fixture:latest.pt","name":"Fixture / latest environment","run":"fixture"},
+				 {"id":"another:snapshots/early.pt","name":"Another policy / early environment","run":"another"}]
+				""").getAsJsonArray());
+			JsonArray compactEntries = new JsonArray();
+			compactEntries.add(compact);
+			JsonObject compactVariant = compact.deepCopy();
+			compactVariant.addProperty("id", "fixture:variant");
+			compactVariant.getAsJsonObject("environment").addProperty("max_ticks", 400);
+			compactVariant.add("sources", JsonParser.parseString("""
+				[{"id":"fixture:variant","name":"Fixture / duration variant","run":"fixture"}]
+				""").getAsJsonArray());
+			compactEntries.add(compactVariant);
+			index.add("environments", compactEntries);
+			DuelLibrary.write(library.root.resolve("library.json"), index);
+			DuelLibrary compactLibrary = new DuelLibrary(game);
+			var compactChoices = compactLibrary.environmentChoices("another:snapshots/early.pt");
+			JsonObject selectedCompact = compactChoices.stream()
+					.filter(choice -> choice.get("id").getAsString().equals("another:snapshots/early.pt")).findFirst().orElseThrow();
+			require(compactChoices.size() == 2,
+					"Compacted environments with distinct durations must remain separate");
+			require(selectedCompact.get("id").getAsString().equals("another:snapshots/early.pt"),
+					"Compacted environment aliases must resolve persisted selection IDs");
+			require(selectedCompact.get("name").getAsString().equals("Shared arena / Another policy / early environment"),
+					"Aliased source names must disambiguate matching environment names");
+			require(compactLibrary.find(compactChoices, "another:snapshots/early.pt") == selectedCompact,
+					"Persisted compacted selections must resolve to a duel environment");
 			reopened.rename(reopened.runs.getFirst(), "My local run");
 			reopened.rename(reopened.policies.getFirst(), " My saved alias ");
 			require(new DuelLibrary(game).runs.getFirst().get("name").getAsString().equals("My local run"), "Run display aliases must persist without renaming run IDs");

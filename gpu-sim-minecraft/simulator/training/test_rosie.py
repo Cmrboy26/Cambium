@@ -1024,6 +1024,39 @@ else:
         self.assertIn("/other-project", explicit.stdout)
 
 
+class WorldDuelPolicyTests(unittest.TestCase):
+    def test_runtime_world_scenario_accepts_explicit_loadouts(self):
+        from simulator.training.contract import from_legacy
+        from simulator.training.environment import SCHEMA
+        from simulator.training.serve import DuelPolicy
+
+        loadout_a = {"weapons": ["minecraft:diamond_sword", *(["minecraft:air"] * 8)],
+                     "selected": 0, "offhand": "minecraft:shield",
+                     "armor": {"helmet": "minecraft:diamond_helmet"}}
+        loadout_b = {"weapons": ["minecraft:iron_sword", *(["minecraft:air"] * 8)],
+                     "selected": 0, "offhand": "minecraft:air", "armor": {}}
+        scenario = {"format": "minecraft_sim_environment", "version": 1, "minecraft": "26.3",
+                    "profile": "configured", "bounds": {"min": [0, 0, 0], "size": [1, 1, 1]},
+                    "blocks": [], "rules": {"simulate_food": False, "natural_regeneration": False},
+                    "players": [{"position": [0.5, 1, 0.5], "velocity": [0, 0, 0], "yaw": 0, "pitch": 0,
+                                 "on_ground": False, "loadout": loadout_a},
+                                {"position": [0.5, 1, 0.5], "velocity": [0, 0, 0], "yaw": 0, "pitch": 0,
+                                 "on_ground": False, "loadout": loadout_b}]}
+        configuration = {"format": "minecraft_sim_duel", "version": 1, "policy": from_legacy(SCHEMA),
+                         "environment": scenario, "max_ticks": 1200,
+                         "fighters": [{"type": "scripted", "controller": "stationary_target"},
+                                      {"type": "scripted", "controller": "stationary_target"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "world-duel.json"
+            path.write_text(json.dumps(configuration), encoding="utf-8")
+            policy = DuelPolicy(path)
+
+        self.assertEqual(policy.info["max_ticks"], 1200)
+        self.assertEqual(policy.info["environment"]["players"][0]["loadout"]["offhand"], "minecraft:shield")
+        self.assertEqual(policy.info["environment"]["players"][0]["loadout"]["armor"]["helmet"], "minecraft:diamond_helmet")
+        self.assertEqual(len(policy.info["environment"]["players"][1]["loadout"]["weapons"]), 9)
+
+
 class RosieTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -1086,24 +1119,41 @@ class RosieTests(unittest.TestCase):
         torch.save(saved, self.run / "latest.pt")
         (self.run / "snapshots").mkdir()
         torch.save({**saved, "update": 50}, self.run / "snapshots/stage-50.pt")
+        variant = json.loads(json.dumps(environment))
+        variant["bounds"]["size"][0] += 2
         (self.run / "config.json").write_text(json.dumps({"experiment": {"policy": from_legacy(SCHEMA),
             "stages": [{"name": "practice", "scenario": {"arenas": [{"environment": environment},
-                                                                   {"environment": environment}]}}]}}))
+                                                                   {"environment": environment},
+                                                                   {"environment": variant}]}}]}}))
         manifest = self.rosie.manifest("rosie-123")
         self.assertEqual(manifest["snapshots"][0]["name"], "stage-50.pt")
         self.rosie.checkpoint("rosie-123", manifest)
         self.rosie.sync_snapshots("rosie-123", manifest)
         library = self.rosie.index_run("rosie-123")
         self.assertEqual([entry["update"] for entry in library["policies"]], [100, 50])
-        self.assertEqual(len(library["environments"]), 4)
-        self.assertEqual([entry["name"] for entry in library["environments"][2:]],
-                 ["rosie-123 / practice / arena 1", "rosie-123 / practice / arena 2"])
+        source_groups = [{source["id"] for source in entry["sources"]} for entry in library["environments"]]
+        self.assertEqual(len(library["environments"]), 3)
+        self.assertEqual({source["id"] for entry in library["environments"] for source in entry["sources"]},
+                 {"rosie-123:latest.pt", "rosie-123:snapshots/stage-50.pt",
+                  "rosie-123:stage:0:0", "rosie-123:stage:0:1", "rosie-123:stage:0:2"})
+        self.assertEqual(next(group for group in source_groups if "rosie-123:stage:0:0" in group),
+                 next(group for group in source_groups if "rosie-123:stage:0:1" in group))
+        self.assertNotEqual(next(group for group in source_groups if "rosie-123:stage:0:0" in group),
+                    next(group for group in source_groups if "rosie-123:stage:0:2" in group))
         library["policies"][0]["name"] = "My reliable fighter"
         library["runs"] = [{"id": "rosie-123", "name": "My local run alias"}]
+        library["environments"][0]["sources"].append(
+            {"id": "other:stage:0:0", "name": "Other run / practice", "run": "other"})
         (self.rosie.cache / "library.json").write_text(json.dumps(library))
         with patch.object(self.rosie, "ssh_command", side_effect=AssertionError("offline library contacted Rosie")):
-            self.assertEqual(self.rosie.index_run("rosie-123")["policies"][0]["name"], "My reliable fighter")
-            self.assertEqual(self.rosie.index_run("rosie-123")["runs"][0]["name"], "My local run alias")
+            refreshed = self.rosie.index_run("rosie-123")
+            self.assertEqual(refreshed["policies"][0]["name"], "My reliable fighter")
+            self.assertEqual(refreshed["runs"][0]["name"], "My local run alias")
+            self.assertEqual(len(refreshed["environments"]), 3)
+            self.assertEqual({source["id"] for entry in refreshed["environments"] for source in entry["sources"]},
+                             {"rosie-123:latest.pt", "rosie-123:snapshots/stage-50.pt",
+                              "rosie-123:stage:0:0", "rosie-123:stage:0:1", "rosie-123:stage:0:2",
+                              "other:stage:0:0"})
             self.rosie.sync_snapshots("rosie-123", manifest)
         for invalid in ("snapshots/../outside.pt", "snapshots/a/b.pt", "snapshots/file.json"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):

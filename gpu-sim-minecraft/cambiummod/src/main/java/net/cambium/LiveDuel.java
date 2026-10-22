@@ -182,6 +182,17 @@ final class LiveDuel implements AutoCloseable {
 		return mark(client, slot, null);
 	}
 
+	static boolean worldSpawnReady(Minecraft client, int slot) {
+		if (client.player == null || client.level == null || slot < 0 || slot >= placements.length) return false;
+		Placement point = placements[slot];
+		return point != null && point.owner.equals(client.player.getUUID())
+				&& point.level.dimension().equals(client.level.dimension());
+	}
+
+	static boolean worldSpawnsReady(Minecraft client) {
+		return worldSpawnReady(client, 0) && worldSpawnReady(client, 1);
+	}
+
 	static int connect(Minecraft client, boolean arena, int port) {
 		return dispatch(client, (server, viewer) -> {
 			Placement[] chosen = placements.clone();

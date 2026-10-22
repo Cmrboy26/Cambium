@@ -62,12 +62,13 @@ final class DuelLibrary {
 			JsonObject key = new JsonObject();
 			key.add("contract_hash", entry.get("contract_hash"));
 			key.add("environment", definition);
-			if (!choices.containsKey(key) || entry.get("id").getAsString().equals(selected)) {
+			if (!choices.containsKey(key) || hasSource(entry, selected)) {
 				JsonObject choice = entry.deepCopy();
 				JsonObject environment = entry.getAsJsonObject("environment");
 				if (environment.has("name") && !environment.get("name").getAsString().isBlank()) {
 					choice.addProperty("name", environment.get("name").getAsString());
 				}
+				if (hasSource(entry, selected)) choice.addProperty("id", selected);
 				choices.put(key, choice);
 			}
 		}
@@ -76,9 +77,34 @@ final class DuelLibrary {
 		for (JsonObject choice : choices.values()) {
 			String name = choice.get("name").getAsString();
 			if (names.get(name) > 1) choice.addProperty("name", name + " / "
-					+ find(environments, choice.get("id").getAsString()).get("name").getAsString());
+					+ sourceName(choice, choice.get("id").getAsString()));
 		}
 		return List.copyOf(choices.values());
+	}
+
+	List<JsonObject> environmentChoices(String selected, List<String> contractHashes) {
+		return environmentChoices(selected).stream().filter(choice -> contractHashes.stream()
+				.allMatch(hash -> choice.get("contract_hash").getAsString().equals(hash))).toList();
+	}
+
+	private static boolean hasSource(JsonObject entry, String identity) {
+		if (entry.get("id").getAsString().equals(identity)) return true;
+		if (!entry.has("sources")) return false;
+		for (var source : entry.getAsJsonArray("sources")) {
+			if (source.getAsJsonObject().get("id").getAsString().equals(identity)) return true;
+		}
+		return false;
+	}
+
+	private String sourceName(JsonObject entry, String identity) {
+		if (entry.has("sources")) {
+			for (var source : entry.getAsJsonArray("sources")) {
+				JsonObject value = source.getAsJsonObject();
+				if (value.get("id").getAsString().equals(identity)) return value.get("name").getAsString();
+			}
+		}
+		JsonObject source = find(environments, identity);
+		return source == null ? entry.get("name").getAsString() : source.get("name").getAsString();
 	}
 
 	static String versionName(JsonObject entry) {
@@ -94,6 +120,12 @@ final class DuelLibrary {
 	JsonObject policyFighter(JsonObject entry, JsonObject environment) throws IOException {
 		if (entry == null || environment == null) throw new IOException("Choose a local policy and environment first");
 		if (!entry.get("contract_hash").equals(environment.get("contract_hash"))) throw new IOException("Policy layout does not match this environment");
+		return policyFighter(entry, environment.get("contract_hash").getAsString());
+	}
+
+	JsonObject policyFighter(JsonObject entry, String contractHash) throws IOException {
+		if (entry == null) throw new IOException("Choose a local policy first");
+		if (!entry.get("contract_hash").getAsString().equals(contractHash)) throw new IOException("Policy layouts must match");
 		Path path = Path.of(entry.get("path").getAsString()).toAbsolutePath().normalize();
 		if (!Files.isRegularFile(path) || !path.toRealPath().startsWith(root.toRealPath())) throw new IOException("Policy is missing from the local cache; sync it again");
 		JsonObject fighter = new JsonObject();
@@ -101,6 +133,31 @@ final class DuelLibrary {
 		fighter.addProperty("name", entry.get("name").getAsString());
 		fighter.addProperty("path", path.toString());
 		return fighter;
+	}
+
+	JsonObject worldPolicy(JsonObject first, JsonObject second) throws IOException {
+		JsonObject anchor = worldPolicyEntry(first, second);
+		return anchor.getAsJsonObject("policy").deepCopy();
+	}
+
+	String worldPolicyHash(JsonObject first, JsonObject second) throws IOException {
+		return worldPolicyEntry(first, second).get("contract_hash").getAsString();
+	}
+
+	private JsonObject worldPolicyEntry(JsonObject first, JsonObject second) throws IOException {
+		if (first != null && second != null && !first.get("contract_hash").equals(second.get("contract_hash"))) {
+			throw new IOException("World-duel policies must use the same layout");
+		}
+		JsonObject anchor = first != null ? first : second;
+		if (anchor == null) anchor = !policies.isEmpty() ? policies.getFirst() : environments.isEmpty() ? null : environments.getFirst();
+		if (anchor == null) throw new IOException("Sync a policy layout before starting a World duel");
+		if (!anchor.has("policy")) {
+			String hash = anchor.get("contract_hash").getAsString();
+			anchor = java.util.stream.Stream.concat(policies.stream(), environments.stream())
+					.filter(entry -> entry.has("policy") && entry.get("contract_hash").getAsString().equals(hash)).findFirst().orElse(null);
+		}
+		if (anchor == null || !anchor.has("policy")) throw new IOException("Sync a policy layout before starting a World duel");
+		return anchor;
 	}
 
 	static JsonObject scriptedFighter(String controller, JsonObject options) {
@@ -150,6 +207,79 @@ final class DuelLibrary {
 		configuration.add("fighters", fighters);
 		write(root.resolve("duel.json"), configuration);
 		return root.resolve("duel.json");
+	}
+
+	Path saveWorldDuel(JsonObject policy, JsonObject first, JsonObject second, JsonObject firstLoadout,
+			JsonObject secondLoadout, int maxTicks) throws IOException {
+		if (policy == null) throw new IOException("Sync a policy layout before starting a World duel");
+		if (maxTicks < 1 || maxTicks > 1000000) throw new IOException("World duels require an explicit duration from 1 to 1000000 ticks");
+		JsonObject[] loadouts = {normalizeLoadout(firstLoadout), normalizeLoadout(secondLoadout)};
+		new SimulationContract(policy).validateLoadouts(List.of(loadouts));
+		JsonObject configuration = new JsonObject();
+		configuration.addProperty("format", "minecraft_sim_duel");
+		configuration.addProperty("version", 1);
+		configuration.addProperty("max_ticks", maxTicks);
+		configuration.add("policy", policy.deepCopy());
+		configuration.add("environment", worldScenario(loadouts));
+		JsonArray fighters = new JsonArray();
+		fighters.add(first.deepCopy());
+		fighters.add(second.deepCopy());
+		configuration.add("fighters", fighters);
+		write(root.resolve("duel.json"), configuration);
+		return root.resolve("duel.json");
+	}
+
+	static JsonObject defaultWorldLoadout() {
+		JsonObject loadout = new JsonObject();
+		JsonArray weapons = new JsonArray();
+		weapons.add("minecraft:diamond_sword");
+		for (int index = 1; index < 9; index++) weapons.add("minecraft:air");
+		loadout.add("weapons", weapons);
+		loadout.addProperty("selected", 0);
+		loadout.addProperty("offhand", "minecraft:air");
+		JsonObject armor = new JsonObject();
+		for (String slot : SimulationContract.ARMOR_SLOTS) armor.addProperty(slot, "minecraft:air");
+		loadout.add("armor", armor);
+		return loadout;
+	}
+
+	static JsonObject normalizeLoadout(JsonObject loadout) {
+		JsonObject player = new JsonObject();
+		player.add("loadout", loadout.deepCopy());
+		return SimulationContract.loadout(player, "configured");
+	}
+
+	private static JsonObject worldScenario(JsonObject[] loadouts) {
+		JsonObject scenario = new JsonObject();
+		scenario.addProperty("format", "minecraft_sim_environment");
+		scenario.addProperty("version", 1);
+		scenario.addProperty("minecraft", "26.3");
+		scenario.addProperty("profile", "configured");
+		JsonObject bounds = new JsonObject();
+		bounds.add("min", new com.google.gson.Gson().toJsonTree(new int[]{0, 0, 0}));
+		bounds.add("size", new com.google.gson.Gson().toJsonTree(new int[]{1, 1, 1}));
+		scenario.add("bounds", bounds);
+		scenario.add("blocks", new JsonArray());
+		JsonObject rules = new JsonObject();
+		rules.addProperty("simulate_food", false);
+		rules.addProperty("natural_regeneration", false);
+		scenario.add("rules", rules);
+		JsonArray players = new JsonArray();
+		for (int index = 0; index < 2; index++) {
+			JsonObject player = new JsonObject();
+			player.add("position", new com.google.gson.Gson().toJsonTree(new double[]{0.5, 1, 0.5}));
+			player.add("velocity", new com.google.gson.Gson().toJsonTree(new double[]{0, 0, 0}));
+			player.addProperty("yaw", 0);
+			player.addProperty("pitch", 0);
+			player.addProperty("on_ground", false);
+			player.addProperty("health", 20);
+			player.addProperty("absorption", 0);
+			player.addProperty("attack_strength_ticks", 20);
+			player.add("loadout", loadouts[index].deepCopy());
+			players.add(player);
+		}
+		scenario.add("players", players);
+		return scenario;
 	}
 
 	static int durationTicks(String seconds) {

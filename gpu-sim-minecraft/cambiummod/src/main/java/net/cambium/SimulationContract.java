@@ -257,6 +257,22 @@ final class SimulationContract {
 
 	static boolean weaponItem(String item) { return WEAPONS.contains(item); }
 
+	static List<String> weaponChoices() {
+		List<String> items = new ArrayList<>(List.of("minecraft:air", "minecraft:wooden_sword", "minecraft:wooden_axe",
+				"minecraft:stone_sword", "minecraft:stone_axe", "minecraft:copper_sword", "minecraft:copper_axe",
+				"minecraft:golden_sword", "minecraft:golden_axe", "minecraft:iron_sword", "minecraft:iron_axe",
+				"minecraft:diamond_sword", "minecraft:diamond_axe", "minecraft:netherite_sword", "minecraft:netherite_axe"));
+		return items.stream().filter(WEAPONS::contains).toList();
+	}
+
+	static List<String> armorChoices(String slot) {
+		List<String> candidates = new ArrayList<>(List.of("minecraft:air", "minecraft:turtle_helmet"));
+		for (String material : List.of("leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite")) {
+			candidates.add("minecraft:" + material + "_" + slot);
+		}
+		return candidates.stream().filter(item -> armorItem(item, slot)).toList();
+	}
+
 	private static Set<String> weaponItems() {
 		Set<String> result = new HashSet<>(Set.of("minecraft:air"));
 		for (String material : List.of("wooden", "stone", "copper", "golden", "iron", "diamond", "netherite")) {
