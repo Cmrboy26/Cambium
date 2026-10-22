@@ -3,7 +3,7 @@
   "version": 2,
   "name": "example-melee",
   "seed": 42,
-  "policy": "../../policies/example/melee.json",
+  "policy": "../../policies/example/advanced-melee.json",
   "environment": "../../environments/example/sword-duel.json",
   "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
   "opponents": {
@@ -16,12 +16,23 @@
   },
   "stages": [
     {
-      "name": "melee",
-      "opponents": "combat",
+      "name": "aim",
+      "opponents": "target",
+      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false,
+                             "attack": false, "weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 100, "rewards": {"good_aim": 5, "aim_hold": 2}},
       "evaluations": {
-        "benchmark": {"every_updates": 10, "episodes": 16, "worlds": 16, "seed": 1729}
+        "aim_accuracy": {
+          "every_updates": 5, "worlds": 64, "episodes": 64, "seed": 1729
+        }
       },
-      "advance": {"updates": 100}
+      "advance": {
+        "evaluation": {
+          "suite": "aim_accuracy",
+          "metric": "reward_mean",
+          "at_least": 6.0
+        }
+      }
     }
   ]
 }

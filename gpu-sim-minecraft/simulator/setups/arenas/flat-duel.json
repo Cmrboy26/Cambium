@@ -3,7 +3,7 @@
   "version": 1,
   "minecraft": "26.3",
   "name": "flat-stone-duel",
-  "requires": ["movement", "melee", "equipment", "shield", "armor"],
+  "requires": ["movement", "melee"],
   "rules": {"simulate_food": false, "natural_regeneration": false},
   "bounds": {"min": [-7, 0, -7], "size": [15, 4, 15]},
   "blocks": [
