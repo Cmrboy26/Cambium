@@ -338,10 +338,11 @@ Git Bash.
 Connect to GlobalVPN first. By default, the script starts the read-only,
 standard-library Python dashboard directly on the management node without
 querying Slurm or requiring/submitting an allocation. It reads saved run files,
-so training can start or stop independently. The default remote checkout is
-`~/minecraftlol/Cambium/gpu-sim-minecraft`; `ROSIE_PROJECT_DIR` overrides it.
-When invoked on a management node, the default is the script's own checkout.
-Missing checkouts fail with an explicit override diagnostic.
+so training can start or stop independently. Set `ROSIE_PROJECT_DIR` to the
+remote checkout when connecting from another computer without a job ID;
+there is no assumed checkout location. When invoked on a management node,
+the default is the script's own checkout. Missing or unspecified checkouts
+fail with an explicit configuration diagnostic.
 
 An explicit job ID (positional or `ROSIE_JOB_ID`) retains compute-node hosting
 with `srun --jobid ... --overlap`, using that job's working directory and SSH

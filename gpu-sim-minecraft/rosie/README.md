@@ -87,8 +87,8 @@ local URL through an SSH tunnel. **No training job or Slurm allocation is
 required or submitted.** Saved runs remain accessible when training stops.
 Press Ctrl+C to stop the remote dashboard and local tunnel.
 
-Remote checkout: `~/minecraftlol/Cambium/gpu-sim-minecraft`.
-Override with `ROSIE_PROJECT_DIR`. On Rosie itself, the command uses its own
+Set `ROSIE_PROJECT_DIR` to your remote checkout when connecting from your
+computer without a job ID. On Rosie itself, the command uses its own
 checkout and forwards localhost on that node, not your computer. An optional
 `<JOB_ID>` still hosts the dashboard inside a running training allocation.
 

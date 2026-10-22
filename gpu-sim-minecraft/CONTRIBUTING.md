@@ -81,11 +81,68 @@ Passing CPU/CUDA parity proves agreement between backends, not vanilla fidelity.
    that the state is actually sampled.
 7. Select the new primitives in the intended authored policy only. A changed
    input layout or action contract requires compatible new weights or an explicit
-   migration, not an unchecked resume. Rebuild each used native backend and the
-   mod after catalogue/source changes; verify loaded artifact identities.
+   migration, not an unchecked resume. Rebuild each used native backend and
+   complete the [live-mod completion gate](#live-mod-completion-gate). Updated
+   source or passing simulator tests alone do not establish mod compatibility.
 
 See [extension recipes](simulator/training/AGENTS.md#extension-recipes) and the
 [encoding contract](docs/simulation_contract.md#policy-layout).
+
+## Live Mod Completion Gate
+
+An observation/action contribution is incomplete until all relevant live paths
+are implemented and checked. Do not leave Java support as an implicit follow-up.
+
+1. Regenerate `PolicyCatalogue.java` from the shared catalogue. Implement real
+   entity extraction/application in `LivePolicy` and the appropriate live control
+   adapter, pure encoding in `ObservationEncoder`, and descriptor validation,
+   projection/decoding and binary-category eligibility in `SimulationContract`.
+   Adding generated names does not populate observations or apply actions.
+2. Load a representative checkpoint using the updated Python inference service,
+   including the new policy's full input/action layout and two-player metadata.
+   Test the new features, both actor perspectives and legacy compatibility in
+   Java/shared fixtures, then run the explicit Python/Java HTTP bridge. A bridge
+   that exercises only an old policy does not cover the new contract.
+3. Run mod checks and build the installable artifact. From project root on
+   Windows, use `./scripts/build-mod.ps1 -Task check`,
+   `./scripts/build-mod.ps1 -Task replayAnalysisChecks` and
+   `./scripts/build-mod.ps1`. On Linux with JDK 25, run
+   `bash gradlew check replayAnalysisChecks build --no-daemon --console=plain`
+   from `cambiummod`. Check/compile tasks alone are not an installed mod update.
+4. Deploy only with an explicitly selected Minecraft game directory and
+   installation authorization. Close Minecraft; install the newly built
+   `cambiummod/build/libs/cambiumfabric-1.0.0.jar`, not the sources JAR. Use the
+   [installation helper](scripts/build-mod.ps1) with `-Install -MinecraftDirectory`
+   on Windows. Check for differently named old copies; do not delete them or
+   overwrite an arbitrary instance without approval.
+5. Update the inference-side Python checkout and shared catalogue too; restart
+   the inference process after code/catalogue changes. Restart Minecraft after
+   replacing its JAR. A current JAR with an older local Python service can still
+   fail, independently of the remote training checkout.
+6. Compare the service `/info` catalogue hash with the hash logged by Minecraft;
+   verify the loaded JAR path/build identity and `/simduel status`. Exercise an
+   actual round using the new checkpoint and check feature/action behavior.
+   Never bypass catalogue, descriptor or shape checks to make a model load.
+7. Report source implementation, fixture/bridge results, built artifact path,
+   installation/restart verification and in-game evidence separately. If the
+   local game instance is unavailable, say "implemented/built, not installed or
+   verified in-game" and provide deployment steps. Do not claim a user's mod was
+   updated merely because the repository or a build output changed.
+
+### Diagnose The Rejecting Layer
+
+- `Checkpoint is not a compatible standalone two-player PPO policy` is raised
+  by Python [Policy.__init__](simulator/training/serve.py), not the Java
+  catalogue guard. Inspect the inference traceback and chained cause: an older
+  Python catalogue can reject new feature names, or checkpoint format/schema,
+  player-count or learner metadata may be incompatible. The message alone does
+  not establish that Java observation extraction is missing.
+- `Policy catalogue differs from mod` is raised by Java
+  [LivePolicy.info](cambiummod/src/main/java/net/cambium/LivePolicy.java). Compare
+  the running service and installed JAR, not just files in the source checkout.
+- For descriptor, tensor-shape or model-weight errors, compare the checkpoint's
+  saved contract and dimensions with the service/model. Do not relabel old
+  weights, replace their metadata or fabricate missing observations as a fix.
 
 ## Add A Scripted Controller
 

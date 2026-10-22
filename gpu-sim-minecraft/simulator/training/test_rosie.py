@@ -969,14 +969,12 @@ else:
         self.assertEqual(result.stdout.strip().split("\t"), ["-", "-", str(self.project)])
         self.assertFalse(self.calls.exists())
 
-    def test_default_remote_checkout(self):
-        home = self.tools / "home"
-        checkout = home / "minecraftlol/Cambium/gpu-sim-minecraft"
-        checkout.parent.mkdir(parents=True)
-        checkout.symlink_to(self.project, target_is_directory=True)
-        result = self.discover(project_dir="", HOME=str(home))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(Path(result.stdout.strip().split("\t")[-1]).resolve(), self.project)
+    def test_unspecified_remote_checkout_requires_explicit_path(self):
+        result = self.discover(project_dir="", HOME=str(self.tools))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ROSIE_PROJECT_DIR", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(self.calls.exists())
 
     def test_home_relative_checkout(self):
         result = self.discover(project_dir="~/project with spaces", HOME=str(self.tools))
@@ -991,7 +989,7 @@ else:
         self.assertFalse(self.calls.exists())
 
     def test_explicit_custom_named_job(self):
-        result = self.discover("78")
+        result = self.discover("78", project_dir="")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip().split("\t"), ["78", "test-node", "/project"])
 
