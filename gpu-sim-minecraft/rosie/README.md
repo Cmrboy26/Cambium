@@ -12,6 +12,9 @@ cd gpu-sim-minecraft
 bash rosie/setup.sh
 ```
 
+Setup requires Python 3.12 for its pinned PyTorch wheel. It prefers `python3.12`;
+set `ROSIE_PYTHON` to select a specific Python 3.12 interpreter.
+
 ## Train
 
 Choose GPU and plan, then edit training settings with Up/Down and type values.

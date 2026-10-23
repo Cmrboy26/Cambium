@@ -12,16 +12,19 @@ jobs from `gpu-sim-minecraft` so `SLURM_SUBMIT_DIR`, relative plan paths,
 and `rosie/logs` resolve as expected.
 
 `setup.sh` creates `.venv-rosie` and installs CUDA-enabled PyTorch 2.5.1/cu124
-plus the training requirements. It runs on the management node and does not
-compile CUDA. The first training job configures CMake and builds on its allocated
-compute node, which needs network access for the pinned FetchContent dependencies.
+plus the training requirements. It requires Python 3.12 for the pinned PyTorch
+wheel, prefers `python3.12`, and accepts `ROSIE_PYTHON` to select an explicit
+interpreter. It runs on the management node and does not compile CUDA. The first
+training job configures CMake and builds on its allocated compute node, which
+needs network access for the pinned FetchContent dependencies.
 
-Setup reuses an existing virtual environment after checking its interpreter and
-pip; it does not rewrite activation scripts. This permits reruns when activation
-files are read-only. An incomplete or broken environment fails with an explicit
-diagnostic and is never deleted automatically. Move that specific environment
-aside before rerunning setup if it needs recreation; do not copy virtual
-environments between machines.
+Setup reuses an existing Python 3.12 virtual environment after checking its
+interpreter and pip; it does not rewrite activation scripts. This permits reruns
+when activation files are read-only. An incomplete, incompatible or broken
+environment fails with an explicit diagnostic and is never deleted automatically.
+If only pip is missing, setup tries to restore it with the environment's
+`ensurepip`; if that fails, move that specific environment aside before rerunning
+setup. Do not copy virtual environments between machines.
 
 The training job checks `.venv-rosie/bin/python`. On `dh-dgxh100-*`, the venv's
 management-node interpreter symlink may be unavailable. In that case, the job
