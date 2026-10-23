@@ -85,10 +85,12 @@ not a fully GPU-resident PPO pipeline.
 	file containing them. The compiler produces one self-contained resolved
 	experiment for training, checkpoints and the dashboard.
 - Training plans provide scripted/frozen checkpoint/self-play opponent pools, constrained
-	curricula and reset-time scenario sampling. The shared catalogue defines 89
+	curricula and reset-time scenario sampling. The shared catalogue defines 102
 	named features, including world-axis velocity in blocks per tick; relative
 	velocity is opponent minus self. Equipment features include shield presence,
 	own slot metadata and visible opponent equipment (not hidden opponent inventory).
+	Bow features append finite ammo, draw state and nearest moving opponent-arrow
+	position/velocity. Binary `use_item` aliases legacy `shield`; never select both.
 	Legacy 22/31-feature presets remain isolated for historical artifact readers
 	and regression fixtures, not a second public training configuration path.
 	Version-1 authoring plans must be rewritten; old checkpoint inference/replay

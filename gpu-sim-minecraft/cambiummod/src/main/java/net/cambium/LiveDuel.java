@@ -28,6 +28,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.ItemStack;
@@ -274,7 +275,7 @@ final class LiveDuel implements AutoCloseable {
 				control(viewer, "reset");
 				tell(viewer, "Returned to bot versus bot.");
 			}
-			case "pause" -> { active.paused = true; active.live.cancelRequest(); }
+			case "pause" -> { active.paused = true; active.live.cancelForLifecycle(); }
 			case "resume" -> { active.live.cancelRequest(); active.paused = false; }
 			case "reset" -> {
 				try { active.reset(); active.paused = false; }
@@ -296,11 +297,25 @@ final class LiveDuel implements AutoCloseable {
 
 	void reset() {
 		cancelRequest();
+		cancelUses();
 		tick = 0;
 		round++;
 		restartDelay = 0;
 		humanDefeated = false;
 			lastControls = null;
+	}
+
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, stopUsingItem (3618-3632)
+	// clears the active item without invoking releaseUsing; lifecycle cancellation must not fire a drawn bow.
+	private void cancelUses() {
+		for (ServerPlayer fighter : fighters) if (fighter != null && fighter.isUsingItem()) fighter.stopUsingItem();
+	}
+
+	// Replay adapter invariant: pause/reset/stop cancel held item use and remove only entities tracked by this Session.
+	void cancelForLifecycle() {
+		cancelRequest();
+		cancelUses();
+		session.clearProjectiles();
 	}
 
 	private static void join(ServerPlayer viewer, int slot) {
@@ -327,6 +342,9 @@ final class LiveDuel implements AutoCloseable {
 
 	void setBot(ReplayPlayer bot) { fighters[bot.replayIndex] = bot; }
 
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/entity/projectile/Projectile.java, getOwner (88-89).
+	boolean ownsProjectile(Entity owner) { return owner != null && (owner == fighters[0] || owner == fighters[1]); }
+
 	void updateTargets() {
 		for (ReplayPlayer bot : session.actors) bot.setLiveTarget(fighters[1 - bot.replayIndex]);
 	}
@@ -352,6 +370,8 @@ final class LiveDuel implements AutoCloseable {
 		JsonObject loadout = session.trace.environment.loadouts.get(humanSlot);
 		var weapons = loadout.getAsJsonArray("weapons");
 		for (int index = 0; index < weapons.size(); index++) player.getInventory().setItem(index, item(weapons.get(index).getAsString()));
+		int arrows = loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0;
+		player.getInventory().setItem(9, arrows == 0 ? ItemStack.EMPTY : new ItemStack(Items.ARROW, arrows));
 		player.getInventory().setSelectedSlot(loadout.get("selected").getAsInt());
 		player.setItemSlot(EquipmentSlot.OFFHAND, initial.shield_equipped() ? new ItemStack(Items.SHIELD) : ItemStack.EMPTY);
 		for (String slot : SimulationContract.ARMOR_SLOTS) {
@@ -459,7 +479,7 @@ final class LiveDuel implements AutoCloseable {
 			ServerPlayer fighter = fighters[index];
 			lines.add((index == 0 ? "A: " : "B: ") + fighterNames[index] + (index == humanSlot ? " (you)" : ""));
 			lines.add(String.format(Locale.ROOT, "HP %.1f | Charge %.0f%%", fighter.getHealth(), fighter.getAttackStrengthScale(0.5F) * 100));
-			lines.add("Shield " + (LivePolicy.shieldCooldown(fighter) > 0 ? "disabled " + LivePolicy.shieldCooldown(fighter) : fighter.isUsingItem() ? "raised" : "ready"));
+			lines.add("Shield " + (LivePolicy.shieldCooldown(fighter) > 0 ? "disabled " + LivePolicy.shieldCooldown(fighter) : LivePolicy.usingShield(fighter) ? "raised" : "ready"));
 			if (lastControls != null && index != humanSlot) lines.add("Actions " + SimulationReplay.buttons(lastControls[index]));
 		}
 		lines.add(String.format(Locale.ROOT, "Inference %.0f ms", inferenceMillis));
@@ -521,6 +541,8 @@ final class LiveDuel implements AutoCloseable {
 		}
 		session.tell("Live round " + round + ": " + result + " after " + tick + " ticks. Resetting in 1 second.");
 		cancelRequest();
+		cancelUses();
+		session.clearProjectiles();
 		restartDelay = 20;
 	}
 
@@ -554,6 +576,8 @@ final class LiveDuel implements AutoCloseable {
 	@Override
 	public void close() {
 		cancelRequest();
+		cancelUses();
+		session.clearProjectiles();
 		policy.close();
 		restoreHuman();
 	}

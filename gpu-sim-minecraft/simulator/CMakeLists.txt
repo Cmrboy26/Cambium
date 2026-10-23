@@ -109,6 +109,10 @@ if(BUILD_TESTING)
     add_test(NAME training_api_checks COMMAND minecraft_sim_training_checks
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/reset_environment.json"
     )
+    add_executable(minecraft_sim_projectile_checks tests/projectile_checks.cpp)
+    target_link_libraries(minecraft_sim_projectile_checks PRIVATE minecraft_sim::minecraft_sim)
+    list(APPEND simulator_targets minecraft_sim_projectile_checks)
+    add_test(NAME projectile_checks COMMAND minecraft_sim_projectile_checks)
 endif()
 
 option(MCSIM_ENABLE_CUDA "Build the optional GPU execution backend" OFF)
@@ -136,6 +140,13 @@ if(MCSIM_ENABLE_CUDA)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/reset_environment.json" --cuda
         )
         set_tests_properties(training_api_cuda_checks PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(minecraft_sim_projectile_cuda_checks tests/projectile_cuda_checks.cu)
+        target_link_libraries(minecraft_sim_projectile_cuda_checks PRIVATE minecraft_sim::minecraft_sim CUDA::cudart)
+        set_target_properties(minecraft_sim_projectile_cuda_checks PROPERTIES
+            CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF
+        )
+        add_test(NAME projectile_cuda_checks COMMAND minecraft_sim_projectile_cuda_checks)
+        set_tests_properties(projectile_cuda_checks PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 endif()
 

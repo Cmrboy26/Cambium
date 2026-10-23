@@ -31,6 +31,7 @@ import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.food.FoodData;
+import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.AttackRange;
@@ -142,6 +143,7 @@ final class ReplayPlayer extends ServerPlayer {
 		}
 		equip(EquipmentSlot.MAINHAND, actor.weapon());
 		equip(EquipmentSlot.OFFHAND, actor.shield_equipped() ? "minecraft:shield" : "minecraft:air");
+		getInventory().setItem(9, actor.arrow_count() == 0 ? ItemStack.EMPTY : new ItemStack(Items.ARROW, actor.arrow_count()));
 		for (String slot : SimulationContract.ARMOR_SLOTS) {
 			equip(armorSlot(slot), actor.armor().has(slot) ? actor.armor().get(slot).getAsString() : "minecraft:air");
 		}
@@ -151,6 +153,9 @@ final class ReplayPlayer extends ServerPlayer {
 		if (actor.using_shield()) {
 			startUsingItem(InteractionHand.OFF_HAND);
 			useItemRemaining = Math.max(0, getUseItem().getUseDuration(this) - actor.shield_use_ticks());
+		} else if (actor.bow_using() && getMainHandItem().is(Items.BOW)) {
+			startUsingItem(InteractionHand.MAIN_HAND);
+			useItemRemaining = Math.max(0, getUseItem().getUseDuration(this) - actor.bow_draw_ticks());
 		}
 		itemUseDelay = actor.item_use_delay();
 		attackSuppressed = actor.attack_suppressed();
@@ -175,23 +180,30 @@ final class ReplayPlayer extends ServerPlayer {
 		noPhysics = absolute;
 	}
 
+	// Source: minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, stopUsingItem/releaseUsingItem;
+	// minecraft-26.3-src/net/minecraft/client/Minecraft.java, handleKeybinds (item use suppresses attacks).
 	void prepare(ReplayTrace.Controls input) {
 		controls = input;
 		if (input.select_weapon()) {
 			if (loadout != null) {
+				int requested = SimulationContract.selectedSlot(loadout, input.weapon(), input.select_slot(), getInventory().getSelectedSlot());
+				if (requested != getInventory().getSelectedSlot() && LivePolicy.usingBow(this)) stopUsingItem();
 				String previous = BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString();
-				getInventory().setSelectedSlot(SimulationContract.selectedSlot(loadout, input.weapon(), input.select_slot(), getInventory().getSelectedSlot()));
+				getInventory().setSelectedSlot(requested);
 				if (!previous.equals(input.weapon())) {
 					refreshMainHand();
 					resetAttackStrengthTicker();
 				}
 			} else {
+				if (LivePolicy.usingBow(this) && !getMainHandItem().is(
+						BuiltInRegistries.ITEM.getValue(Identifier.parse(input.weapon())))) stopUsingItem();
 				if (equip(EquipmentSlot.MAINHAND, input.weapon())) resetAttackStrengthTicker();
 			}
 		}
 		attackSuppressed = isUsingItem();
 		if (itemUseDelay > 0) itemUseDelay--;
-		if (!input.use_item() || !isAlive()) stopUsingItem();
+		if (!isAlive()) stopUsingItem();
+		else if (!input.use_item() && isUsingItem()) releaseUsingItem();
 		if (analysisEnabled) damageEvents = new JsonArray();
 		if (liveControlled) acceptMotion(); else pendingMotion = null;
 		setOldPosAndRot();
@@ -238,8 +250,11 @@ final class ReplayPlayer extends ServerPlayer {
 					&& canPlayerFitWithinBlocksAndEntitiesWhen(Pose.CROUCHING),
 					!isSleeping() && !canPlayerFitWithinBlocksAndEntitiesWhen(Pose.STANDING));
 			if (controls.use_item() && !isUsingItem() && itemUseDelay == 0) {
-				itemUseDelay = 4;
-				if (getOffhandItem().is(Items.SHIELD) && !getCooldowns().isOnCooldown(getOffhandItem())) startUsingItem(InteractionHand.OFF_HAND);
+				if (getMainHandItem().getItem() instanceof BowItem bow) bow.use(level(), this, InteractionHand.MAIN_HAND);
+				if (!isUsingItem() && getOffhandItem().is(Items.SHIELD) && !getCooldowns().isOnCooldown(getOffhandItem())) {
+					getOffhandItem().getItem().use(level(), this, InteractionHand.OFF_HAND);
+					if (isUsingItem()) itemUseDelay = 4;
+				}
 			}
 			boolean possible = !isMobilityRestricted() && (getFoodData().getFoodLevel() > 6 || getAbilities().mayfly);
 			setSprinting(sprintInput.update(controls, isSprinting(),
@@ -355,6 +370,8 @@ final class ReplayPlayer extends ServerPlayer {
 			if (!stack.isEmpty()) stack.set(DataComponents.UNBREAKABLE, Unit.INSTANCE);
 			getInventory().setItem(slot, stack);
 		}
+		int arrows = loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0;
+		getInventory().setItem(9, arrows == 0 ? ItemStack.EMPTY : new ItemStack(Items.ARROW, arrows));
 		getInventory().setSelectedSlot(loadout.get("selected").getAsInt());
 		refreshMainHand();
 	}
@@ -447,8 +464,8 @@ final class ReplayPlayer extends ServerPlayer {
 		state.addProperty("weapon", BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString());
 		state.addProperty("weapon_slot", getInventory().getSelectedSlot());
 		state.addProperty("shield_equipped", getOffhandItem().is(Items.SHIELD));
-		state.addProperty("using_shield", isUsingItem());
-		state.addProperty("shield_use_ticks", getTicksUsingItem());
+		state.addProperty("using_shield", LivePolicy.usingShield(this));
+		state.addProperty("shield_use_ticks", LivePolicy.usingShield(this) ? getTicksUsingItem() : 0);
 		state.addProperty("shield_cooldown", shieldCooldown());
 		state.addProperty("item_use_delay", itemUseDelay);
 		state.addProperty("attack_suppressed", attackSuppressed);

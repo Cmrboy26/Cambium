@@ -30,7 +30,10 @@ def arguments(argv=None):
     parser.add_argument("--library", help="Explicit native training DLL/SO")
     parser.add_argument("--output", help="Run directory; default timestamp or resumed checkpoint directory")
     parser.add_argument("--save-every", type=positive, default=10)
-    parser.add_argument("--replay-every", type=int, default=0, help="Completed training episodes between replay samples")
+    replay = parser.add_mutually_exclusive_group()
+    replay.add_argument("--replay-every", type=int, default=0, help="Completed training episodes between replay samples")
+    replay.add_argument("--replay-every-updates", type=int, default=0,
+                        help="Global PPO updates between single replay samples; independent of episode count")
     parser.add_argument("--replay-dir", help="Replay directory; default OUTPUT/replays")
     parser.add_argument("--hidden-dim", type=positive, help="Override plan learner width for a new experiment")
     parser.add_argument("--epochs", type=positive, help="Override plan learner PPO epochs")
@@ -55,8 +58,9 @@ def arguments(argv=None):
         parser.error(str(error))
     if options.initialize and options.resume:
         parser.error("Choose --initialize or --resume, not both")
-    if options.replay_every < 0 or options.replay_dir and not options.replay_every:
-        parser.error("replay-every must be nonnegative; replay-dir requires replay-every")
+    if (options.replay_every < 0 or options.replay_every_updates < 0
+            or options.replay_dir and not (options.replay_every or options.replay_every_updates)):
+        parser.error("Replay intervals must be nonnegative; replay-dir requires an enabled replay interval")
     if not options.plan and not options.resume:
         options.plan = str(ROOT / "simulator/setups/curricula/shield-axe-curriculum.json")
     if options.plan:

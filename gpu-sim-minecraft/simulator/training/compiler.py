@@ -122,7 +122,7 @@ def _player(value, scene):
         "velocity": [0.0, -0.0784000015258789, 0.0], "yaw": 0.0, "pitch": 0.0,
         "on_ground": True, "health": 20.0, "absorption": 0.0, "attack_strength_ticks": 20,
         "loadout": {"weapons": ["minecraft:air"], "selected": 0,
-                    "offhand": "minecraft:air", "armor": {}},
+                    "offhand": "minecraft:air", "armor": {}, "arrows": 0},
     }, value)
     position = _vector(result.get("position"), "player position", limit=8192)
     _vector(result["velocity"], "player velocity", limit=1000)
@@ -139,7 +139,7 @@ def _player(value, scene):
     ticks = result["attack_strength_ticks"]
     if type(ticks) is not int or not 0 <= ticks <= 2**31 - 1:
         raise ValueError("Player attack_strength_ticks must be a nonnegative int32")
-    loadout = fields(result["loadout"], ("weapons", "selected", "offhand", "armor"), "loadout")
+    loadout = fields(result["loadout"], ("weapons", "selected", "offhand", "armor", "arrows"), "loadout")
     slots = loadout["weapons"]
     if not isinstance(slots, list) or not 1 <= len(slots) <= 9:
         raise ValueError("Player weapons must contain 1..9 slots")

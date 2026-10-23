@@ -18,6 +18,10 @@ public final class ReplayAnalysisChecks {
 		if (args.length == 1 || args.length == 3) {
 			try (LivePolicy policy = new LivePolicy(Integer.parseInt(args[0]))) {
 				JsonObject info = policy.info().get(5, java.util.concurrent.TimeUnit.SECONDS);
+				if (info.has("contract") && info.getAsJsonObject("contract").has("requires")
+						&& info.getAsJsonObject("contract").getAsJsonArray("requires").contains(ReplayAnalysis.JSON.toJsonTree("bow"))) {
+					require(policy.fullBowBridgeReady(), "HTTP bridge must negotiate the complete bow observations, use_item choices, and finite bow loadouts");
+				}
 				ReplayTrace trace = ReplayTrace.forLive(info.getAsJsonObject("environment"));
 				require(trace.frames.getFirst().actors().size() == 2, "Policy environment must produce two initial actors");
 				JsonObject response = policy.act("java-python-check", 42, new float[2][policy.observationCount()]).get(5, java.util.concurrent.TimeUnit.SECONDS);
@@ -53,6 +57,8 @@ public final class ReplayAnalysisChecks {
 		System.out.println("PASS: replay food profile is frozen independently of world rules");
 		checkLivePolicy();
 		checkDescriptiveContract();
+		checkBowContract();
+		checkBowReplay();
 		BoundaryContractChecks.check();
 		checkPolicyFixtures();
 		EquipmentObservationChecks.check();
@@ -513,6 +519,31 @@ public final class ReplayAnalysisChecks {
 				&& Math.abs(velocityCatalogue[83] - 0.6F) < 1e-6F
 				&& Math.abs(velocityCatalogue[84] + 0.4F) < 1e-6F,
 				"Self and opponent-relative velocities must use world-axis blocks per tick");
+		var bowSource = new ObservationEncoder.State(0.5, 1, -1.5, 20, 0, 0, true, 0.1, -0.2, 0.3,
+				new ObservationEncoder.BowState(32, true, 10, 0.41666667F, true));
+		var bowTarget = new ObservationEncoder.State(2, 1, 3, 20, 0, 0, true, -0.2, 0.4, -0.1,
+				new ObservationEncoder.BowState(4, false, 0, 0, true));
+		var arrow = new ObservationEncoder.ArrowState(1.5, 2, -1.5, 0.6, 0.2, 0.4);
+		float[] bowCatalogue = new float[PolicyCatalogue.FEATURE_NAMES.size()];
+		ObservationEncoder.bowObservation(bowCatalogue, bowSource, bowTarget, arrow);
+		require(Math.abs(bowCatalogue[89] - 0.5F) < 1e-6F && bowCatalogue[90] == 1
+				&& Math.abs(bowCatalogue[91] - 0.41666667F) < 1e-6F
+				&& bowCatalogue[92] == 1 && bowCatalogue[93] == 1 && bowCatalogue[94] == 0,
+				"Bow draw, ammo, and equipped observations must use actual actor state");
+		require(bowCatalogue[95] == 1 && Math.abs(bowCatalogue[96] - 0.1F) < 1e-6F
+				&& Math.abs(bowCatalogue[97] - 0.1F) < 1e-6F && bowCatalogue[98] == 0
+				&& Math.abs(bowCatalogue[99] - 0.5F) < 1e-6F && Math.abs(bowCatalogue[100] - 0.4F) < 1e-6F
+				&& Math.abs(bowCatalogue[101] - 0.1F) < 1e-6F,
+				"Arrow features must be actor-relative position and velocity");
+		float[] reverseBow = new float[PolicyCatalogue.FEATURE_NAMES.size()];
+		ObservationEncoder.bowObservation(reverseBow, bowTarget, bowSource, arrow);
+		require(reverseBow[89] == 0.0625F && reverseBow[90] == 0 && reverseBow[91] == 0
+				&& reverseBow[92] == 1 && reverseBow[93] == 1 && reverseBow[94] == 1
+				&& Math.abs(reverseBow[96] + 0.05F) < 1e-6F,
+				"Bow and arrow observations must reverse with the actor perspective");
+		float[] noArrow = new float[PolicyCatalogue.FEATURE_NAMES.size()];
+		ObservationEncoder.bowObservation(noArrow, bowSource, bowTarget, null);
+		for (int index = 95; index <= 101; index++) require(noArrow[index] == 0, "Absent arrows must zero every arrow feature");
 		float[] coincident = ObservationEncoder.observe(source, source, rays);
 		require(coincident[18] == 0 && coincident[19] == 0 && coincident[20] == 0 && coincident[21] == 0,
 				"Coincident players must not produce undefined aiming observations");
@@ -652,5 +683,213 @@ public final class ReplayAnalysisChecks {
 		try { new SimulationContract(descriptor); } catch (IllegalArgumentException expected) { rejected = true; }
 		require(rejected, "Unknown mechanics/observations must fail explicitly");
 		System.out.println("PASS: descriptive policy projection, arbitrary head ordering, loadouts and capability rejection");
+	}
+
+	private static void checkBowContract() {
+		JsonObject descriptor = JsonParser.parseString("""
+			{"format":"minecraft_sim_policy","version":1,"minecraft":"26.3","ticks_per_action":1,"requires":["bow"],
+			 "observations":[
+			  {"feature":"self.arrow_count_fraction"},
+			  {"feature":"self.bow_using","encoding":"one_hot","categories":[0,1]},
+			  {"feature":"self.bow_power_fraction"},
+			  {"feature":"self.bow_equipped","encoding":"one_hot","categories":[0,1]},
+			  {"feature":"opponent.bow_equipped","encoding":"one_hot","categories":[0,1]},
+			  {"feature":"opponent.bow_using","encoding":"one_hot","categories":[0,1]},
+			  {"feature":"arrow.present","encoding":"one_hot","categories":[0,1]},
+			  {"feature":"arrow.relative.x"},{"feature":"arrow.relative.y"},{"feature":"arrow.relative.z"},
+			  {"feature":"arrow.relative.velocity.x"},{"feature":"arrow.relative.velocity.y"},{"feature":"arrow.relative.velocity.z"}],
+			 "actions":[{"name":"use_item","values":[false,true]}]}
+			""").getAsJsonObject();
+		SimulationContract contract = new SimulationContract(descriptor);
+		require(contract.supportsFullBowContract() && contract.observationCount() == 18,
+				"Complete bow feature and binary-use descriptors must be admitted");
+		JsonObject spawn = JsonParser.parseString("""
+			{"loadout":{"weapons":["minecraft:bow"],"arrows":64}}
+			""").getAsJsonObject();
+		JsonObject bowLoadout = SimulationContract.loadout(spawn, "configured");
+		contract.validateLoadouts(java.util.List.of(bowLoadout, bowLoadout));
+		ReplayTrace.Controls controls = contract.decode(JsonParser.parseString("[1]").getAsJsonArray(), bowLoadout);
+		require(controls.use_item() && bowLoadout.get("arrows").getAsInt() == 64
+				&& SimulationContract.weaponChoices().contains("minecraft:bow"),
+				"Bow loadouts must carry finite ammo and decode use_item semantically");
+		JsonObject defaultLoadout = SimulationContract.loadout(JsonParser.parseString(
+				"{\"loadout\":{\"weapons\":[\"minecraft:diamond_sword\"]}}").getAsJsonObject(), "configured");
+		require(defaultLoadout.get("arrows").getAsInt() == 0, "Historical loadouts must default to zero arrows");
+		for (String invalid : new String[]{"-1", "65", "1.5"}) {
+			JsonObject invalidSpawn = spawn.deepCopy();
+			invalidSpawn.getAsJsonObject("loadout").add("arrows", JsonParser.parseString(invalid));
+			boolean rejected = false;
+			try { SimulationContract.loadout(invalidSpawn, "configured"); } catch (IllegalArgumentException expected) { rejected = true; }
+			require(rejected, "Out-of-range/fractional arrow counts must fail");
+		}
+		JsonObject missingCapability = descriptor.deepCopy();
+		missingCapability.remove("requires");
+		boolean rejected = false;
+		try { new SimulationContract(missingCapability); } catch (IllegalArgumentException expected) { rejected = true; }
+		require(rejected, "Bow observation descriptors must require the bow capability");
+		JsonObject alias = descriptor.deepCopy();
+		alias.getAsJsonArray("actions").add(JsonParser.parseString("{\"name\":\"shield\",\"values\":[false,true]}"));
+		rejected = false;
+		try { new SimulationContract(alias); } catch (IllegalArgumentException expected) { rejected = true; }
+		require(rejected, "A policy cannot declare both use_item and its historical shield alias");
+		JsonObject shieldDescriptor = JsonParser.parseString("""
+			{"format":"minecraft_sim_policy","version":1,"minecraft":"26.3","ticks_per_action":1,
+			 "observations":[{"feature":"self.health_fraction"}],
+			 "actions":[{"name":"shield","values":[false,true]}]}
+			""").getAsJsonObject();
+		SimulationContract shieldContract = new SimulationContract(shieldDescriptor);
+		require(shieldContract.decode(JsonParser.parseString("[1]").getAsJsonArray(), defaultLoadout).use_item(),
+				"Historical shield actions must remain an alias for held item use");
+		System.out.println("PASS: complete bow descriptors, finite arrows, capability gating and legacy shield alias");
+	}
+
+	private static void checkBowReplay() throws Exception {
+		Path folder = Files.createTempDirectory("cambium-bow-replay-");
+		try {
+			JsonObject environment = JsonParser.parseString("""
+				{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3","requires":["bow"],
+				 "bounds":{"min":[0,0,0],"size":[16,8,16]},"blocks":[],
+				 "players":[
+				  {"position":[2,1,2],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false,
+				   "loadout":{"weapons":["minecraft:bow"],"arrows":64}},
+				  {"position":[8,1,2],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false,
+				   "loadout":{"weapons":["minecraft:bow"],"arrows":64}}]}
+				""").getAsJsonObject();
+			JsonObject header = new JsonObject();
+			header.addProperty("format", "minecraft_sim_replay");
+			header.addProperty("version", 3);
+			header.addProperty("minecraft", "26.3");
+			header.addProperty("players", 2);
+			header.addProperty("ticks_per_second", 20);
+			header.addProperty("backend", "native");
+			header.add("environment", environment);
+			JsonArray emptyProjectiles = new JsonArray();
+			JsonObject first = bowReplayFrame(0, false, false, emptyProjectiles);
+			JsonArray projectileSamples = new JsonArray();
+			projectileSamples.add(ReplayAnalysis.JSON.toJsonTree(new ReplayTrace.Projectile(0,
+					new double[]{3, 2, 3}, new double[]{0.1, 0.2, 1.5}, 4, true, false, 0, true)));
+			JsonObject second = bowReplayFrame(1, true, true, projectileSamples);
+			Path replay = folder.resolve("bow.jsonl");
+			Files.writeString(replay, ReplayAnalysis.JSON.toJson(header) + "\n" + ReplayAnalysis.JSON.toJson(first) + "\n"
+					+ ReplayAnalysis.JSON.toJson(second) + "\n");
+			ReplayTrace trace = ReplayTrace.read(replay);
+			require(trace.frames.get(1).projectiles().size() == 1 && trace.frames.get(1).projectiles().getFirst().owner() == 0
+					&& trace.frames.get(1).projectiles().getFirst().critical()
+					&& trace.frames.get(1).actors().getFirst().bow_using()
+					&& trace.frames.get(1).actors().getFirst().bow_draw_ticks() == 5,
+				"Envelope-3 reader must preserve projectile ownership and actual bow draw state");
+			JsonObject badOwner = second.deepCopy();
+			badOwner.getAsJsonArray("projectiles").get(0).getAsJsonObject().addProperty("owner", 2);
+			Path invalidOwner = folder.resolve("invalid-owner.jsonl");
+			Files.writeString(invalidOwner, ReplayAnalysis.JSON.toJson(header) + "\n" + ReplayAnalysis.JSON.toJson(first) + "\n"
+					+ ReplayAnalysis.JSON.toJson(badOwner) + "\n");
+			boolean rejected = false;
+			try { ReplayTrace.read(invalidOwner); } catch (java.io.IOException expected) { rejected = true; }
+			require(rejected, "Projectile owner indices outside the two actors must fail");
+			JsonObject badFinite = second.deepCopy();
+			badFinite.getAsJsonArray("projectiles").get(0).getAsJsonObject()
+					.add("velocity", JsonParser.parseString("[0,1e309,0]").getAsJsonArray());
+			Path invalidVelocity = folder.resolve("invalid-velocity.jsonl");
+			Files.writeString(invalidVelocity, ReplayAnalysis.JSON.toJson(header) + "\n" + ReplayAnalysis.JSON.toJson(first) + "\n"
+					+ ReplayAnalysis.JSON.toJson(badFinite) + "\n");
+			rejected = false;
+			try { ReplayTrace.read(invalidVelocity); } catch (java.io.IOException expected) { rejected = true; }
+			require(rejected, "Non-finite projectile vectors must fail");
+			JsonObject oldHeader = header.deepCopy();
+			oldHeader.addProperty("version", 2);
+			JsonObject oldEnvironment = JsonParser.parseString("""
+				{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3",
+				 "bounds":{"min":[0,0,0],"size":[16,8,16]},"blocks":[],
+				 "players":[{"position":[2,1,2],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false},
+				            {"position":[8,1,2],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false}]}
+				""").getAsJsonObject();
+			oldHeader.add("environment", oldEnvironment);
+			JsonObject oldFirst = legacyReplayFrame(0);
+			JsonObject oldSecond = legacyReplayFrame(1);
+			Path legacy = folder.resolve("legacy.jsonl");
+			Files.writeString(legacy, ReplayAnalysis.JSON.toJson(oldHeader) + "\n" + ReplayAnalysis.JSON.toJson(oldFirst) + "\n"
+					+ ReplayAnalysis.JSON.toJson(oldSecond) + "\n");
+			ReplayTrace oldTrace = ReplayTrace.read(legacy);
+			require(oldTrace.frames.getFirst().projectiles().isEmpty() && oldTrace.frames.getFirst().actors().getFirst().arrow_count() == 0,
+				"Older envelopes must default absent bow/projectile fields without changing playback");
+			System.out.println("PASS: envelope-3 bow/projectile validation, owner/finite rejection and legacy defaults");
+		} finally {
+			try (var files = Files.walk(folder)) {
+				for (Path path : files.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
+			}
+		}
+	}
+
+	private static JsonObject bowReplayFrame(int tick, boolean bowUsing, boolean useItem, JsonArray projectiles) {
+		JsonArray actors = new JsonArray();
+		for (int index = 0; index < 2; index++) {
+			var controls = new ReplayTrace.Controls(false, false, false, false, false, false, false, false, 0, 0,
+					false, "minecraft:bow", useItem, -1);
+			JsonObject actor = new JsonObject();
+			actor.addProperty("id", index);
+			actor.add("position", ReplayAnalysis.JSON.toJsonTree(index == 0 ? new double[]{2, 1, 2} : new double[]{8, 1, 2}));
+			actor.add("velocity", ReplayAnalysis.JSON.toJsonTree(new double[]{0, 0, 0}));
+			actor.addProperty("yaw", 0);
+			actor.addProperty("pitch", 0);
+			actor.addProperty("on_ground", false);
+			actor.addProperty("sprinting", false);
+			actor.addProperty("pose", 0);
+			actor.addProperty("health", 20);
+			actor.addProperty("absorption", 0);
+			actor.addProperty("damage_cooldown", 0);
+			actor.addProperty("hurt_time", 0);
+			actor.addProperty("attack_strength_ticks", 0);
+			actor.add("controls", ReplayAnalysis.JSON.toJsonTree(controls));
+			actor.add("outcome", ReplayAnalysis.JSON.toJsonTree(new ReplayTrace.Outcome(-1, false, false, false, false, false, 0, 0)));
+			actor.addProperty("weapon", "minecraft:bow");
+			actor.addProperty("weapon_slot", 0);
+			actor.addProperty("shield_equipped", false);
+			actor.addProperty("using_shield", false);
+			actor.addProperty("shield_use_ticks", 0);
+			actor.addProperty("shield_cooldown", 0);
+			actor.addProperty("item_use_delay", 0);
+			actor.addProperty("attack_suppressed", false);
+			actor.add("armor", JsonParser.parseString("""
+				{"boots":"minecraft:air","leggings":"minecraft:air","chestplate":"minecraft:air","helmet":"minecraft:air"}
+				"""));
+			actor.addProperty("arrow_count", 64);
+			actor.addProperty("bow_using", index == 0 && bowUsing);
+			actor.addProperty("bow_draw_ticks", index == 0 && bowUsing ? 5 : 0);
+			actor.addProperty("bow_power", index == 0 && bowUsing ? 0.1875F : 0);
+			actors.add(actor);
+		}
+		JsonObject frame = new JsonObject();
+		frame.addProperty("tick", tick);
+		frame.add("actors", actors);
+		frame.add("projectiles", projectiles);
+		return frame;
+	}
+
+	private static JsonObject legacyReplayFrame(int tick) {
+		JsonArray actors = new JsonArray();
+		for (int index = 0; index < 2; index++) {
+			JsonObject actor = new JsonObject();
+			actor.addProperty("id", index);
+			actor.add("position", ReplayAnalysis.JSON.toJsonTree(index == 0 ? new double[]{2, 1, 2} : new double[]{8, 1, 2}));
+			actor.add("velocity", ReplayAnalysis.JSON.toJsonTree(new double[]{0, 0, 0}));
+			actor.addProperty("yaw", 0);
+			actor.addProperty("pitch", 0);
+			actor.addProperty("on_ground", false);
+			actor.addProperty("sprinting", false);
+			actor.addProperty("pose", 0);
+			actor.addProperty("health", 20);
+			actor.addProperty("absorption", 0);
+			actor.addProperty("damage_cooldown", 0);
+			actor.addProperty("hurt_time", 0);
+			actor.addProperty("attack_strength_ticks", 0);
+			actor.add("controls", ReplayAnalysis.JSON.toJsonTree(new ReplayTrace.Controls(false, false, false, false,
+					false, false, false, false, 0, 0)));
+			actor.add("outcome", new JsonObject());
+			actors.add(actor);
+		}
+		JsonObject frame = new JsonObject();
+		frame.addProperty("tick", tick);
+		frame.add("actors", actors);
+		return frame;
 	}
 }

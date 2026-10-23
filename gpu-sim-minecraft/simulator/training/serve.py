@@ -19,7 +19,7 @@ from simulator.training.policies import fixed_indices
 from simulator.training.controllers import create_controller
 
 LIVE_SCRIPTED_CONTROLLERS = frozenset((
-    "stationary_target", "basic_melee", "stationary_melee", "tactical_melee", "random_walk",
+    "stationary_target", "basic_melee", "stationary_melee", "tactical_melee", "random_walk", "archer",
 ))
 
 
@@ -73,7 +73,10 @@ class Policy:
         torch.manual_seed(seed)
         self.model = ActorCritic(self.schema["observation_dim"], hidden, movement_bins=9,
             action_sizes=dict(zip(self.contract["action_names"], self.contract["action_sizes"]))).to(self.device)
-        self.model.load_state_dict(saved["model"], strict=True)
+        try:
+            self.model.load_state_dict(saved["model"], strict=True)
+        except (KeyError, TypeError, RuntimeError) as error:
+            raise ValueError("Checkpoint model parameters do not match its policy contract") from error
         if not all(torch.isfinite(parameter).all() for parameter in self.model.parameters()):
             raise ValueError("Checkpoint contains non-finite parameters")
         self.model.eval()

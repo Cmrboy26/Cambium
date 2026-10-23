@@ -12,11 +12,11 @@
 
 namespace minecraft_sim::app {
 
-inline constexpr std::array<const char*, 15> weapon_names{
+inline constexpr std::array<const char*, 16> weapon_names{
     "minecraft:air", "minecraft:wooden_sword", "minecraft:stone_sword", "minecraft:copper_sword",
     "minecraft:golden_sword", "minecraft:iron_sword", "minecraft:diamond_sword", "minecraft:netherite_sword",
     "minecraft:wooden_axe", "minecraft:stone_axe", "minecraft:copper_axe", "minecraft:golden_axe",
-    "minecraft:iron_axe", "minecraft:diamond_axe", "minecraft:netherite_axe"};
+    "minecraft:iron_axe", "minecraft:diamond_axe", "minecraft:netherite_axe", "minecraft:bow"};
 inline constexpr auto armor_slots = armor_slot_names;
 inline constexpr std::array<const char*, 9> armor_materials{
     "none", "leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite", "turtle"};
@@ -38,7 +38,8 @@ inline std::string armorName(ArmorMaterial material, int slot) {
 inline std::vector<WeaponItem> applyLoadout(PlayerState& state, const nlohmann::json& loadout) {
     if (!loadout.is_object()) throw std::invalid_argument("Loadout must be an object");
     for (const auto& entry : loadout.items()) {
-        if (entry.key() != "weapons" && entry.key() != "selected" && entry.key() != "offhand" && entry.key() != "armor") {
+        if (entry.key() != "weapons" && entry.key() != "selected" && entry.key() != "offhand"
+            && entry.key() != "armor" && entry.key() != "arrows") {
             throw std::invalid_argument("Unsupported loadout field: " + entry.key());
         }
     }
@@ -62,6 +63,16 @@ inline std::vector<WeaponItem> applyLoadout(PlayerState& state, const nlohmann::
     }
     const auto selected = loadout.value("selected", 0);
     if (selected < 0 || selected >= static_cast<int>(slots.size())) throw std::invalid_argument("Selected weapon outside loadout");
+    if (loadout.contains("arrows") && !loadout.at("arrows").is_number_integer()) {
+        throw std::invalid_argument("Ordinary arrow count must be an integer");
+    }
+    const int arrow_count = loadout.value("arrows", 0);
+    if (arrow_count < 0 || arrow_count > 64) throw std::invalid_argument("Ordinary arrow count outside 0..64");
+    if (arrow_count > 0 && std::find(slots.begin(), slots.end(), WeaponItem::bow) == slots.end()) {
+        throw std::invalid_argument("Ordinary arrows require a bow in the loadout");
+    }
+    state.selected_weapon_slot = selected;
+    state.ordinary_arrow_count = arrow_count;
     const auto offhand = loadout.value("offhand", std::string("minecraft:air"));
     if (offhand != "minecraft:air" && offhand != "minecraft:shield") throw std::invalid_argument("Unsupported offhand item: " + offhand);
     state.weapon = slots[selected];
@@ -102,7 +113,8 @@ inline nlohmann::json describeLoadout(const PlayerState& state, const std::vecto
     }
     auto armor = nlohmann::json::object();
     for (int slot = 0; slot < 4; ++slot) armor[armor_slots[slot]] = armorName(state.armor_items[slot], slot);
-    return {{"weapons", weapons}, {"selected", selected}, {"offhand", state.shield_equipped ? "minecraft:shield" : "minecraft:air"}, {"armor", armor}};
+    return {{"weapons", weapons}, {"selected", selected}, {"offhand", state.shield_equipped ? "minecraft:shield" : "minecraft:air"},
+        {"armor", armor}, {"arrows", state.ordinary_arrow_count}};
 }
 
 template<std::size_t Size>
@@ -125,8 +137,10 @@ struct PolicyLayout {
             || value.at("minecraft") != "26.3" || value.at("ticks_per_action") != 1) {
             throw std::invalid_argument("Unsupported policy contract format/version/build/tick rate");
         }
+        bool requires_bow = false;
         for (const auto& capability : value.value("requires", nlohmann::json::array())) {
             const auto name = capability.get<std::string>();
+            requires_bow = requires_bow || name == "bow";
             if (std::find(capability_names.begin(), capability_names.end(), name) == capability_names.end()) {
                 throw std::invalid_argument("Unsupported required capability: " + name);
             }
@@ -140,6 +154,7 @@ struct PolicyLayout {
             }
             const auto name = feature.at("feature").get<std::string>();
             const auto source = nameIndex(feature_names, name);
+            if (source >= 89 && !requires_bow) throw std::invalid_argument("Bow observations require the bow capability");
             if (feature.contains("scale") && !feature.at("scale").is_number()) throw std::invalid_argument("Invalid observation scale");
             const auto scale = feature.value("scale", 1.0F);
             if (!std::isfinite(scale) || std::abs(scale) > policy_max_scale) throw std::invalid_argument("Invalid observation scale");
@@ -169,7 +184,8 @@ struct PolicyLayout {
                 const bool slot = name == "self.weapon_slot" || name == "opponent.weapon_slot";
                 const bool binary = name.ends_with(".alive") || name.ends_with(".weapon_is_axe") || name.ends_with(".shield_using")
                     || name.ends_with(".shield_disabled") || name.ends_with(".shield_disabled_observed") || name.ends_with(".has_shield")
-                    || name.ends_with(".present") || name.ends_with(".is_axe") || name.ends_with(".on_ground") || name.ends_with(".sprinting");
+                    || name.ends_with(".present") || name.ends_with(".is_axe") || name.ends_with(".on_ground")
+                    || name.ends_with(".sprinting") || name.ends_with(".bow_using") || name.ends_with(".bow_equipped");
                 const auto& choices = feature.at("categories");
                 if ((!slot && !binary) || !choices.is_array() || choices.empty()) throw std::invalid_argument("Invalid one_hot observation");
                 std::vector<int> seen;
@@ -192,10 +208,14 @@ struct PolicyLayout {
         const auto& heads = value.at("actions");
         if (!heads.is_array() || heads.empty() || heads.size() > action_names.size()) throw std::invalid_argument("Invalid action head count");
         std::array<bool, action_names.size()> seen{};
+        bool has_shield_action = false;
+        bool has_use_item_action = false;
         for (const auto& descriptor : heads) {
             Head head{nameIndex(action_names, descriptor.at("name").get<std::string>()), {}};
             if (seen[head.kind]) throw std::invalid_argument("Duplicate action primitive");
             seen[head.kind] = true;
+            has_shield_action = has_shield_action || std::string(action_names[head.kind]) == "shield";
+            has_use_item_action = has_use_item_action || std::string(action_names[head.kind]) == "use_item";
             const auto& choices = descriptor.at("values");
             if (!choices.is_array() || choices.empty() || choices.size() > policy_max_choices) throw std::invalid_argument("Invalid action choice count");
             const std::string kind = action_kinds[head.kind];
@@ -222,6 +242,9 @@ struct PolicyLayout {
                 head.values.push_back(number);
             }
             actions.push_back(std::move(head));
+        }
+        if (has_shield_action && has_use_item_action) {
+            throw std::invalid_argument("Policy cannot declare both shield and use_item action aliases");
         }
     }
 
@@ -252,9 +275,14 @@ struct PolicyLayout {
             case 3: result.attack = value != 0; break;
             case 4: result.yaw_delta = value; break;
             case 5: result.pitch_delta = value; break;
-            case 6: result.select_weapon = true; result.weapon = slots[static_cast<int>(value)]; break;
+            case 6:
+                result.select_weapon = true;
+                result.weapon = slots[static_cast<int>(value)];
+                result.selected_slot = static_cast<int>(value);
+                break;
             case 7: result.use_item = value != 0; break;
             case 8: result.sneak = value != 0; break;
+            case 9: result.use_item = value != 0; break;
             }
         }
         return result;

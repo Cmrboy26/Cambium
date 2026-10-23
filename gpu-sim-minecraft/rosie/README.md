@@ -31,6 +31,16 @@ Use `--line-mode` for the original sequential prompts and `multiple` entry.
 Use `--shared-gpu` for one job and an overlaid PNG; `--max-parallel N` caps concurrency. [Details](AGENTS.md#shared-gpu-sweeps).
 For a one-update CUDA smoke test, use `sbatch rosie/train.sbatch` instead.
 
+## Train Locally in WSL2
+
+Use a checkout inside WSL's Linux filesystem, install the Windows NVIDIA WSL
+driver and a CUDA toolkit with `nvcc` inside WSL, then run `bash rosie/setup.sh`
+and `bash rosie/submit.sh --local`. The local wizard uses the same plan/settings,
+defaults to architecture 86 and 256 worlds for an 8 GB GPU, and runs sweeps
+sequentially. A checkout open through the remote Rosie VS Code session still
+runs on Rosie; pull/sync the changes into your WSL checkout to use the 3060 Ti.
+See [local training details](AGENTS.md#local-wsl2-training).
+
 ## Local Replays And Duels
 
 For passwordless SSH on Windows, run once with GlobalVPN connected:
@@ -81,22 +91,17 @@ bash ./rosie/dashboard-connect.sh
 ```
 
 The dashboard lists every run under `simulator/training/runs` and refreshes
-every three seconds, including new or changing runs. The script hosts it on
-your Rosie management node, chooses both ports automatically, and opens the
-local URL through an SSH tunnel. **No training job or Slurm allocation is
-required or submitted.** Saved runs remain accessible when training stops.
-Press Ctrl+C to stop the remote dashboard and local tunnel.
+every three seconds, including new or changing runs. On Rosie the script uses
+an SSH tunnel; from a local WSL checkout it hosts that checkout's runs directly,
+without SSH. It chooses a free port automatically. **No training job or Slurm
+allocation is required or submitted.** Press Ctrl+C to stop the dashboard.
 
 Set `ROSIE_PROJECT_DIR` to your remote checkout when connecting from your
 computer without a job ID. On Rosie itself, the command uses its own
 checkout and forwards localhost on that node, not your computer. An optional
 `<JOB_ID>` still hosts the dashboard inside a running training allocation.
 
-See [AGENTS.md](AGENTS.md) for GPU selection, experiment options, output paths,
-tunneling details, and local Linux checks. If `ROSIE_SSH_JUMP` is unset, the
-script derives the management host when run on Rosie. When run locally, it
-prompts for your assigned node number (`1`-`4`) or full hostname, such as
-`dh-mgmt1.hpc.msoe.edu`. Set `ROSIE_SSH_JUMP` to skip the prompt; it accepts the
-same number or hostname. Set
-`ROSIE_SSH_USER` to override the account; by default, the local username is
-suffixed with `@ad.msoe.edu`.
+For a remote Rosie checkout launched from another computer, set
+`ROSIE_SSH_JUMP` and `ROSIE_PROJECT_DIR` to retain tunnel behavior. See
+[AGENTS.md](AGENTS.md) for GPU selection, experiment options, output paths, and
+remote connection details.

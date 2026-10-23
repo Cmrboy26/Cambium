@@ -1,12 +1,14 @@
 #pragma once
 
 #include "configuration.hpp"
+#include "minecraft_sim/projectiles.hpp"
 #include <nlohmann/json.hpp>
 
 namespace minecraft_sim::app {
 
 inline nlohmann::json replayFrame(std::uint64_t tick, const PlayerState* players, const Controls* actions,
-                                  bool equipment = false, const int* selected_slots = nullptr) {
+                                  bool equipment = false, const int* selected_slots = nullptr,
+                                  const ProjectileWorldState* projectiles = nullptr) {
     auto actors = nlohmann::json::array();
     for (int index = 0; index < 2; ++index) {
         const auto& state = players[index];
@@ -46,8 +48,29 @@ inline nlohmann::json replayFrame(std::uint64_t tick, const PlayerState* players
             for (int slot = 0; slot < 4; ++slot) armor[armor_slots[slot]] = armorName(state.armor_items[slot], slot);
             actor["armor"] = armor;
         }
+        if (projectiles) {
+            const auto& bow = projectiles->bows[index];
+            actors.back().update({{"arrow_count", bow.ordinary_arrows},
+                {"bow_using", state.using_bow}, {"bow_draw_ticks", bow.draw_ticks},
+                {"bow_power", state.using_bow ? bowPower(bow.draw_ticks) : 0.0F}});
+        }
     }
-    return {{"tick", tick}, {"actors", actors}};
+    auto frame = nlohmann::json{{"tick", tick}, {"actors", actors}};
+    if (projectiles) {
+        frame["capabilities"] = {{"bow", true}};
+        frame["projectiles"] = nlohmann::json::array();
+        for (int slot = 0; slot < projectiles->arrow_capacity; ++slot) {
+            const auto& arrow = projectiles->arrows[slot];
+            if (!arrow.active) continue;
+            frame["projectiles"].push_back({{"id", slot}, {"owner", arrow.owner},
+                {"position", {arrow.position.x, arrow.position.y, arrow.position.z}},
+                {"velocity", {arrow.velocity.x, arrow.velocity.y, arrow.velocity.z}},
+                {"age", arrow.age}, {"left_owner", arrow.left_owner},
+                {"in_ground", arrow.in_ground}, {"in_ground_ticks", arrow.in_ground_ticks},
+                {"critical", arrow.critical}});
+        }
+    }
+    return frame;
 }
 
 }

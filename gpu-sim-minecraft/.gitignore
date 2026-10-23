@@ -7,4 +7,7 @@
 /simulator/build-rosie-cuda*/
 /simulator/training/runs/
 /simulator/training/sweeps/
+/simulator/training/checkpoint-evaluations/
+/simulator/training/diagnostics/
+/simulator/build-bow-baseline-cpu/
 /rosie/workdirs/

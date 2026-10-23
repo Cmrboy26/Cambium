@@ -507,6 +507,8 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
 
 
 def run(options, checkpoint=None):
+    from simulator.training.replay_requests import finish_request, read_request, requested_replay_round
+
     run_started = time.perf_counter()
     if options.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA training requested but unavailable")
@@ -543,7 +545,8 @@ def run(options, checkpoint=None):
                 raise ValueError("Training plan differs from checkpoint; use --initialize for a new experiment")
         if checkpoint["research"]["world_count"] != options.envs:
             raise ValueError("Research resume requires the original world count")
-    if options.replay_every and any(
+    replay_every_updates = getattr(options, "replay_every_updates", 0)
+    if (options.replay_every or replay_every_updates) and any(
             (options.max_ticks if options.max_ticks is not None else arena["environment"]["max_ticks"]) > 100000
             for stage in plan["stages"] for arena in stage["scenario"]["arenas"]):
         raise ValueError("Enabled replays require every training stage max_ticks <= 100000")
@@ -604,6 +607,7 @@ def run(options, checkpoint=None):
         rounds = 0 if checkpoint is None else checkpoint.get("completed_rounds", 0)
         evaluations = saved.get("evaluations", {})
         config = vars(options).copy()
+        config["dashboard_replay_requests"] = True
         run_metadata = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
         run_metadata.update(learner="opponent_pool", controls=stage["controls"],
                             experiment=deployment_summary(plan, stage, stage_index))
@@ -657,14 +661,43 @@ def run(options, checkpoint=None):
                             evaluations[name] = result
                             evaluation_seconds += elapsed
                             evaluation_episodes += result["episodes"]
-                if options.replay_every:
+                replay_rounds = []
+                if options.replay_every or replay_every_updates:
+                    if replay_every_updates:
+                        replay_rounds = [rounds] if update % replay_every_updates == 0 else []
+                    else:
+                        replay_rounds = list(range((previous_rounds // options.replay_every + 1) * options.replay_every,
+                                                   rounds + 1, options.replay_every))
+                try:
+                    replay_request = read_request(output)
+                except (OSError, ValueError) as error:
+                    print(f"Dashboard replay request could not be read: {error}")
+                    replay_request = None
+                request_round = None
+                if replay_request is not None and replay_request["status"] == "pending":
+                    request_round = requested_replay_round(previous_rounds, rounds, replay_rounds)
+                    if request_round is not None and request_round not in replay_rounds:
+                        replay_rounds.append(request_round)
+                if replay_rounds:
                     replay_start = time.perf_counter()
-                    for multiple in range(previous_rounds // options.replay_every + 1, rounds // options.replay_every + 1):
+                    for replay_round in replay_rounds:
                         scenario, _ = worlds.episode(0)
-                        torch.manual_seed(plan["seed"] + multiple)
-                        export_replay(model, plan, stage, options, scenario, pool.provenance(0), device,
-                            multiple * options.replay_every, update, options.replay_dir or output / "replays",
-                            opponent_pool=pool)
+                        replay_seed = (update if replay_every_updates or not options.replay_every
+                                       else replay_round // options.replay_every)
+                        torch.manual_seed(plan["seed"] + replay_seed)
+                        try:
+                            replay_path = export_replay(model, plan, stage, options, scenario,
+                                pool.provenance(0), device, replay_round, update,
+                                options.replay_dir or output / "replays", opponent_pool=pool)
+                        except Exception as error:
+                            if replay_request is None or replay_round != request_round:
+                                raise
+                            finish_request(output, replay_request["request_id"], "failed", error=str(error)[:500])
+                            print(f"Dashboard replay request failed: {error}")
+                            continue
+                        if replay_request is not None and replay_round == request_round:
+                            finish_request(output, replay_request["request_id"], "completed",
+                                replay=Path(replay_path).name, completed_rounds=replay_round, policy_update=update)
                     replay_seconds = time.perf_counter() - replay_start
             stage_complete = reached(stage["advance"], progress, evaluations)
             plan_complete = stage_complete and stage_index + 1 == len(plan["stages"])

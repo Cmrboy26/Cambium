@@ -22,6 +22,7 @@ struct Controls {
     bool use_item = false;
     bool select_weapon = false;
     WeaponItem weapon = WeaponItem::diamond_sword;
+    int selected_slot = -1;
 };
 
 enum class PlayerPose : std::uint8_t { standing, crouching, crawling };
@@ -89,11 +90,14 @@ struct PlayerState {
     int attack_strength_ticks = 0;
     int attack_miss_time = 0;
     WeaponItem weapon = WeaponItem::diamond_sword;
+    int selected_weapon_slot = 0;
+    int ordinary_arrow_count = 0;
     double attack_damage = 7.0;
     double attack_speed = 4.0 + double(-2.4F);
     double attack_knockback = 0.0;
     bool shield_equipped = false;
     bool using_shield = false;
+    bool using_bow = false;
     int shield_use_ticks = 0;
     int shield_cooldown = 0;
     int item_use_delay = 0;
@@ -139,13 +143,16 @@ struct PlayerState {
 };
 
 enum class Difficulty : std::uint8_t { peaceful, easy, normal, hard };
-enum class DamageKind : std::uint8_t { melee, starvation };
+enum class DamageKind : std::uint8_t { melee, starvation, arrow };
 
 struct WorldState {
     std::uint64_t tick = 0;
     bool natural_regeneration = false;
     bool simulate_food = false;
     Difficulty difficulty = Difficulty::normal;
+    float projectile_health_dealt[2]{};
+    float projectile_health_taken[2]{};
+    float projectile_arrow_progress[2]{};
 };
 
 class PlayerView {
@@ -253,8 +260,13 @@ public:
         return !(::acos(dot) > double(0.017453292F * 90.0F));
     }
 
+    // Arrow hits share vanilla living damage, blocking, cooldown, armor, absorption and knockback handling.
+    // Source: minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, LivingEntity.hurtServer (1178),
+    // applyItemBlocking (1311); minecraft-26.3-src/net/minecraft/world/entity/projectile/arrow/AbstractArrow.java,
+    // AbstractArrow.onHitEntity (423).
     MCSIM_HD bool hurt(float damage, Vec3 source_position, float disable_shield_seconds = 0.0F,
-                       bool bypass_shield = false, DamageKind kind = DamageKind::melee) {
+                       bool bypass_shield = false, DamageKind kind = DamageKind::melee,
+                       Vec3 projectile_motion = {}) {
         state_->last_blocked_damage = 0.0F;
         state_->last_shield_disabled = false;
         if (state_->invulnerable || !state_->alive() || damage == 0.0F) {
@@ -266,7 +278,7 @@ public:
         if (damage != damage || damage > (std::numeric_limits<float>::max)()) {
             damage = (std::numeric_limits<float>::max)();
         }
-        const bool blocked = damage > 0.0F && kind == DamageKind::melee
+        const bool blocked = damage > 0.0F && (kind == DamageKind::melee || kind == DamageKind::arrow)
             && !bypass_shield && blocksMeleeFrom(source_position);
         if (blocked) {
             state_->last_blocked_damage = damage;
@@ -308,7 +320,11 @@ public:
         if (full_hit && !blocked) {
             state_->needs_sync = true;
             if (kind != DamageKind::starvation) {
-                knockback(double(0.4F), source_position.x - state_->position.x, source_position.z - state_->position.z);
+                const double direction_x = kind == DamageKind::arrow
+                    ? -projectile_motion.x : source_position.x - state_->position.x;
+                const double direction_z = kind == DamageKind::arrow
+                    ? -projectile_motion.z : source_position.z - state_->position.z;
+                knockback(double(0.4F), direction_x, direction_z);
             }
         }
         if (!state_->alive()) {
@@ -321,7 +337,8 @@ public:
     MCSIM_HD void resolveMelee(PlayerView victim, MathView math, int target_index = -1) {
         auto& outcome = state_->last_attack;
         outcome = {};
-        if (!state_->alive() || !victim.state_->alive() || state_ == victim.state_ || state_->using_shield) {
+        if (!state_->alive() || !victim.state_->alive() || state_ == victim.state_
+            || state_->using_shield || state_->using_bow) {
             return;
         }
         outcome.target = target_index;
@@ -419,16 +436,20 @@ public:
 
     MCSIM_HD void prepareTick() {
         if (held_->select_weapon) {
+            if (held_->selected_slot >= 0) {
+                state_->selected_weapon_slot = held_->selected_slot;
+            }
             equipWeapon(held_->weapon);
         }
         state_->last_attack = {};
         state_->last_blocked_damage = 0.0F;
         state_->last_shield_disabled = false;
-        state_->attack_suppressed = state_->using_shield;
+        state_->attack_suppressed = state_->using_shield || state_->using_bow;
         if (state_->item_use_delay > 0) {
             --state_->item_use_delay;
         }
-        if (!held_->use_item || !state_->shield_equipped || !state_->alive()) {
+        if (!held_->use_item || !state_->shield_equipped || !state_->alive()
+            || state_->weapon == WeaponItem::bow || state_->using_bow) {
             state_->using_shield = false;
             state_->shield_use_ticks = 0;
         }
@@ -457,7 +478,8 @@ public:
         if (!prepared) {
             prepareTick();
         }
-        if (held_->use_item && !state_->using_shield && state_->item_use_delay == 0 && state_->alive()) {
+        if (held_->use_item && !state_->using_shield && !state_->using_bow
+            && state_->weapon != WeaponItem::bow && state_->item_use_delay == 0 && state_->alive()) {
             state_->item_use_delay = 4;
             if (state_->shield_equipped && state_->shield_cooldown == 0) {
                 state_->using_shield = true;
@@ -514,10 +536,11 @@ private:
             && (state_->previous_sneak || !fitsPose(blocks, PlayerPose::standing));
         const bool forward = held_->forward && !held_->backward;
         const bool possible = state_->alive() && (state_->food_level > 6 || state_->may_fly) && !state_->mobility_restricted;
-        if (state_->previous_sneak || held_->backward || state_->using_shield) {
+        if (state_->previous_sneak || held_->backward || state_->using_shield || state_->using_bow) {
             state_->sprint_trigger_time = 0;
         }
-        if (!state_->sprinting && forward && possible && !state_->crouching && !state_->using_shield
+        if (!state_->sprinting && forward && possible && !state_->crouching
+            && !state_->using_shield && !state_->using_bow
             && state_->pose != PlayerPose::crawling) {
             if (!state_->previous_forward) {
                 if (state_->sprint_trigger_time > 0) {
@@ -551,6 +574,9 @@ private:
         }
     }
 
+    // Bow use inherits UseEffects.DEFAULT's 0.2F speed and no-sprint behavior.
+    // Source: minecraft-26.3-src/net/minecraft/world/item/component/UseEffects.java, DEFAULT (10);
+    // minecraft-26.3-src/net/minecraft/client/player/LocalPlayer.java, isSlowDueToUsingItem (576), itemUseSpeedMultiplier (580).
     MCSIM_HD Vec3 processMovementInputs(MathView math) {
         if (!state_->alive()) {
             state_->jump_delay = 0;
@@ -563,7 +589,7 @@ private:
         if (raw_length >= 1.0E-4F) {
             strafe = (strafe / raw_length) * 0.98F;
             forward = (forward / raw_length) * 0.98F;
-            if (state_->using_shield) {
+            if (state_->using_shield || state_->using_bow) {
                 strafe *= 0.2F;
                 forward *= 0.2F;
             }
@@ -736,6 +762,7 @@ private:
     WorldState* world_;
 };
 
+struct ProjectileWorldState;
 struct BatchView;
 
 class WorldView {
@@ -748,6 +775,8 @@ public:
     MCSIM_HD PlayerView player(int index) const {
         return {players_ + index, queued_ + index, held_ + index, math_, state_};
     }
+
+    MCSIM_HD const Controls& queuedInput(int index) const { return queued_[index]; }
 
     MCSIM_HD int pickAttackTarget(int attacker, bool* hit_block = nullptr) const {
         if (hit_block) {
@@ -783,11 +812,16 @@ public:
     }
 
     MCSIM_HD const WorldState& state() const { return *state_; }
+    MCSIM_HD WorldState& mutableState() const { return *state_; }
+    MCSIM_HD MathView math() const { return math_; }
 
-    MCSIM_HD void processTick() {
+    // Source: minecraft-26.3-src/net/minecraft/client/Minecraft.java, handleKeybinds;
+    // item-button release suppresses attacks for the sample that ends active use.
+    MCSIM_HD void processTick(const bool* item_release_suppressed = nullptr) {
         latchInputs();
         for (int index = 0; index < player_count_; ++index) {
             player(index).prepareTick();
+            if (item_release_suppressed && item_release_suppressed[index]) players_[index].attack_suppressed = true;
         }
         for (int index = 0; index < player_count_; ++index) {
             auto& state = players_[index];
@@ -865,6 +899,7 @@ struct BatchView {
     int players_per_environment = 0;
     const BlockWorldView* block_worlds = nullptr;
     MathView math;
+    ProjectileWorldState* projectile_states = nullptr;
 
     MCSIM_HD WorldView world(int index) const {
         const int offset = index * players_per_environment;

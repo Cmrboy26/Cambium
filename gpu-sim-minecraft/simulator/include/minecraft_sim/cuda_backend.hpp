@@ -19,7 +19,8 @@ public:
     static bool available();
     BatchView deviceView() const;
     void uploadControls(const Controls* controls, std::size_t count);
-    void resetEnvironments(const int* ids, std::size_t count, const PlayerState* players);
+    void resetEnvironments(const int* ids, std::size_t count, const PlayerState* players,
+                           const ProjectileWorldState* projectile_states = nullptr);
     void step(int ticks = 1);
     void synchronize() const;
     void download(BatchView destination) const;

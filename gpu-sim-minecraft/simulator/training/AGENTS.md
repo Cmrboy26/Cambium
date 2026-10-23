@@ -112,6 +112,34 @@ allocation/thread count and replay/evaluation cadence. Keep each job's config,
 metrics and Slurm log as its baseline provenance. Timing instrumentation itself
 does not draw RNG or alter the order of sampling, policy actions or updates.
 
+## Standalone Baseline Diagnostics
+
+`python -B -m simulator.training.evaluate_checkpoints prepare --output NEW_BUNDLE`
+freezes retained checkpoints/configs from `am-v2-s20/s40/s60` at the latest exact
+common update, stage and transition budget. `run NEW_BUNDLE` evaluates the
+shared scripted/frozen-checkpoint roster without training. Every fixed batch
+has the same sampler seed and predetermined episode IDs/seats; completed worlds
+are retired from scoring, not replaced. Retired worlds still receive maintenance
+resets required by the native adapter; they never contribute extra episodes.
+Defaults are 256 episodes per matchup, split evenly
+across learner seats. Results distinguish death, mutual loss and timeout, retain
+episode lengths/assignments, and state the independent-Bernoulli assumption
+behind Wilson win intervals. Training opponent weights are not evaluation
+conditions. Changed policy/scenario/controls/rewards/limits fail compatibility.
+Use a fresh bundle for another run; smoke overrides are not benchmark evidence.
+
+`python -B -m simulator.training.benchmark_ppo --checkpoint FULL_CHECKPOINT
+--output NEW_OUTPUT --device cuda --library LIBRARY` captures one real rollout
+and optimizes identical cloned data/model/Adam state for each minibatch size.
+Defaults compare 1024/4096/8192/16384 with two epochs; timings synchronize CUDA
+before and after optimization and exclude setup. Optional `--profile-trace`
+traces only a few minibatches of the smallest baseline size, separate from
+unprofiled repeats. `--smoke --device cpu` is explicitly synthetic. Neural
+opponent RNG restoration requires the checkpoint's device type; do not relabel
+CUDA RNG state as CPU state. Larger minibatches change learning dynamics; this
+benchmark does not establish policy quality. See the
+[Rosie diagnostic launcher](../../rosie/diagnostics.sbatch) for isolated GPU jobs.
+
 ## Sweep Metrics And PNG Comparisons
 
 The [shared-GPU runner](../../rosie/AGENTS.md#shared-gpu-sweeps) starts independent
@@ -717,10 +745,10 @@ The low-level concrete fixture adapter still reads historical
 supplied; this is not the authoring contract. Record resolved settings and
 `reward_semantics` in checkpoint metadata.
 Changed weights or semantics require a new run, not incompatible resume.
-Rebuild older native libraries for reward ABI 3; ABI 1/2 are rejected explicitly.
-The optional combat-event and win-speed weights default to zero. The expanded
-layout has nine base inputs, ten base totals (including shield blocks), five
-shaping inputs/totals and fifteen per-player step contributions.
+Rebuild older native libraries for reward ABI 4; ABI 1/2/3 are rejected explicitly.
+The optional combat-event, win-speed and arrow-progress weights default to zero.
+The expanded layout has ten base inputs, eleven base totals (including shield
+blocks), five shaping inputs/totals and sixteen per-player step contributions.
 
 - Damage rewards are `doing_damage * health_removed / 20` for attackers and
   `taking_damage * health_removed / 20` for targets. Weights specify points per
@@ -729,6 +757,8 @@ shaping inputs/totals and fifteen per-player step contributions.
   Misses, blocks and absorption-only hits earn no damage reward and do not
   satisfy the episode's damage requirement. Critical/sweep mechanics remain,
   but have no separate reward multiplier: their actual damage is counted once.
+  Self-inflicted projectile damage pays only `taking_damage`; it earns no
+  `doing_damage` credit and does not satisfy the damage requirement.
 - `blocked_with_shield` rewards actual non-axe blocks only. Axe hits,
   including disables, earn no block bonus. Held shields alone earn nothing;
   blocked hits earn neither damage reward nor damage penalty.
@@ -755,6 +785,14 @@ shaping inputs/totals and fifteen per-player step contributions.
   the remainder unpaid. CLI episode-limit overrides use the same normalization.
   Event rewards are not divided by episode length; only `win_speed` scales its
   one-time win bonus by the remaining fraction of the episode limit.
+- `arrow_progress` pays once per arrow, to its owner, on first enemy contact or
+  terrain landing. Enemy contact scores 1. A terrain landing scores
+  `clamp(1 - distance(impact, target hitbox) / launch_distance, 0, 1)`; resting
+  arrows never pay again. This event is not divided by episode length.
+  With a selected bow and ordinary ammo, `good_aim` and `aim_hold` use a full-draw
+  intercept estimate with air drag/gravity, constant target velocity and inherited
+  shooter velocity, rather than straight eye-to-eye pitch. The visibility gate
+  remains eye-to-eye; this is a shaping heuristic, not a collision/hit guarantee.
 
 Authored task example, with other rewards disabled:
 
@@ -995,6 +1033,15 @@ death/exit/timeout, resolved equipment and semantic controls independent of head
 order. Header records completed-round threshold and already-completed updates.
 Publish complete files only, never intentionally overwrite. Limits: 100000
 transitions, 64 MiB. Round counters persist in checkpoints; old ones start at zero.
+
+The loopback dashboard's **Request replay** button is available for runs started
+with dashboard replay-request support. It asks the trainer to export one sample
+after the next completed training duel, regardless of the periodic replay
+interval. The sample uses the current policy and selected scenario; it is not a
+frame-by-frame recording of the just-finished PPO experience. The button polls
+request status and loads the resulting replay when ready. Older trainers cannot
+fulfill requests; start a new run with the updated trainer. Requests are stored
+atomically in the run directory and survive a trainer restart until fulfilled.
 
 Viewer: `/simreplay load` (newest), then `/simreplay restart`. Both input/absolute
 modes work; quoted absolute paths load files elsewhere.

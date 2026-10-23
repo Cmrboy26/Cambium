@@ -22,7 +22,14 @@ export function replaySample(frames, tick) {
     const current = frames[first];
     const next = frames[first + 1] ?? current;
     const fraction = next.tick > current.tick ? Math.max(0, Math.min(1, (tick - current.tick) / (next.tick - current.tick))) : 0;
-    return { index: first, actors: current.actors.map((actor, index) => {
+    const projectiles = (current.projectiles ?? []).map((arrow) => {
+        const target = (next.projectiles ?? []).find((candidate) => candidate.id === arrow.id
+            && candidate.owner === arrow.owner && candidate.age === arrow.age + next.tick - current.tick);
+        if (!target || arrow.in_ground || arrow.in_ground !== target.in_ground) return { ...arrow };
+        return { ...arrow, position: arrow.position.map((value, axis) =>
+            value + (target.position[axis] - value) * fraction) };
+    });
+    return { index: first, projectiles, actors: current.actors.map((actor, index) => {
         const target = next.actors[index];
         const turn = ((target.yaw - actor.yaw + 180) % 360 + 360) % 360 - 180;
         return { ...actor, position: actor.position.map((value, axis) => value + (target.position[axis] - value) * fraction),

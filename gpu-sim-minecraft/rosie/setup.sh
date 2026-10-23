@@ -3,12 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$SIM_ROOT/simulator/build-rosie-cuda"
 VENV_DIR="$SIM_ROOT/.venv-rosie"
-CUDA_ARCHITECTURES="${MCSIM_CUDA_ARCHITECTURES:-75}"
 
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "ERROR: python3 is unavailable on this Rosie node."
+    echo "ERROR: python3 is unavailable on this host."
     exit 1
 fi
 
@@ -36,8 +34,7 @@ fi
 mkdir -p "$SCRIPT_DIR/logs"
 
 echo "Python setup complete: $VENV_DIR"
-echo "The native CUDA build runs inside the allocated GPU job."
 echo "Python: $VENV_DIR/bin/python"
-echo "CUDA architecture: $CUDA_ARCHITECTURES"
-echo "Submit from $SIM_ROOT with:"
-echo "  sbatch rosie/train.sbatch"
+echo "Rosie training: bash rosie/submit.sh"
+echo "Local WSL2 training: bash rosie/submit.sh --local"
+echo "Local CUDA builds also require nvcc, CMake 3.24+, and a WSL-visible NVIDIA GPU."

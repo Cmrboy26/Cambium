@@ -1,8 +1,10 @@
 #include "minecraft_sim/cuda_backend.hpp"
+#include "minecraft_sim/projectiles.hpp"
 
 #include <cuda_runtime.h>
 
 #include <limits>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -41,8 +43,15 @@ struct DeviceBuffer {
     }
 
     void upload(const Value* source) {
-        if (count != 0) {
-            checkCuda(cudaMemcpy(data, source, count * sizeof(Value), cudaMemcpyHostToDevice));
+        upload(source, count);
+    }
+
+    void upload(const Value* source, std::size_t size) {
+        if (size > count || (size != 0 && (!source || !data))) {
+            throw std::invalid_argument("Invalid device upload size or source");
+        }
+        if (size != 0) {
+            checkCuda(cudaMemcpy(data, source, size * sizeof(Value), cudaMemcpyHostToDevice));
         }
     }
 
@@ -84,11 +93,17 @@ __global__ void advanceEnvironments(BatchView batch, int ticks) {
     }
     auto world = batch.world(static_cast<int>(index));
     for (int tick = 0; tick < ticks; ++tick) {
-        world.processTick();
+        if (batch.projectile_states) {
+            const auto blocks = batch.block_worlds ? batch.block_worlds[index] : BlockWorldView{};
+            processWorldTick(world, blocks, batch.projectile_states[index]);
+        } else {
+            world.processTick();
+        }
     }
 }
 
-__global__ void resetSelected(BatchView batch, const int* ids, int count, const PlayerState* players) {
+__global__ void resetSelected(BatchView batch, const int* ids, int count, const PlayerState* players,
+                              const ProjectileWorldState* projectile_states) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(count)) {
         return;
@@ -101,6 +116,17 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
         batch.queued_controls[offset] = {};
         batch.held_controls[offset] = {};
     }
+    if (batch.projectile_states && projectile_states) {
+        auto& destination_state = batch.projectile_states[destination];
+        const auto& source_state = projectile_states[index];
+        for (int player = 0; player < projectile_player_count; ++player) {
+            destination_state.bows[player] = source_state.bows[player];
+        }
+        destination_state.random = source_state.random;
+        for (int slot = 0; slot < destination_state.arrow_capacity; ++slot) {
+            destination_state.arrows[slot] = {};
+        }
+    }
 }
 
 }
@@ -110,6 +136,9 @@ struct CudaBatch::Storage {
     DeviceBuffer<Controls> queued;
     DeviceBuffer<Controls> held;
     DeviceBuffer<WorldState> worlds;
+    DeviceBuffer<ProjectileWorldState> projectile_states;
+    DeviceBuffer<ProjectileWorldState> reset_projectile_states;
+    DeviceBuffer<ArrowState> projectile_arrows;
     DeviceBuffer<int> reset_ids;
     DeviceBuffer<PlayerState> reset_players;
     DeviceBuffer<Block> cells;
@@ -143,6 +172,28 @@ CudaBatch::CudaBatch(BatchView initial) : storage_(std::make_unique<Storage>()) 
     storage.worlds.upload(initial.worlds);
     storage.sine.upload(initial.math.sine_table);
 
+    if (initial.projectile_states) {
+        const auto arrow_count = checkedProduct(std::size_t(initial.environment_count), projectile_arrow_capacity);
+        storage.projectile_states.allocate(initial.environment_count);
+        storage.reset_projectile_states.allocate(initial.environment_count);
+        storage.projectile_arrows.allocate(arrow_count);
+        std::vector<ProjectileWorldState> projectile_states(initial.environment_count);
+        std::vector<ArrowState> arrows(arrow_count);
+        for (int index = 0; index < initial.environment_count; ++index) {
+            const auto& source = initial.projectile_states[index];
+            if (!source.arrows || source.arrow_capacity != projectile_arrow_capacity) {
+                throw std::invalid_argument("CUDA bow worlds require a fixed 128-arrow pool");
+            }
+            projectile_states[index] = source;
+            projectile_states[index].arrows = storage.projectile_arrows.data
+                + std::size_t(index) * projectile_arrow_capacity;
+            std::copy_n(source.arrows, projectile_arrow_capacity,
+                        arrows.data() + std::size_t(index) * projectile_arrow_capacity);
+        }
+        storage.projectile_arrows.upload(arrows.data());
+        storage.projectile_states.upload(projectile_states.data());
+    }
+
     std::vector<Block> cells;
     std::vector<BlockWorldView> worlds(initial.environment_count);
     std::vector<std::size_t> offsets(initial.environment_count);
@@ -165,7 +216,7 @@ CudaBatch::CudaBatch(BatchView initial) : storage_(std::make_unique<Storage>()) 
     storage.block_worlds.upload(worlds.data());
     storage.view = {storage.players.data, storage.queued.data, storage.held.data,
                     storage.worlds.data, initial.environment_count, initial.players_per_environment,
-                    storage.block_worlds.data, {storage.sine.data}};
+                    storage.block_worlds.data, {storage.sine.data}, storage.projectile_states.data};
 }
 
 CudaBatch::~CudaBatch() = default;
@@ -192,11 +243,13 @@ void CudaBatch::synchronize() const {
     checkCuda(cudaDeviceSynchronize());
 }
 
-void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const PlayerState* players) {
+void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const PlayerState* players,
+                                  const ProjectileWorldState* projectile_states) {
     if (count == 0) {
         return;
     }
-    if (!ids || !players || count > storage_->reset_ids.count) {
+    if (!ids || !players || count > storage_->reset_ids.count
+        || (storage_->projectile_states.count != 0 && !projectile_states)) {
         throw std::invalid_argument("Invalid reset batch");
     }
     std::vector<bool> seen(storage_->view.environment_count, false);
@@ -209,9 +262,14 @@ void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const Playe
     checkCuda(cudaMemcpy(storage_->reset_ids.data, ids, count * sizeof(int), cudaMemcpyHostToDevice));
     checkCuda(cudaMemcpy(storage_->reset_players.data, players,
         count * storage_->view.players_per_environment * sizeof(PlayerState), cudaMemcpyHostToDevice));
+    if (storage_->projectile_states.count != 0) {
+        storage_->reset_projectile_states.upload(projectile_states, count);
+    }
     resetSelected<<<(static_cast<unsigned int>(count) + threads_per_block - 1) / threads_per_block,
                     threads_per_block>>>(storage_->view, storage_->reset_ids.data,
-                                        static_cast<int>(count), storage_->reset_players.data);
+                                        static_cast<int>(count), storage_->reset_players.data,
+                                        storage_->projectile_states.count != 0
+                                            ? storage_->reset_projectile_states.data : nullptr);
     checkCuda(cudaGetLastError());
 }
 
@@ -225,6 +283,27 @@ void CudaBatch::download(BatchView destination) const {
     storage_->queued.download(destination.queued_controls);
     storage_->held.download(destination.held_controls);
     storage_->worlds.download(destination.worlds);
+    if (storage_->projectile_states.count != 0) {
+        if (!destination.projectile_states) {
+            throw std::invalid_argument("Snapshot is missing projectile state storage");
+        }
+        std::vector<ProjectileWorldState> projectile_states(storage_->projectile_states.count);
+        std::vector<ArrowState> arrows(storage_->projectile_arrows.count);
+        storage_->projectile_states.download(projectile_states.data());
+        storage_->projectile_arrows.download(arrows.data());
+        for (std::size_t index = 0; index < projectile_states.size(); ++index) {
+            auto& destination_state = destination.projectile_states[index];
+            if (!destination_state.arrows || destination_state.arrow_capacity != projectile_arrow_capacity) {
+                throw std::invalid_argument("Snapshot projectile pool shape mismatch");
+            }
+            for (int player = 0; player < projectile_player_count; ++player) {
+                destination_state.bows[player] = projectile_states[index].bows[player];
+            }
+            destination_state.random = projectile_states[index].random;
+            std::copy_n(arrows.data() + index * projectile_arrow_capacity, projectile_arrow_capacity,
+                        destination_state.arrows);
+        }
+    }
 }
 
 }

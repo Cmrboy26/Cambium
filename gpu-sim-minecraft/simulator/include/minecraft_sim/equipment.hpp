@@ -9,7 +9,7 @@ namespace minecraft_sim {
 enum class WeaponItem : std::uint8_t {
     unarmed, wooden_sword, stone_sword, copper_sword, golden_sword, iron_sword,
     diamond_sword, netherite_sword, wooden_axe, stone_axe, copper_axe, golden_axe,
-    iron_axe, diamond_axe, netherite_axe
+    iron_axe, diamond_axe, netherite_axe, bow
 };
 
 struct WeaponAttributes {
@@ -35,6 +35,9 @@ MCSIM_HD inline WeaponAttributes weaponAttributes(WeaponItem item) {
     case WeaponItem::iron_axe: return {9.0, 4.0 + double(-3.1F), false, 5.0F};
     case WeaponItem::diamond_axe: return {9.0, 1.0, false, 5.0F};
     case WeaponItem::netherite_axe: return {10.0, 1.0, false, 5.0F};
+    // BowItem is a projectile weapon, so it retains the ordinary player's base melee attributes.
+    // Source: minecraft-26.3-src/net/minecraft/world/item/BowItem.java, BowItem constructor (20-22).
+    case WeaponItem::bow: return {1.0, 4.0, false, 0.0F};
     default: return {1.0, 4.0, false, 0.0F};
     }
 }

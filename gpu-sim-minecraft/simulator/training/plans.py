@@ -83,12 +83,24 @@ def _validate_equipment(scenario, loadout):
             if any((set(candidates) & set(other)) - {"minecraft:air"} for other in options[index + 1:]):
                 raise ValueError("Weapon-slot choices must not produce duplicate items")
             paths.append((("weapons", index), candidates))
-    for name in ("selected", "offhand"):
+    for name in ("selected", "offhand", "arrows"):
         if name in loadout:
             paths.append(((name,), _choices(loadout[name])))
     if "armor" in loadout:
         fields(loadout["armor"], ("boots", "leggings", "chestplate", "helmet"), "sampled armor")
         paths.extend((("armor", slot), _choices(value)) for slot, value in loadout["armor"].items())
+    if "arrows" in loadout:
+        arrow_options = _choices(loadout["arrows"])
+        if any(type(value) is int and value > 0 for value in arrow_options):
+            if "weapons" in loadout:
+                weapon_options = [_choices(value) for value in loadout["weapons"]]
+                guaranteed_bow = any(all(item == "minecraft:bow" for item in options)
+                                     for options in weapon_options)
+                if not guaranteed_bow:
+                    raise ValueError("Sampled arrows require a bow in every sampled weapon loadout")
+            elif any("minecraft:bow" not in player["loadout"]["weapons"]
+                     for arena in scenario["arenas"] for player in arena["environment"]["players"]):
+                raise ValueError("Sampled arrows require a bow in every base player loadout")
     for arena in scenario["arenas"]:
         base = arena["environment"]
         initial = deepcopy(base)
@@ -232,7 +244,8 @@ def _scenario(value):
         equipment = fields(scenario["equipment"], ("sample", "players", "loadout"), "equipment")
         if equipment.get("sample") not in ("world", "episode") or equipment.get("players") != "independent":
             raise ValueError("Equipment needs world/episode sampling and independent players")
-        loadout = fields(equipment.get("loadout"), ("weapons", "selected", "offhand", "armor"), "sampled loadout")
+        loadout = fields(equipment.get("loadout"), ("weapons", "selected", "offhand", "armor", "arrows"),
+                 "sampled loadout")
         if "weapons" in loadout and (not isinstance(loadout["weapons"], list) or not 1 <= len(loadout["weapons"]) <= 9):
             raise ValueError("Sampled loadout needs 1..9 stable weapon slots")
         if "weapons" in loadout:

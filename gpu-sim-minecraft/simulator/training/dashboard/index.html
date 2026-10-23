@@ -222,6 +222,10 @@
                         <div class="replay-selection"><label for="replay">Recording</label><select id="replay"><option value="">Spawn state</option></select>
                             <button type="button" id="replay-refresh" aria-label="Refresh recordings" title="Refresh recordings"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
                         </div>
+                        <div class="replay-request-row">
+                            <button type="button" id="replay-request" class="replay-request-button" aria-label="Request a replay after the next completed duel" title="Request a replay after the next completed duel" disabled><i data-lucide="clapperboard" aria-hidden="true"></i><span>Request replay</span></button>
+                            <p id="replay-request-status" role="status">Select a supported training run to request a replay.</p>
+                        </div>
                         <div class="replay-transport">
                             <button type="button" id="replay-start" aria-label="Restart replay" title="Restart replay" disabled><i data-lucide="skip-back" aria-hidden="true"></i></button>
                             <button type="button" id="replay-back" aria-label="Previous tick" title="Previous tick" disabled><i data-lucide="step-back" aria-hidden="true"></i></button>

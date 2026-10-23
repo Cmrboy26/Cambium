@@ -69,6 +69,32 @@ or explicitly depend on them, before overlapping new jobs on that build tree.
 Do not change native sources while a build is running. Slurm GPU/resource/account
 limits still determine whether eligible training jobs actually run concurrently.
 
+### Bounded Diagnostic Jobs
+
+`diagnostics.sbatch` runs evaluation or PPO diagnostics, not training. It
+requests one H100, eight CPUs, 24 GB and 30 minutes. Submit from project root
+with `MCSIM_DIAGNOSTIC_MODE=evaluation|ppo`, `MCSIM_DIAGNOSTIC_SOURCE` pointing
+to a frozen checkout snapshot, `MCSIM_EVALUATION_BUNDLE` to a prepared immutable
+input bundle, and `MCSIM_DIAGNOSTIC_OUTPUT` to a new output path. PPO mode also
+requires a frozen full `MCSIM_PPO_CHECKPOINT`. Do not point it at a running
+run's mutable `latest.pt`. Ensure `rosie/logs` exists before submission.
+
+Each job builds in its private scratch tree, reading cached FetchContent source
+dependencies when available; it never reconfigures a training build. Evaluation
+runs 256 episodes per matchup with balanced seats. PPO mode runs native/CPU/CUDA
+checks, captures 8192 x 128 real transitions once, compares four minibatch sizes
+with identical initial model/optimizer state, and writes a short profiler trace.
+Artifacts are separate from training runs. Failed jobs may retain diagnostic
+output; use a fresh output path when retrying and preserve failed logs.
+
+For bounded replay counts, direct batch submissions can set
+`SIM_REPLAY_EVERY_UPDATES=N` instead of episode-based `SIM_REPLAY_EVERY`.
+These modes are mutually exclusive. One recording is exported per matching
+global PPO update, independent of world count, episode completions or stage
+changes. A fresh 1,500-update run with `SIM_REPLAY_EVERY_UPDATES=30` produces
+at most 50 recordings (fewer if training ends early). The trainer equivalent
+is `--replay-every-updates 30`; global update numbering is retained on resume.
+
 ### Interactive Submission
 
 Run `bash rosie/submit.sh` from any working directory using the script's path.
@@ -169,6 +195,29 @@ dependency chains and are not migrated automatically. Direct `sbatch` submission
 `rosie-<JOB_ID>` output default unless `SIM_OUTPUT` is supplied.
 No jobs are submitted by the mocked checks:
 `python -B -m unittest simulator.training.test_rosie.SubmitTests -v`.
+
+### Local WSL2 Training
+
+The shared wizard supports direct local execution from a Linux/WSL checkout:
+
+```sh
+bash rosie/setup.sh
+bash rosie/submit.sh --local
+```
+
+Install a Windows NVIDIA driver with WSL GPU support and a CUDA toolkit/compiler
+inside WSL; `nvidia-smi`, `nvcc`, CMake 3.24+ and `flock` must be on `PATH`.
+The setup script installs PyTorch 2.5.1/cu124 and the training requirements.
+The local launcher defaults to CUDA architecture 86, 256 worlds and 64 rollout
+steps, builds under `simulator/build-local-cuda-86`, and trains in the foreground.
+Set `MCSIM_CUDA_ARCHITECTURES` to override the architecture. `multiple` sweeps
+run sequentially on the one local GPU; `--shared-gpu` is not supported locally.
+Ctrl+C stops the active run. Its output is written under the normal
+`simulator/training/runs/<name>` directory for the local dashboard.
+
+The checkout location determines where training runs. This remote VS Code
+workspace is on Rosie; use a separate checkout inside WSL's Linux filesystem
+(not `/mnt/c`) and pull/sync the changes there to use a home GPU.
 
 ### Shared-GPU Sweeps
 

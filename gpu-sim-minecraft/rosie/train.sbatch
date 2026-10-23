@@ -31,11 +31,14 @@ SIM_SWEEP="${SIM_SWEEP:-}"
 SIM_RESUME="${SIM_RESUME:-}"
 SIM_INITIALIZE="${SIM_INITIALIZE:-}"
 SIM_REPLAY_EVERY="${SIM_REPLAY_EVERY:-0}"
+SIM_REPLAY_EVERY_UPDATES="${SIM_REPLAY_EVERY_UPDATES:-0}"
 SIM_REPLAY_DIR="${SIM_REPLAY_DIR:-}"
 SIM_OUTPUT="${SIM_OUTPUT:-$SIM_ROOT/simulator/training/runs/rosie-${SLURM_JOB_ID}}"
 
 cd "$SIM_ROOT"
-module load cuda/current openmpi/current StdEnv
+if [[ ":${LOADEDMODULES:-}:" != *":StdEnv:"* ]]; then
+    module load StdEnv
+fi
 
 if [[ ! -d "$SIM_ROOT/simulator/training" ]]; then
     echo "ERROR: Submit this job from the gpu-sim-minecraft directory."
@@ -79,8 +82,16 @@ if [[ "$SIM_REPLAY_EVERY" -lt 0 ]]; then
     echo "ERROR: SIM_REPLAY_EVERY must be zero or greater."
     exit 1
 fi
-if [[ -n "$SIM_REPLAY_DIR" && "$SIM_REPLAY_EVERY" -eq 0 ]]; then
-    echo "ERROR: Set SIM_REPLAY_EVERY to a positive value to enable replay output."
+if [[ ! "$SIM_REPLAY_EVERY_UPDATES" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "ERROR: SIM_REPLAY_EVERY_UPDATES must be a nonnegative integer."
+    exit 1
+fi
+if [[ "$SIM_REPLAY_EVERY" -gt 0 && "$SIM_REPLAY_EVERY_UPDATES" -gt 0 ]]; then
+    echo "ERROR: Choose episode-based or update-based replays, not both."
+    exit 1
+fi
+if [[ -n "$SIM_REPLAY_DIR" && "$SIM_REPLAY_EVERY" -eq 0 && "$SIM_REPLAY_EVERY_UPDATES" -eq 0 ]]; then
+    echo "ERROR: Set SIM_REPLAY_EVERY or SIM_REPLAY_EVERY_UPDATES to enable replay output."
     exit 1
 fi
 
@@ -202,9 +213,12 @@ for setting in GAMMA GAE_LAMBDA CLIP_EPS VF_COEF ENT_COEF MAX_GRAD_NORM; do
 done
 if [[ "$SIM_REPLAY_EVERY" -gt 0 ]]; then
     TRAIN_ARGS+=(--replay-every "$SIM_REPLAY_EVERY")
-    if [[ -n "$SIM_REPLAY_DIR" ]]; then
-        TRAIN_ARGS+=(--replay-dir "$SIM_REPLAY_DIR")
-    fi
+fi
+if [[ "$SIM_REPLAY_EVERY_UPDATES" -gt 0 ]]; then
+    TRAIN_ARGS+=(--replay-every-updates "$SIM_REPLAY_EVERY_UPDATES")
+fi
+if [[ -n "$SIM_REPLAY_DIR" ]]; then
+    TRAIN_ARGS+=(--replay-dir "$SIM_REPLAY_DIR")
 fi
 
 "$PYTHON" -B -m simulator.training.train "${TRAIN_ARGS[@]}"

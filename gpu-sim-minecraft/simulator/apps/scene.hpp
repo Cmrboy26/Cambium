@@ -1,6 +1,7 @@
 #pragma once
 
 #include "configuration.hpp"
+#include "minecraft_sim/projectiles.hpp"
 
 #include <array>
 #include <filesystem>
@@ -27,6 +28,8 @@ struct Scene {
     std::array<Controls, 1> queued{};
     std::array<Controls, 1> held{};
     std::array<WorldState, 1> worlds{};
+    std::vector<ArrowState> arrow_storage;
+    std::array<ProjectileWorldState, 1> projectile_states{};
     std::vector<Block> cells;
     SineTable sine = makeSineTable();
     BlockWorldView blocks;
@@ -57,7 +60,7 @@ struct Scene {
         }
         for (const auto& capability : definition.value("requires", nlohmann::json::array())) {
             if (capability != "movement" && capability != "melee" && capability != "equipment"
-                && capability != "shield" && capability != "armor") {
+                && capability != "shield" && capability != "armor" && capability != "bow") {
                 throw std::invalid_argument("Unsupported scenario capability: " + capability.dump());
             }
         }
@@ -124,6 +127,13 @@ struct Scene {
         initial_players = parsed.players;
         weapon_slots = parsed.weapon_slots;
         players[0] = initial_players[0];
+        arrow_storage.resize(projectile_arrow_capacity);
+        projectile_states[0].arrows = arrow_storage.data();
+        projectile_states[0].arrow_capacity = projectile_arrow_capacity;
+        resetProjectileWorld(projectile_states[0], 1);
+        for (int player = 0; player < 2; ++player) {
+            projectile_states[0].bows[player].ordinary_arrows = initial_players[player].ordinary_arrow_count;
+        }
     }
 
     PlayerDefinitions parsePlayers(const nlohmann::json& spawns, bool concrete = false) const {
@@ -222,7 +232,14 @@ struct Scene {
         resolved.erase("policy");
         resolved["requires"] = {"movement", "melee", "equipment", "shield", "armor"};
         resolved["rules"] = {{"simulate_food", false}, {"natural_regeneration", false}};
-        resolved["players"] = parsePlayers(definition.at("players")).resolved;
+        const auto parsed = parsePlayers(definition.at("players"));
+        resolved["players"] = parsed.resolved;
+        for (const auto& slots : parsed.weapon_slots) {
+            if (std::find(slots.begin(), slots.end(), WeaponItem::bow) != slots.end()) {
+                resolved["requires"].push_back("bow");
+                break;
+            }
+        }
         return resolved;
     }
 
@@ -237,8 +254,9 @@ struct Scene {
     }
 
     BatchView view() {
+        projectile_states[0].arrows = arrow_storage.data();
         return {players.data(), queued.data(), held.data(), worlds.data(),
-                1, 1, &blocks, {sine.data()}};
+                1, 1, &blocks, {sine.data()}, nullptr};
     }
 };
 

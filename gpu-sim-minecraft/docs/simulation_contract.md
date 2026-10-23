@@ -164,7 +164,9 @@ Each player's optional `loadout` resolves to an explicit shape:
 - `weapons`: 1..9 IDs; non-air IDs must be distinct, air may repeat.
   `selected`: zero-based initial slot. Air is empty
   hand. Sword/axe materials: wooden, stone, copper, golden, iron, diamond,
-  netherite. Slots are a control mapping, not a general inventory.
+  netherite. `minecraft:bow` is also supported. Slots are a control mapping, not a general inventory.
+- `arrows`: optional integer 0..64 (default 0), one finite ordinary-arrow stack;
+  positive ammunition requires a bow in the loadout.
 - `offhand`: air or shield. Equipment is unenchanted and unbreakable.
 - Armor slots: boots, leggings, chestplate, helmet. Materials: leather, copper,
   chainmail, golden, iron, diamond, netherite; turtle helmet also works. Omitted
@@ -174,7 +176,7 @@ Each player's optional `loadout` resolves to an explicit shape:
 - Bridge `rules`: `simulate_food: false`, `natural_regeneration: false`, both
   defaulting to false. True or unknown rules fail. Additional native food/regen
   APIs are not yet part of the portable training/replay/live contract.
-- `requires` supports `movement`, `melee`, `equipment`, `shield`, `armor`.
+- `requires` supports `movement`, `melee`, `equipment`, `shield`, `armor`, `bow`.
   Resolved artifacts list the currently supported catalogue.
 
 Both live and replay actors freeze food and natural regeneration, including
@@ -242,6 +244,9 @@ fixtures cover category order, unknown categories, clipping, scaling and rejecti
 | `self.armor_defense_fraction`, `opponent.armor_defense_fraction` | Equipment defense / 20, clamped 0..1 |
 | `self.armor_toughness_fraction`, `opponent.armor_toughness_fraction` | Equipment toughness / 12, clamped 0..1 |
 | `self.weapon_slot_N.present`, `.is_axe`, `.damage_fraction`, `.speed_fraction` | N=0..8; own slot presence/type/damage/speed; absent/air slots are all zero |
+| `self.arrow_count_fraction`, `self.bow_power_fraction` | Scalar own ammo / 64 and actual draw power; power is zero when not drawing |
+| `self.bow_using`, `self.bow_equipped`, `opponent.bow_using`, `opponent.bow_equipped` | Actual binary use/equipment flags; no hidden opponent ammo |
+| `arrow.present`, `arrow.relative.x/y/z`, `arrow.relative.velocity.x/y/z` | Nearest moving opponent arrow within 50 blocks; relative feet position / 10, relative world velocity in blocks/tick; all zero when absent |
 
 The additive equipment features do not change v1/v2. Research `equipment_v3`
 selects 78 fixed named features, excluding hidden opponent inventory and the
@@ -254,7 +259,7 @@ There are 1..9 distinct named heads with 1..64 distinct categorical choices:
 | Head | Semantic choices |
 | --- | --- |
 | `movement` | Any subset/order of neutral, forward, forward_right, right, backward_right, backward, backward_left, left, forward_left |
-| `jump`, `sprint`, `attack`, `shield`, `sneak` | Booleans in either order |
+| `jump`, `sprint`, `attack`, `use_item`, `shield`, `sneak` | Booleans in either order; `shield` is a legacy item-use alias, mutually exclusive with `use_item` |
 | `yaw`, `pitch` | Finite degree deltas in -180..180; actual pitch clamps to -90..90 |
 | `weapon` | Integer slot indices present in both players' loadouts |
 
@@ -263,6 +268,10 @@ neutral; omitted weapon selection preserves the current item. Same-item selectio
 preserves charge; switching resets it before combat. Shield use is held, not
 toggled, and does not automatically lower for attacks. Raise delay, use/attack
 arbitration and cooldown still apply.
+With a selected bow, held use draws, button-up releases, and selecting another
+slot cancels before release without a shot. There are no separate release or
+cancel categories. Bow observations require the `bow` capability. See
+[bow integration](bow_arrow_implementation.md) for supported mechanics and phases.
 
 ## Artifacts
 
@@ -276,6 +285,8 @@ round limit from adjacent run metadata; share that metadata for easy resume.
 Replay envelope **3** carries the resolved scenario, Minecraft-ID gear,
 shield/use/cooldown state and semantic controls. Policy metadata is provenance
 only. Native scripted duels and trained samples use the same equipment serializer.
+Bow-capable frames add ammo/draw state and a `projectiles` list; old frames may
+omit them. Recorded arrows are visualized without applying playback damage.
 The updated mod also reads legacy sword-only version 2; version 1 needs re-export.
 
 Inference `GET /info` returns `contract`, `contract_hash`, resolved `environment`

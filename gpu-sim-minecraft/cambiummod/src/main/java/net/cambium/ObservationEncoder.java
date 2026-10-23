@@ -2,8 +2,17 @@ package net.cambium;
 
 final class ObservationEncoder {
 
+	// Adapter data mirrors LivingEntity#getUseItem/getTicksUsingItem and BowItem#getPowerForTime; it is not simulator bow physics.
+	record BowState(int arrowCount, boolean usingBow, int drawTicks, float power, boolean equipped) {}
+	record ArrowState(double x, double y, double z, double velocityX, double velocityY, double velocityZ) {}
 	record State(double x, double y, double z, float health, float yaw, float pitch, boolean alive,
-			double velocityX, double velocityY, double velocityZ) {}
+			double velocityX, double velocityY, double velocityZ, BowState bow) {
+		State(double x, double y, double z, float health, float yaw, float pitch, boolean alive,
+				double velocityX, double velocityY, double velocityZ) {
+			this(x, y, z, health, yaw, pitch, alive, velocityX, velocityY, velocityZ,
+					new BowState(0, false, 0, 0, false));
+		}
+	}
 	record Weapon(boolean present, boolean axe, double damage, double speed) {}
 	record Equipment(boolean shield, double damage, double speed, double armor, double toughness) {}
 
@@ -43,6 +52,30 @@ final class ObservationEncoder {
 		catalogue[86] = targetGrounded ? 1 : 0;
 		catalogue[87] = sourceSprinting ? 1 : 0;
 		catalogue[88] = targetSprinting ? 1 : 0;
+	}
+
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/item/BowItem.java, getPowerForTime (74-82), and
+	// minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, getTicksUsingItem (3597-3598). Arrow deltas here
+	// are relative to the actor's sampled movement; projectile selection belongs to the live adapter.
+	static void bowObservation(float[] catalogue, State source, State target, ArrowState arrow) {
+		if (catalogue.length < 102) throw new IllegalArgumentException("Bow observations need catalogue indices 89..101");
+		BowState ownBow = source.bow();
+		BowState opponentBow = target.bow();
+		catalogue[89] = Math.clamp(ownBow.arrowCount() / 64.0F, 0.0F, 1.0F);
+		catalogue[90] = ownBow.usingBow() ? 1 : 0;
+		catalogue[91] = ownBow.usingBow() ? Math.clamp(ownBow.power(), 0.0F, 1.0F) : 0;
+		catalogue[92] = ownBow.equipped() ? 1 : 0;
+		catalogue[93] = opponentBow.equipped() ? 1 : 0;
+		catalogue[94] = opponentBow.usingBow() ? 1 : 0;
+		for (int index = 95; index <= 101; index++) catalogue[index] = 0;
+		if (arrow == null) return;
+		catalogue[95] = 1;
+		catalogue[96] = (float) ((arrow.x() - source.x()) / 10.0);
+		catalogue[97] = (float) ((arrow.y() - source.y()) / 10.0);
+		catalogue[98] = (float) ((arrow.z() - source.z()) / 10.0);
+		catalogue[99] = (float) (arrow.velocityX() - source.velocityX());
+		catalogue[100] = (float) (arrow.velocityY() - source.velocityY());
+		catalogue[101] = (float) (arrow.velocityZ() - source.velocityZ());
 	}
 
 	private static float equipmentFraction(double value, double maximum) {

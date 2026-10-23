@@ -14,8 +14,8 @@ import numpy as np
 
 from simulator.training._test_plans import TEST_SETUPS, example_plan
 from simulator.training.compiler import LEARNER_DEFAULTS, _learner, _opponents, _policy, _snapshots
-from simulator.training.contract import fingerprint, from_legacy, project_observations, validate_contract
-from simulator.training.environment import REWARD_NAMES, ROOT, SCHEMA_V2
+from simulator.training.contract import FEATURES, categorical_values, fingerprint, from_legacy, project_observations, validate_contract
+from simulator.training.environment import REWARD_NAMES, ROOT, SCHEMA, SCHEMA_V2
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
 from simulator.training.validate_plans import main as validate_plans
 
@@ -83,6 +83,64 @@ class ObservationEncodingChecks(unittest.TestCase):
         self.assertNotEqual(fingerprint({**fixture["policy"], "observations": [entry]}),
                             fingerprint({**fixture["policy"], "observations": [
                                 {**entry, "categories": list(reversed(range(9)))}]}))
+
+    def test_bow_projection_is_seat_local_scaled_and_alias_safe(self):
+        descriptors = [
+            {"feature": "opponent.bow_equipped", "encoding": "one_hot", "categories": [1, 0], "scale": -2},
+            {"feature": "self.bow_equipped", "encoding": "one_hot", "categories": [0, 1]},
+            {"feature": "self.arrow_count_fraction", "scale": 4},
+            {"feature": "self.bow_using", "encoding": "one_hot", "categories": [0, 1], "scale": 3},
+            {"feature": "relative.x", "scale": -2},
+            {"feature": "arrow.present", "encoding": "one_hot", "categories": [1, 0], "scale": -4},
+        ]
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+            "ticks_per_action": 1, "observations": descriptors,
+            "requires": ["bow"],
+            "actions": [{"name": "use_item", "values": [True, False]},
+                        {"name": "yaw", "values": [-5, 0, 5]}],
+        })
+        self.assertEqual(contract["action_names"], ["use_item", "yaw"])
+        for feature in ("self.bow_using", "self.bow_equipped", "opponent.bow_equipped",
+                        "opponent.bow_using", "arrow.present"):
+            self.assertEqual(categorical_values(feature), (0, 1))
+        self.assertEqual(categorical_values("self.arrow_count_fraction"), ())
+
+        catalogue = np.zeros((2, len(FEATURES)), dtype=np.float32)
+        values = {
+            "opponent.bow_equipped": [0, 1], "self.bow_equipped": [1, 0],
+            "self.arrow_count_fraction": [0.5, 0], "self.bow_using": [1, 0],
+            "relative.x": [0.2, -0.2], "arrow.present": [1, 0],
+        }
+        for feature, entries in values.items():
+            catalogue[:, FEATURES.index(feature)] = entries
+        projected = np.stack([project_observations(row, contract) for row in catalogue])
+        np.testing.assert_allclose(projected, [
+            [0, -2, 0, 1, 2, 0, 3, -0.4, -4, 0],
+            [-2, 0, 1, 0, 0, 3, 0, 0.4, 0, -4],
+        ])
+        self.assertEqual(from_legacy(SCHEMA)["observation_dim"], 22)
+        self.assertEqual(from_legacy(SCHEMA_V2)["action_names"], SCHEMA_V2["action_names"])
+
+        invalid_ammo = deepcopy(contract)
+        invalid_ammo.pop("observation_dim")
+        invalid_ammo["observations"] = [{"feature": "self.arrow_count_fraction",
+                                          "encoding": "one_hot", "categories": [0, 1]}]
+        with self.assertRaisesRegex(ValueError, "one_hot"):
+            validate_contract(invalid_ammo)
+        legacy_alias = deepcopy(contract)
+        legacy_alias.pop("observation_dim")
+        legacy_alias.pop("action_names")
+        legacy_alias.pop("action_sizes")
+        legacy_alias["actions"] = [{"name": "shield", "values": [False, True]}]
+        self.assertEqual(validate_contract(legacy_alias)["action_names"], ["shield"])
+        conflict = deepcopy(contract)
+        conflict.pop("observation_dim")
+        conflict.pop("action_names")
+        conflict.pop("action_sizes")
+        conflict["actions"].append({"name": "shield", "values": [False, True]})
+        with self.assertRaisesRegex(ValueError, "both shield and use_item"):
+            validate_contract(conflict)
 
 
 class SnapshotRuleChecks(unittest.TestCase):
@@ -415,8 +473,8 @@ class ExperimentChecks(unittest.TestCase):
     def test_stage_sampling_patches_arrays_replace_and_null_disables(self):
         stage = self.raw["stages"][0]
         stage["spawns"] = {"region": {"min": [-1, 1, -1]}, "yaw": 0}
-        stage["equipment"] = {"loadout": {"weapons": ["minecraft:stone_sword"],
-                                          "offhand": "minecraft:air"}}
+        stage["equipment"] = {"loadout": {"weapons": ["minecraft:stone_sword", "minecraft:bow"],
+                                          "offhand": "minecraft:air", "arrows": 7}}
         self.raw["stages"][1].update(spawns=None, equipment=None)
         resolved = self.resolve()
         first, second = resolved["stages"]
@@ -425,7 +483,10 @@ class ExperimentChecks(unittest.TestCase):
         self.assertEqual(first["scenario"]["spawns"]["minimum_separation"], 2)
         self.assertEqual(first["scenario"]["spawns"]["yaw"], 0)
         slots = first["scenario"]["equipment"]["loadout"]["weapons"]
-        self.assertEqual(slots, ["minecraft:stone_sword", *(["minecraft:air"] * 8)])
+        self.assertEqual(slots, ["minecraft:stone_sword", "minecraft:bow", *(["minecraft:air"] * 7)])
+        self.assertEqual(first["scenario"]["equipment"]["loadout"]["arrows"], 7)
+        players = EpisodeSampler(first["scenario"], 1, 17).players(0)
+        self.assertEqual([player["loadout"]["arrows"] for player in players], [7, 7])
         self.assertNotIn("spawns", second["scenario"])
         self.assertNotIn("equipment", second["scenario"])
         self.assertEqual(self.environment["spawns"]["region"]["min"], [-4.5, 1, -4.5])

@@ -19,6 +19,7 @@ final class SimulationContract {
 	private final List<Observation> observations = new ArrayList<>();
 	private int observationCount;
 	private final List<Head> heads = new ArrayList<>();
+	private final Set<String> requiredCapabilities = new HashSet<>();
 	record Head(String name, JsonArray values) {}
 	record Observation(int feature, float scale, int[] categories, float lower, float upper) {}
 
@@ -28,6 +29,9 @@ final class SimulationContract {
 			throw new IllegalArgumentException("Unsupported policy contract format/version/build/tick rate");
 		}
 		capabilities(descriptor);
+		if (descriptor.has("requires")) for (JsonElement capability : descriptor.getAsJsonArray("requires")) {
+			requiredCapabilities.add(capability.getAsString());
+		}
 		JsonArray entries = descriptor.getAsJsonArray("observations");
 		if (entries.size() < 1 || entries.size() > PolicyCatalogue.MAX_OBSERVATIONS) throw new IllegalArgumentException("Invalid observation count");
 		for (JsonElement element : entries) {
@@ -68,7 +72,8 @@ final class SimulationContract {
 				boolean slot = name.equals("self.weapon_slot") || name.equals("opponent.weapon_slot");
 				boolean binary = name.endsWith(".alive") || name.endsWith(".weapon_is_axe") || name.endsWith(".shield_using")
 						|| name.endsWith(".shield_disabled") || name.endsWith(".shield_disabled_observed") || name.endsWith(".has_shield")
-						|| name.endsWith(".present") || name.endsWith(".is_axe") || name.endsWith(".on_ground") || name.endsWith(".sprinting");
+						|| name.endsWith(".present") || name.endsWith(".is_axe") || name.endsWith(".on_ground") || name.endsWith(".sprinting")
+						|| name.endsWith(".bow_using") || name.endsWith(".bow_equipped");
 				if ((!slot && !binary) || !observation.has("categories") || !observation.get("categories").isJsonArray()
 						|| observation.getAsJsonArray("categories").isEmpty()) throw new IllegalArgumentException("Invalid one_hot observation");
 				JsonArray choices = observation.getAsJsonArray("categories");
@@ -90,6 +95,13 @@ final class SimulationContract {
 			observations.add(new Observation(feature, scale, categories, lower, upper));
 			observationCount += categories == null ? 1 : categories.length;
 		}
+		if (observations.stream().anyMatch(observation -> {
+			String name = FEATURES.get(observation.feature());
+			return name.equals("self.arrow_count_fraction") || name.startsWith("self.bow_")
+					|| name.startsWith("opponent.bow_") || name.startsWith("arrow.");
+		}) && !requiredCapabilities.contains("bow")) {
+			throw new IllegalArgumentException("Bow observations require the bow capability");
+		}
 		if (observationCount > PolicyCatalogue.MAX_OBSERVATIONS) throw new IllegalArgumentException("Expanded observation count exceeds limit");
 		JsonArray actions = descriptor.getAsJsonArray("actions");
 		if (actions.size() < 1 || actions.size() > HEADS.size()) throw new IllegalArgumentException("Invalid action head count");
@@ -100,6 +112,9 @@ final class SimulationContract {
 			JsonArray values = action.getAsJsonArray("values");
 			if (!HEADS.contains(name) || !seen.add(name) || values.size() < 1 || values.size() > PolicyCatalogue.MAX_CHOICES) {
 				throw new IllegalArgumentException("Unsupported/duplicate action primitive or choice count: " + name);
+			}
+			if (name.equals("shield") && seen.contains("use_item") || name.equals("use_item") && seen.contains("shield")) {
+				throw new IllegalArgumentException("Use only one of the shield and use_item action aliases");
 			}
 			String kind = PolicyCatalogue.ACTION_KINDS.get(PolicyCatalogue.ACTION_NAMES.indexOf(name));
 			Set<String> choices = new HashSet<>();
@@ -155,11 +170,32 @@ final class SimulationContract {
 	}
 
 	void validateLoadouts(List<JsonObject> loadouts) {
+		if (loadouts.stream().anyMatch(loadout -> loadout.getAsJsonArray("weapons").contains(ReplayAnalysis.JSON.toJsonTree("minecraft:bow")))
+				&& !requiredCapabilities.contains("bow")) {
+			throw new IllegalArgumentException("Bow loadouts require the bow capability");
+		}
 		for (Head head : heads) if (head.name.equals("weapon")) {
 			for (JsonElement choice : head.values) for (JsonObject loadout : loadouts) {
 				if (integer(choice) >= loadout.getAsJsonArray("weapons").size()) throw new IllegalArgumentException("Weapon choice outside a player's loadout");
 			}
 		}
+	}
+
+	// Adapter contract check: the bridge fixture must select every appended bow feature and the two-value use_item head.
+	boolean supportsFullBowContract() {
+		if (!requiredCapabilities.contains("bow")) return false;
+		Set<String> selected = new HashSet<>();
+		for (Observation observation : observations) selected.add(FEATURES.get(observation.feature()));
+		if (!selected.containsAll(List.of("self.arrow_count_fraction", "self.bow_using", "self.bow_power_fraction",
+				"self.bow_equipped", "opponent.bow_equipped", "opponent.bow_using", "arrow.present",
+				"arrow.relative.x", "arrow.relative.y", "arrow.relative.z", "arrow.relative.velocity.x",
+				"arrow.relative.velocity.y", "arrow.relative.velocity.z"))) return false;
+		for (Head head : heads) {
+			if (!head.name().equals("use_item")) continue;
+			return head.values().contains(ReplayAnalysis.JSON.toJsonTree(false))
+					&& head.values().contains(ReplayAnalysis.JSON.toJsonTree(true));
+		}
+		return false;
 	}
 
 	ReplayTrace.Controls decode(JsonArray indices, JsonObject loadout) {
@@ -186,7 +222,7 @@ final class SimulationContract {
 				case "sprint" -> sprint = value.getAsBoolean();
 				case "sneak" -> sneak = value.getAsBoolean();
 				case "attack" -> attack = value.getAsBoolean();
-				case "shield" -> use = value.getAsBoolean();
+				case "shield", "use_item" -> use = value.getAsBoolean();
 				case "yaw" -> yaw = value.getAsFloat();
 				case "pitch" -> pitch = value.getAsFloat();
 				case "weapon" -> { select = true; slot = integer(value); weapon = loadout.getAsJsonArray("weapons").get(slot).getAsString(); }
@@ -217,7 +253,7 @@ final class SimulationContract {
 
 	static JsonObject loadout(JsonObject spawn, String profile) {
 		JsonObject result = spawn.has("loadout") ? spawn.getAsJsonObject("loadout").deepCopy() : new JsonObject();
-		for (String key : result.keySet()) if (!Set.of("weapons", "selected", "offhand", "armor").contains(key)) {
+		for (String key : result.keySet()) if (!Set.of("weapons", "selected", "offhand", "armor", "arrows").contains(key)) {
 			throw new IllegalArgumentException("Unsupported loadout field: " + key);
 		}
 		boolean equippedDefault = !spawn.has("loadout") && profile.equals("unarmored_sword_axe_shield");
@@ -230,6 +266,9 @@ final class SimulationContract {
 				|| !item.getAsString().equals("minecraft:air") && !seen.add(item.getAsString())) {
 			throw new IllegalArgumentException("Unsupported or duplicate weapon item: " + item);
 		}
+		int arrows = result.has("arrows") ? integer(result.get("arrows")) : 0;
+		if (arrows < 0 || arrows > 64) throw new IllegalArgumentException("Loadout arrows must be in 0..64");
+		result.addProperty("arrows", arrows);
 		int selected = result.has("selected") ? integer(result.get("selected")) : 0;
 		if (selected < 0 || selected >= weapons.size()) throw new IllegalArgumentException("Selected weapon outside loadout");
 		result.addProperty("selected", selected);
@@ -261,7 +300,7 @@ final class SimulationContract {
 		List<String> items = new ArrayList<>(List.of("minecraft:air", "minecraft:wooden_sword", "minecraft:wooden_axe",
 				"minecraft:stone_sword", "minecraft:stone_axe", "minecraft:copper_sword", "minecraft:copper_axe",
 				"minecraft:golden_sword", "minecraft:golden_axe", "minecraft:iron_sword", "minecraft:iron_axe",
-				"minecraft:diamond_sword", "minecraft:diamond_axe", "minecraft:netherite_sword", "minecraft:netherite_axe"));
+				"minecraft:diamond_sword", "minecraft:diamond_axe", "minecraft:netherite_sword", "minecraft:netherite_axe", "minecraft:bow"));
 		return items.stream().filter(WEAPONS::contains).toList();
 	}
 
@@ -275,6 +314,7 @@ final class SimulationContract {
 
 	private static Set<String> weaponItems() {
 		Set<String> result = new HashSet<>(Set.of("minecraft:air"));
+		result.add("minecraft:bow");
 		for (String material : List.of("wooden", "stone", "copper", "golden", "iron", "diamond", "netherite")) {
 			for (String kind : List.of("sword", "axe")) result.add("minecraft:" + material + "_" + kind);
 		}

@@ -39,7 +39,7 @@ int runDuel(int ticks, bool gpu, const std::filesystem::path& replay_path,
     std::array<minecraft_sim::Controls, 2> queued{};
     std::array<minecraft_sim::Controls, 2> held{};
     minecraft_sim::BatchView batch{players.data(), queued.data(), held.data(), terrain->worlds.data(),
-                                   1, 2, &terrain->blocks, {terrain->sine.data()}};
+                                   1, 2, &terrain->blocks, {terrain->sine.data()}, terrain->projectile_states.data()};
     std::ofstream replay;
     if (!replay_path.empty()) {
         if (std::filesystem::exists(replay_path)) {
@@ -49,13 +49,15 @@ int runDuel(int ticks, bool gpu, const std::filesystem::path& replay_path,
         replay.open(replay_path);
         replay << nlohmann::json{{"format", "minecraft_sim_replay"}, {"version", 3},
             {"minecraft", minecraft_sim::target_minecraft_version()}, {"backend", gpu ? "CUDA" : "CPU"},
-            {"players", 2}, {"ticks_per_second", 20}, {"environment", terrain->resolvedDefinition()}}.dump() << '\n';
+            {"players", 2}, {"ticks_per_second", 20}, {"capabilities", {{"bow", true}}},
+            {"environment", terrain->resolvedDefinition()}}.dump() << '\n';
     }
     const auto write_frame = [&](const std::array<minecraft_sim::Controls, 2>& actions) {
         if (!replay.is_open()) {
             return;
         }
-        replay << minecraft_sim::app::replayFrame(terrain->worlds[0].tick, players.data(), actions.data(), true).dump() << '\n';
+        replay << minecraft_sim::app::replayFrame(terrain->worlds[0].tick, players.data(), actions.data(), true,
+            nullptr, &terrain->projectile_states[0]).dump() << '\n';
         replay.flush();
     };
     write_frame({});
@@ -90,7 +92,7 @@ int runDuel(int ticks, bool gpu, const std::filesystem::path& replay_path,
         } else
 #endif
         {
-            batch.world(0).processTick();
+            minecraft_sim::processWorldTick(batch.world(0), terrain->blocks, terrain->projectile_states[0]);
         }
         write_frame(actions);
         for (int player = 0; player < 2; ++player) {

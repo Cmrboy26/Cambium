@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 DRY_RUN=false
+LOCAL=false
 PROFILE_EVERY=0
 SHARED_GPU=false
 MAX_PARALLEL=0
@@ -12,6 +13,7 @@ LEARNER_OVERRIDES=()
 while (( $# )); do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
+        --local) LOCAL=true; shift ;;
         --line-mode) LINE_MODE=true; shift ;;
         --shared-gpu) SHARED_GPU=true; shift ;;
         --gamma|--gae-lambda|--clip-eps|--vf-coef|--ent-coef|--max-grad-norm)
@@ -35,13 +37,17 @@ while (( $# )); do
             PROFILE_EVERY="$2"
             shift 2 ;;
         -h|--help)
-            printf 'Usage: bash rosie/submit.sh [--dry-run] [--line-mode] [--profile-every N] [--shared-gpu [--max-parallel N]]\nInteractive settings: Up/Down to navigate, type to edit, Enter on Submit.\nUse comma-separated values in one field for a single-variable sweep.\n--line-mode retains sequential prompts (also used for piped input).\nPPO overrides: --gamma, --gae-lambda, --clip-eps, --vf-coef, --ent-coef, --max-grad-norm VALUE.\nA comma-separated override also works in line mode.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
+            printf 'Usage: bash rosie/submit.sh [--local] [--dry-run] [--line-mode] [--profile-every N] [--shared-gpu [--max-parallel N]]\n--local builds and trains on this WSL/Linux host; use a local checkout with CUDA installed.\nInteractive settings: Up/Down to navigate, type to edit, Enter on Submit.\nUse comma-separated values in one field for a single-variable sweep.\n--line-mode retains sequential prompts (also used for piped input).\nPPO overrides: --gamma, --gae-lambda, --clip-eps, --vf-coef, --ent-coef, --max-grad-norm VALUE.\nA comma-separated override also works in line mode.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
             exit 0 ;;
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
 if ! "$SHARED_GPU" && (( MAX_PARALLEL != 0 )); then
     printf -- '--max-parallel requires --shared-gpu.\n' >&2
+    exit 1
+fi
+if "$LOCAL" && "$SHARED_GPU"; then
+    printf -- '--local cannot be combined with --shared-gpu. Local sweeps run sequentially.\n' >&2
     exit 1
 fi
 
@@ -126,13 +132,25 @@ prompt() {
     done
 }
 
-printf 'Rosie training submission\n\nGPU presets: h100, v100, teaching (T4)\n'
-prompt GPU 'GPU preset' h100 '^(h100|v100|teaching)$'
-case "$GPU" in
-    h100) PARTITION=dgxh100; GRES=gpu:h100:1; ARCH=90; ENVS_DEFAULT=8192; ROLLOUT_DEFAULT=128; TIME_DEFAULT=1-00:00:00 ;;
-    v100) PARTITION=dgx; GRES=gpu:v100:1; ARCH=70; ENVS_DEFAULT=2048; ROLLOUT_DEFAULT=128; TIME_DEFAULT=1-00:00:00 ;;
-    teaching) PARTITION=teaching; GRES=gpu:t4:1; ARCH=75; ENVS_DEFAULT=256; ROLLOUT_DEFAULT=64; TIME_DEFAULT=0-02:00:00 ;;
-esac
+if "$LOCAL"; then
+    ARCH="${MCSIM_CUDA_ARCHITECTURES:-86}"
+    if [[ ! "$ARCH" =~ ^[0-9]+$ ]]; then
+        printf 'MCSIM_CUDA_ARCHITECTURES must be a numeric CUDA architecture.\n' >&2
+        exit 1
+    fi
+    ENVS_DEFAULT="${MCSIM_LOCAL_ENVS:-256}"
+    ROLLOUT_DEFAULT="${MCSIM_LOCAL_ROLLOUT_STEPS:-64}"
+    TIME_DEFAULT=00:00:00
+    printf 'Local CUDA training (architecture %s; default 256 worlds for an 8 GB GPU).\n' "$ARCH"
+else
+    printf 'Rosie training submission\n\nGPU presets: h100, v100, teaching (T4)\n'
+    prompt GPU 'GPU preset' h100 '^(h100|v100|teaching)$'
+    case "$GPU" in
+        h100) PARTITION=dgxh100; GRES=gpu:h100:1; ARCH=90; ENVS_DEFAULT=8192; ROLLOUT_DEFAULT=128; TIME_DEFAULT=1-00:00:00 ;;
+        v100) PARTITION=dgx; GRES=gpu:v100:1; ARCH=70; ENVS_DEFAULT=2048; ROLLOUT_DEFAULT=128; TIME_DEFAULT=1-00:00:00 ;;
+        teaching) PARTITION=teaching; GRES=gpu:t4:1; ARCH=75; ENVS_DEFAULT=256; ROLLOUT_DEFAULT=64; TIME_DEFAULT=0-02:00:00 ;;
+    esac
+fi
 
 shopt -s nullglob globstar
 PLANS=(simulator/setups/curricula/**/*.json)
@@ -167,6 +185,19 @@ if ! "$PYTHON" -m simulator.training.validate_plans "$PLAN"; then
     printf 'Selected training plan validation failed; nothing submitted.\n' >&2
     exit 1
 fi
+if "$LOCAL" && ! "$DRY_RUN"; then
+    for tool in cmake nvcc flock nvidia-smi; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            printf 'ERROR: %s is required for local CUDA training. Set up CUDA inside WSL2 first.\n' "$tool" >&2
+            exit 1
+        fi
+    done
+    if ! "$PYTHON" -c 'import torch; assert torch.cuda.is_available(), "CUDA is unavailable"'; then
+        printf 'ERROR: The selected Python environment cannot access CUDA. Run bash rosie/setup.sh and verify WSL GPU support.\n' >&2
+        exit 1
+    fi
+    nvidia-smi --query-gpu=name --format=csv,noheader
+fi
 if ! DEFAULTS="$("$PYTHON" - "$PLAN" <<'PY'
 import json
 import sys
@@ -192,6 +223,7 @@ read -r UPDATES_DEFAULT HIDDEN_DEFAULT EPOCHS_DEFAULT MINIBATCH_DEFAULT LR_DEFAU
 FORM_USED=false
 FORM_ARGS=(--plan "$PLAN" --envs-default "$ENVS_DEFAULT" --rollout-default "$ROLLOUT_DEFAULT"
     --time-default "$TIME_DEFAULT" --max-parallel "$MAX_PARALLEL" "${LEARNER_OVERRIDES[@]}")
+if "$LOCAL"; then FORM_ARGS+=(--local); fi
 if [[ -t 0 && -t 2 ]] && ! "$LINE_MODE"; then
     if "$SHARED_GPU"; then FORM_ARGS+=(--shared-gpu); fi
     if ! FORM_DATA="$("$PYTHON" -B -m simulator.training.submit_form "${FORM_ARGS[@]}")"; then exit 1; fi
@@ -203,10 +235,25 @@ elif (( ${#LEARNER_OVERRIDES[@]} )); then
 fi
 
 if ! "$FORM_USED"; then
+if "$LOCAL"; then
+printf '\nLocal training settings (world counts are starting points, not measured tuning):\n'
+else
 printf '\nTraining settings (world counts are starting points, not measured tuning):\n'
+fi
 printf 'Type multiple at one training/resource setting; enter values one per line, then an empty line.\n'
 NAME="${PLAN##*/}"
 prompt JOB_NAME 'Job/run name' "${NAME%.json}" '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$'
+if "$LOCAL"; then
+prompt ENVS 'Parallel worlds' "$ENVS_DEFAULT" '^[1-9][0-9]{0,5}$' true
+prompt UPDATES 'Maximum optimizer updates' "$UPDATES_DEFAULT" '^[1-9][0-9]{0,8}$' true
+prompt ROLLOUT 'Steps per rollout' "$ROLLOUT_DEFAULT" '^[1-9][0-9]{0,5}$' true
+prompt HIDDEN 'Hidden width' "$HIDDEN_DEFAULT" '^[1-9][0-9]{0,4}$' true
+prompt EPOCHS 'PPO epochs' "$EPOCHS_DEFAULT" '^[1-9][0-9]{0,3}$' true
+prompt MINIBATCH 'Minibatch size' "$MINIBATCH_DEFAULT" '^[1-9][0-9]{0,7}$' true
+prompt LR 'Learning rate' "$LR_DEFAULT" '^([0-9]*\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(\.[0-9]+)?)([eE][+-]?[0-9]+)?$' true
+prompt THREADS 'Trainer CPU threads (auto allowed)' auto '^(auto|[1-9][0-9]{0,2})$' true
+prompt REPLAY 'Replay interval in completed duels (0 disables)' 50000 '^(0|[1-9][0-9]{0,8})$' true
+else
 prompt TIME 'Wall-time limit (days-HH:MM:SS or HH:MM:SS)' "$TIME_DEFAULT" '^([0-9]+-)?[0-9]+:[0-5][0-9]:[0-5][0-9]$' true
 prompt ENVS 'Parallel worlds' "$ENVS_DEFAULT" '^[1-9][0-9]{0,5}$' true
 prompt UPDATES 'Maximum optimizer updates' "$UPDATES_DEFAULT" '^[1-9][0-9]{0,8}$' true
@@ -238,6 +285,7 @@ printf '\nCUDA build directory: simulator/build-rosie-cuda-%s\n' "$ARCH"
 printf 'Builds use a shared lock; each job trains from a private library copy.\n'
 printf 'For jobs submitted with the older launcher, enter their IDs to avoid overlapping an unlocked build.\n'
 prompt DEPENDENCY 'Wait for job IDs (colon-separated), or none' none '^(none|[1-9][0-9]*(:[1-9][0-9]*)*)$'
+fi
 fi
 
 if "$SHARED_GPU"; then
@@ -331,25 +379,89 @@ prepare_command() {
     COMMAND+=(rosie/train.sbatch)
 }
 
-printf '\nWorking directory: %s\nFresh run; existing SIM_* settings and SBATCH_* overrides will not be inherited.\n' "$ROOT"
+prepare_local_command() {
+    local index="$1"
+    if [[ -n "$SWEEP_VARIABLE" ]]; then
+        printf -v "$SWEEP_VARIABLE" '%s' "${SWEEP_VALUES[index]}"
+    fi
+    RUN_OUTPUT="simulator/training/runs/${RUN_NAMES[index]}"
+    LOCAL_ENV=(
+        "MCSIM_CUDA_ARCHITECTURES=$ARCH"
+        "SIM_PLAN=$PLAN"
+        "SIM_OUTPUT=$RUN_OUTPUT"
+        "SIM_ENVS=$ENVS"
+        "SIM_UPDATES=$UPDATES"
+        "SIM_ROLLOUT_STEPS=$ROLLOUT"
+        "SIM_HIDDEN_DIM=$HIDDEN"
+        "SIM_EPOCHS=$EPOCHS"
+        "SIM_MINIBATCH_SIZE=$MINIBATCH"
+        "SIM_LR=$LR"
+        "SIM_THREADS=$THREADS"
+        "SIM_REPLAY_EVERY=$REPLAY"
+        "SIM_REPLAY_EVERY_UPDATES=0"
+        "SIM_REPLAY_DIR="
+        "SIM_PROFILE_EVERY=$PROFILE_EVERY"
+        "SIM_RESUME="
+        "SIM_INITIALIZE="
+        "SIM_SWEEP="
+        "SIM_GAMMA=$GAMMA"
+        "SIM_GAE_LAMBDA=$GAE_LAMBDA"
+        "SIM_CLIP_EPS=$CLIP_EPS"
+        "SIM_VF_COEF=$VF_COEF"
+        "SIM_ENT_COEF=$ENT_COEF"
+        "SIM_MAX_GRAD_NORM=$MAX_GRAD_NORM"
+    )
+    COMMAND=(env "${LOCAL_ENV[@]}" bash rosie/train-local.sh)
+}
+
+if "$LOCAL"; then
+    printf '\nLocal working directory: %s\nFresh run; inherited SIM_* settings are replaced.\n' "$ROOT"
+else
+    printf '\nWorking directory: %s\nFresh run; existing SIM_* settings and SBATCH_* overrides will not be inherited.\n' "$ROOT"
+fi
 if [[ -n "$SWEEP_VARIABLE" ]]; then
     printf 'Sweep: %s (%d jobs). Jobs can train concurrently; shared builds are locked.\n' "$SWEEP_LABEL" "${#RUN_NAMES[@]}"
 fi
 for index in "${!RUN_NAMES[@]}"; do
-    prepare_command "$index" "$DEPENDENCY"
-    printf 'Submission command (%s):\n  ' "${RUN_NAMES[index]}"
+    if "$LOCAL"; then
+        prepare_local_command "$index"
+        printf 'Local command (%s):\n  ' "${RUN_NAMES[index]}"
+    else
+        prepare_command "$index" "$DEPENDENCY"
+        printf 'Submission command (%s):\n  ' "${RUN_NAMES[index]}"
+    fi
     printf '%q ' "${COMMAND[@]}"
     printf '\n\n'
 done
 if "$DRY_RUN"; then
-    printf 'Dry run: nothing submitted.\n'
+    if "$LOCAL"; then printf 'Dry run: nothing built or launched.\n'; else printf 'Dry run: nothing submitted.\n'; fi
     exit 0
 fi
-if "$FORM_USED"; then CONFIRM=y; else prompt CONFIRM "Submit ${#RUN_NAMES[@]} job(s)? (y/n)" n '^[yYnN]$'; fi
+if "$FORM_USED"; then
+    CONFIRM=y
+elif "$LOCAL"; then
+    prompt CONFIRM "Start ${#RUN_NAMES[@]} local run(s)? (y/n)" n '^[yYnN]$'
+else
+    prompt CONFIRM "Submit ${#RUN_NAMES[@]} job(s)? (y/n)" n '^[yYnN]$'
+fi
 if [[ "$CONFIRM" != [yY] ]]; then
-    printf 'Cancelled; nothing submitted.\n'
+    if "$LOCAL"; then printf 'Cancelled; nothing launched.\n'; else printf 'Cancelled; nothing submitted.\n'; fi
     exit 0
 fi
+
+if "$LOCAL"; then
+    for index in "${!RUN_NAMES[@]}"; do
+        prepare_local_command "$index"
+        printf 'Starting local run %s. Press Ctrl+C to stop it.\n' "${RUN_NAMES[index]}"
+        if ! "${COMMAND[@]}"; then
+            printf 'Local run failed for %s; stopping the remaining sweep.\n' "${RUN_NAMES[index]}" >&2
+            exit 1
+        fi
+        printf 'Finished local run %s\n' "${RUN_NAMES[index]}"
+    done
+    exit 0
+fi
+
 if ! command -v sbatch >/dev/null 2>&1; then
     printf 'sbatch is unavailable; run this script on Rosie.\n' >&2
     exit 1

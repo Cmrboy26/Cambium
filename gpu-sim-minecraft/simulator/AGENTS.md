@@ -70,7 +70,7 @@ Pure base observation math is in `apps/observation.hpp`; raycasts and equipment
 sampling stay in the training adapter. Native `shared_core_checks` consumes the
 same [fixture file](../contracts/policy_fixtures.json) as Java/Python.
 
-The training library exports ABI 3 plus JSON `mcsim_build_info()` and
+The training library exports ABI 4 plus JSON `mcsim_build_info()` and
 `mcsim_batch_info(handle)`. Build info contains catalogue/capabilities, scalar
 widths, reward input/total counts, compiler/revision/compile time, CUDA build flag
 and SHA-256 of native headers/support sources/training entry point/CMake input.
@@ -108,9 +108,11 @@ last successful tick's 15 reward contributions for selected actors. The mask
 has `worlds*2` boolean entries; null selects both players. Resets clear selected
 worlds' last-step contributions, not cumulative batch totals. Opponent-pool
 training selects its learner actor before episode reset or side reassignment.
-ABI 3 expands base reward inputs from six to nine and base totals from seven to
 ten for missed attacks, shield disables and win speed; shaping remains five.
-Rebuild older libraries; Python rejects earlier ABI versions before buffer use.
+ABI 4 expands base reward inputs from nine to ten and base totals from ten to
+eleven for arrow progress; shaping remains five. Per-player step totals contain
+sixteen contributions. Rebuild older libraries; Python rejects earlier ABI
+versions before buffer use.
 
 The default remains an unarmored diamond sword without shield; v1 policies stay
 sword-only. [V2](training/AGENTS.md#swordaxeshield-v2) adds weapon/shield controls.
@@ -193,6 +195,22 @@ Sources: 26.3 `Items`, `ToolMaterial`, `ArmorMaterials`, `CombatRules`,
 `Minecraft.handleKeybinds`. Native `hurt` is ordinary melee with optional
 axe-disable seconds and explicit shield bypass. No projectile/custom partial
 blocks, inventory/hotbar protocol or other item-use systems are implied.
+
+## Bow And Arrow Integration
+
+[projectiles.hpp](include/minecraft_sim/projectiles.hpp) adds caller-owned,
+per-world bow state and fixed-capacity arrow buffers. CPU/CUDA training,
+descriptive `use_item` actions, appended observations and replay share the tick
+path; the current public training ABI is 4. The supported scope, explicit tick
+phase, lifecycle and exclusions are in the
+[implementation note](../docs/bow_arrow_implementation.md). Mechanics methods
+cite controlling Java paths/methods/lines above their definitions; the
+[source reference](../docs/bow_arrow_source_reference.md) records the call chains.
+Legacy `shield` is an item-use alias; simultaneous aliases are rejected. Slot
+changes cancel before release. Existing arrows advance after player movement;
+release uses pre-look/pre-movement state, and new arrows wait until the next tick.
+CPU `projectile_checks` and optional `projectile_cuda_checks` are separate gates;
+the latter compares a seeded launch/free-flight case, not all interactions.
 
 ## Native Food And Regeneration
 

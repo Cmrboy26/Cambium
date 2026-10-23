@@ -1,4 +1,4 @@
-"""Read-only, loopback dashboard for standalone simulator PPO runs."""
+"""Loopback dashboard for standalone simulator PPO runs."""
 
 import argparse
 from hashlib import sha256
@@ -6,9 +6,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 from pathlib import Path
+from threading import Lock
 from urllib.parse import urlsplit
 
 from simulator.training.metrics import CATALOG, EPISODE_FIELDS, recover_rollout
+from simulator.training.replay_requests import (
+    ReplayRequestConflict,
+    ReplayRequestUnsupported,
+    create_request,
+    read_request,
+)
 
 
 RUNS = Path(__file__).resolve().parent / "runs"
@@ -124,6 +131,7 @@ class RunStore:
         self.directory = Path(directory).resolve()
         self.explicit = tuple(Path(run).resolve() for run in runs)
         self.summaries = {}
+        self.replay_request_lock = Lock()
 
     def paths(self):
         candidates = list(self.explicit)
@@ -186,6 +194,7 @@ class RunStore:
                 ):
                     if isinstance(value, str) or type(value) in (int, float) and math.isfinite(value):
                         result[key] = value
+                result["replay_requests_supported"] = options.get("dashboard_replay_requests") is True
             except (AttributeError, TypeError, ValueError):
                 warnings.append("Configuration metadata is incomplete or invalid.")
         self.summaries[path] = (signature, result)
@@ -236,6 +245,26 @@ class RunStore:
             if size <= MAX_REPLAY_BYTES:
                 replays.append({"id": replay_id, "name": path.name, "size": size})
         return sorted(replays, key=lambda replay: replay["name"], reverse=True)
+
+    def replay_request(self, identity):
+        run = self.paths().get(identity)
+        if run is None:
+            raise FileNotFoundError("Run not found")
+        config, _ = self.read_config(run)
+        options = config.get("options", {}) if config is not None else {}
+        supported = isinstance(options, dict) and options.get("dashboard_replay_requests") is True
+        return {"supported": supported, "request": read_request(run) if supported else None}
+
+    def request_replay(self, identity):
+        run = self.paths().get(identity)
+        if run is None:
+            raise FileNotFoundError("Run not found")
+        config, _ = self.read_config(run)
+        options = config.get("options", {}) if config is not None else {}
+        if not isinstance(options, dict) or options.get("dashboard_replay_requests") is not True:
+            raise ReplayRequestUnsupported("This run was started without replay-request support")
+        with self.replay_request_lock:
+            return create_request(run)
 
     def read_replay(self, identity, replay_id):
         path = self.replay_paths(identity).get(replay_id)
@@ -370,6 +399,8 @@ def make_server(store, port=8767):
                     self.reply(200, store.read(route[len("/api/runs/"):-len("/metrics")]))
                 elif route.startswith("/api/runs/") and route.endswith("/replays"):
                     self.reply(200, {"replays": store.list_replays(route[len("/api/runs/"):-len("/replays")])})
+                elif route.startswith("/api/runs/") and route.endswith("/replay-request"):
+                    self.reply(200, store.replay_request(route[len("/api/runs/"):-len("/replay-request")]))
                 elif route.startswith("/api/runs/") and "/replays/" in route:
                     identity, replay_id = route[len("/api/runs/"):].split("/replays/", 1)
                     self.reply(200, store.read_replay(identity, replay_id))
@@ -384,7 +415,22 @@ def make_server(store, port=8767):
                 self.reply(400, {"error": str(error)})
 
         def do_POST(self):
-            self.reply(405, {"error": "This dashboard is read-only"})
+            route = urlsplit(self.path).path
+            prefix = "/api/runs/"
+            suffix = "/replay-request"
+            if route.startswith(prefix) and route.endswith(suffix):
+                identity = route[len(prefix):-len(suffix)]
+                try:
+                    request = store.request_replay(identity)
+                    self.reply(202, {"request": request})
+                except FileNotFoundError as error:
+                    self.reply(404, {"error": str(error)})
+                except (ReplayRequestConflict, ReplayRequestUnsupported) as error:
+                    self.reply(409, {"error": str(error)})
+                except (OSError, ValueError) as error:
+                    self.reply(400, {"error": str(error)})
+                return
+            self.reply(405, {"error": "This dashboard only accepts replay requests"})
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True

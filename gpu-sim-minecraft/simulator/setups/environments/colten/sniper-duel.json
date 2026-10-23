@@ -1,0 +1,22 @@
+{
+  "format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+  "name": "colten-sniper-duel",
+  "arena": "../../arenas/colten/sniper-duel.json",
+  "players": {
+    "shared": {
+      "health": 20,
+      "loadout": {"weapons": ["minecraft:bow"], "selected": 0, "arrows": 64,
+        "offhand": "minecraft:air", "armor": {}}
+    },
+    "overrides": [
+      {"position": [-16, 1, 0], "yaw": -90, "pitch": -5},
+      {"position": [16, 1, 0], "yaw": 90, "pitch": -5}
+    ]
+  },
+  "task": {
+    "max_ticks": 1200,
+    "rewards": {"doing_damage": 20, "taking_damage": -5, "won_duel": 50,
+      "death": -25, "win_speed": 10, "episode_timeout": -5, "no_damage_penalty": -10,
+      "good_aim": 2, "arrow_progress": 1}
+  }
+}

@@ -41,6 +41,7 @@
   ],
   "policy": {
     "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+    "requires": ["bow"],
     "observations": [{"feature": "self.attack_charge", "scale": 2}, {"feature": "relative.z", "scale": -2}, {"feature": "self.health_fraction"}, {"feature": "opponent.weapon_slot"}],
     "actions": [
       {"name": "yaw", "values": [-15, 0, 15]}, {"name": "movement", "values": ["left", "forward_right", "neutral"]},
@@ -54,7 +55,8 @@
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0,
-    1, 0, 0, 1
+    1, 0, 0, 1,
+    0.5, 1, 0.41666667, 1, 1, 0, 1, 0.1, 0.1, 0, 0.5, 0.4, 0.1
   ],
   "projected": [1.5, -0.8, 1, 1],
   "projection_cases": [
@@ -96,6 +98,19 @@
         {"feature": "opponent.sprinting", "encoding": "one_hot", "categories": [1, 0]}
       ],
       "expected": [1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0]
+    },
+    {
+      "name": "bow-ammo-charge-and-relative-arrow",
+      "observations": [
+        {"feature": "self.arrow_count_fraction"},
+        {"feature": "self.bow_power_fraction"},
+        {"feature": "self.bow_using", "encoding": "one_hot", "categories": [0, 1]},
+        {"feature": "opponent.bow_using", "encoding": "one_hot", "categories": [1, 0]},
+        {"feature": "arrow.present"},
+        {"feature": "arrow.relative.x", "scale": 2},
+        {"feature": "arrow.relative.velocity.y", "clip": [-0.25, 0.25]}
+      ],
+      "expected": [0.5, 0.41666667, 0, 1, 0, 1, 1, 0.2, 0.25]
     }
   ],
   "weapons": ["minecraft:iron_sword", "minecraft:netherite_axe", "minecraft:air"],
@@ -124,6 +139,9 @@
     {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "clip": [true, 1]}},
     {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "clip": [0, 0]}},
     {"pointer": "/observations/0", "value": {"feature": "self.attack_charge", "typo": 1}},
-    {"pointer": "/observation_dim", "value": 3}
+    {"pointer": "/observation_dim", "value": 3},
+    {"pointer": "/observations/0", "value": {"feature": "self.arrow_count_fraction", "encoding": "one_hot", "categories": [0, 1]}},
+    {"pointer": "/observations/0", "value": {"feature": "self.bow_power_fraction", "encoding": "one_hot", "categories": [0, 1]}},
+    {"pointer": "/actions/8", "value": {"name": "use_item", "values": [false, true]}}
   ]
 }

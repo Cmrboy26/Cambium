@@ -54,12 +54,22 @@ class InferenceChecks(unittest.TestCase):
 
     def test_live_duels_accept_only_builtin_scripted_controllers(self):
         contract = from_legacy(SCHEMA_V2)
+        contract.pop("observation_dim")
+        contract.pop("action_names")
+        contract.pop("action_sizes")
+        contract["observations"].extend({"feature": feature} for feature in (
+            "self.arrow_count_fraction", "self.bow_using", "self.bow_power_fraction",
+            "self.bow_equipped", "opponent.bow_equipped", "opponent.bow_using", "arrow.present"))
+        contract["requires"].append("bow")
+        contract = validate_contract(contract)
         environment = json.loads((ROOT / "simulator/environments/duel.json").read_text())
         environment["profile"] = "configured"
         for player in environment["players"]:
-            player["loadout"] = {"weapons": ["minecraft:iron_sword"] + ["minecraft:air"] * 8, "selected": 0}
+            player["loadout"] = {"weapons": ["minecraft:bow"] + ["minecraft:air"] * 8,
+                                 "selected": 0, "arrows": 1}
         path = self.path.parent / "duel.json"
-        for controller in ("stationary_target", "basic_melee", "stationary_melee", "tactical_melee", "random_walk"):
+        for controller in ("stationary_target", "basic_melee", "stationary_melee", "tactical_melee",
+                           "random_walk", "archer"):
             definition = {"format": "minecraft_sim_duel", "version": 1, "policy": contract,
                           "environment": environment,
                           "fighters": [{"type": "scripted", "controller": controller},
@@ -230,6 +240,36 @@ class InferenceChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "2,31"):
             policy.act({**request, "observations": np.zeros((2, 22)).tolist()})
 
+    def test_use_item_checkpoint_inference_and_old_weights_rejection(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+            "ticks_per_action": 1,
+            "observations": [{"feature": "self.arrow_count_fraction"}, {"feature": "self.bow_equipped"}],
+            "actions": [{"name": "use_item", "values": [False, True]}],
+            "requires": ["bow"],
+        })
+        environment = self.saved["metadata"]["environment"]
+        environment["profile"] = "configured"
+        for player in environment["players"]:
+            player["loadout"] = {"weapons": ["minecraft:bow"] + ["minecraft:air"] * 8,
+                                 "selected": 0, "arrows": 1}
+        old_model = self.saved["model"]
+        self.saved["metadata"]["schema"] = contract
+        self.saved["model"] = ActorCritic(2, 16, action_sizes={"use_item": 2}).state_dict()
+        torch.save(self.saved, self.path)
+        policy = Policy(self.path, deterministic=True)
+        self.assertEqual(policy.contract["action_names"], ["use_item"])
+        self.assertEqual(policy.info["environment"]["players"][0]["loadout"]["arrows"], 1)
+        request = {"protocol": 1, "session": "bow-round", "tick": 0,
+                   "contract_hash": policy.info["contract_hash"],
+                   "observations": np.zeros((2, 2)).tolist()}
+        self.assertEqual(np.asarray(policy.act(request)["actions"]).shape, (2, 1))
+
+        self.saved["model"] = old_model
+        torch.save(self.saved, self.path)
+        with self.assertRaisesRegex(ValueError, "model parameters"):
+            Policy(self.path)
+
     def test_loopback_protocol(self):
         with make_server(Policy(self.path), 0) as server:
             worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -287,12 +327,12 @@ class InferenceChecks(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("MCSIM_LIVE_JAVA_CHECK") == "1", "Explicit Java/Python integration check")
     def test_java_bridge(self):
-        for configured in (False, True, "encoded"):
+        for configured in (False, True, "encoded", "bow"):
             with self.subTest(configured=configured):
                 folder = Path(self.directory.name) / str(configured)
                 if configured:
                     environment_path = ROOT / "simulator/environments/research-duel.json"
-                    if configured == "encoded":
+                    if configured in ("encoded", "bow"):
                         definition = json.loads(environment_path.read_text())
                         definition["policy"]["observations"] = [
                             {"feature": "self.weapon_slot", "encoding": "one_hot", "categories": list(range(9))},
@@ -301,6 +341,16 @@ class InferenceChecks(unittest.TestCase):
                             {"feature": "self.sprinting", "encoding": "one_hot", "categories": [0, 1]},
                             {"feature": "opponent.sprinting", "encoding": "one_hot", "categories": [1, 0]}]
                         definition["policy"].pop("observation_dim", None)
+                        if configured == "bow":
+                            definition["policy"] = {
+                                "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                                "ticks_per_action": 1, "requires": ["bow"],
+                                "observations": [{"feature": feature} for feature in FEATURES[89:]],
+                                "actions": [{"name": "use_item", "values": [False, True]}],
+                            }
+                            for player in definition["players"]:
+                                player["loadout"] = {"weapons": ["minecraft:bow"] + ["minecraft:air"] * 8,
+                                                     "selected": 0, "arrows": 64, "offhand": "minecraft:air"}
                         environment_path = Path(self.directory.name) / "encoded.json"
                         environment_path.write_text(json.dumps(definition))
                     main(["--environment", str(environment_path),
@@ -329,7 +379,8 @@ class InferenceChecks(unittest.TestCase):
 
 class TrainingChecks(unittest.TestCase):
     def test_optional_combat_and_win_speed_weights(self):
-        additions = {"missed_attack": -0.1, "shield_disabled": 2.0, "win_speed": 20.0}
+        additions = {"missed_attack": -0.1, "shield_disabled": 2.0, "win_speed": 20.0,
+                 "arrow_progress": 1.0}
         resolved = resolve_reward_weights({}, additions)
         for name, value in additions.items():
             self.assertEqual(resolved[name], value)
@@ -455,9 +506,10 @@ class TrainingChecks(unittest.TestCase):
     def test_native_build_contract_diagnostics(self):
         with Environment(1) as environment:
             self.assertTrue(Path(environment.build_info["library_path"]).is_file())
-            self.assertEqual(environment.build_info["abi"], 3)
+            self.assertEqual(environment.build_info["abi"], 4)
             self.assertEqual(len(environment.build_info["source_hash"]), 64)
-            self.assertEqual(environment.build_info["reward_inputs"], {"base": 9, "shaping": 5})
+            self.assertEqual(environment.build_info["reward_inputs"], {"base": 10, "shaping": 5})
+            self.assertEqual(environment.build_info["reward_totals"], {"base": 11, "shaping": 5})
         with mock.patch("simulator.training.environment.CATALOGUE_HASH", "0" * 64):
             with self.assertRaisesRegex(RuntimeError, "catalogue differs"):
                 Environment(1)
@@ -639,6 +691,126 @@ class TrainingChecks(unittest.TestCase):
                 self.assertEqual(frame["actors"][0]["armor"]["helmet"], "minecraft:diamond_helmet")
                 self.assertEqual(environment.scenario["players"][0]["loadout"]["weapons"], definition["players"][0]["loadout"]["weapons"])
                 np.testing.assert_array_equal(environment.reset()[0], initial[0])
+
+    def test_bow_native_adapter_draw_cancel_release_observations_and_replay(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+            "ticks_per_action": 1,
+            "observations": [{"feature": feature} for feature in (
+                "self.arrow_count_fraction", "self.bow_using", "self.bow_power_fraction",
+                "self.bow_equipped", "opponent.bow_equipped", "arrow.present")],
+            "actions": [{"name": "use_item", "values": [False, True]},
+                        {"name": "weapon", "values": [0, 1]}],
+            "requires": ["bow", "equipment"],
+        })
+        scene = {
+            "format": "minecraft_sim_environment", "version": 1, "minecraft": "26.3",
+            "name": "test-bow-adapter", "profile": "configured", "requires": ["movement", "bow"],
+            "rules": {"simulate_food": False, "natural_regeneration": False},
+            "bounds": {"min": [-6, 0, -4], "size": [13, 4, 9]},
+            "blocks": [{"from": [-6, 0, -4], "to": [6, 0, 4], "block": "minecraft:stone"}],
+            "players": [
+                {"position": [-2, 1, 0], "velocity": [0, -0.0784, 0], "yaw": -90, "pitch": 0,
+                 "on_ground": True, "health": 20, "absorption": 0, "attack_strength_ticks": 20,
+                 "loadout": {"weapons": ["minecraft:bow", "minecraft:iron_sword"],
+                             "selected": 0, "arrows": 1}},
+                {"position": [2, 1, 0], "velocity": [0, -0.0784, 0], "yaw": 90, "pitch": 0,
+                 "on_ground": True, "health": 20, "absorption": 0, "attack_strength_ticks": 20,
+                 "loadout": {"weapons": ["minecraft:iron_sword", "minecraft:air"],
+                             "selected": 0, "arrows": 0}},
+            ],
+            "policy": contract,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bow-environment.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            with Environment(1, environment=path, max_ticks=100) as environment:
+                columns = {entry["feature"]: index for index, entry in enumerate(contract["observations"])}
+                use_column = contract["action_names"].index("use_item")
+                weapon_column = contract["action_names"].index("weapon")
+                actions = np.zeros((1, 2, 2), dtype=np.int32)
+                initial = environment.observe()
+                self.assertAlmostEqual(initial[0, 0, columns["self.arrow_count_fraction"]], 1 / 64)
+                self.assertEqual(initial[0, 0, columns["self.bow_equipped"]], 1)
+                self.assertEqual(initial[0, 1, columns["self.bow_equipped"]], 0)
+                self.assertEqual(initial[0, 1, columns["arrow.present"]], 0)
+
+                actions[0, 0, use_column] = 1
+                for _ in range(20):
+                    observed, *_ = environment.step(actions)
+                self.assertEqual(observed[0, 0, columns["self.bow_using"]], 1)
+                self.assertGreater(observed[0, 0, columns["self.bow_power_fraction"]], 0.9)
+
+                cancel = actions.copy()
+                cancel[0, 0, use_column] = 0
+                cancel[0, 0, weapon_column] = 1
+                cancelled, *_ = environment.step(cancel)
+                self.assertEqual(cancelled[0, 0, columns["self.bow_using"]], 0)
+                self.assertEqual(cancelled[0, 0, columns["self.arrow_count_fraction"]], 1 / 64)
+                cancel_frame = environment.replay_frame()
+                self.assertEqual(cancel_frame["actors"][0]["weapon"], "minecraft:iron_sword")
+                self.assertEqual(cancel_frame["actors"][0]["controls"]["select_slot"], 1)
+                self.assertFalse(cancel_frame["actors"][0]["controls"]["use_item"])
+
+                reselect = actions.copy()
+                reselect[0, 0, weapon_column] = 0
+                environment.step(reselect)
+                for _ in range(20):
+                    observed, *_ = environment.step(actions)
+                release = actions.copy()
+                release[0, 0, use_column] = 0
+                observed, *_ = environment.step(release)
+                self.assertEqual(observed[0, 0, columns["self.arrow_count_fraction"]], 0)
+                self.assertEqual(observed[0, 1, columns["arrow.present"]], 1)
+                scenario = environment.episode_scenario(0)
+                self.assertEqual(scenario["players"][0]["loadout"]["arrows"], 1)
+                frame = environment.replay_frame()
+                self.assertEqual(frame["actors"][0]["weapon"], "minecraft:bow")
+                self.assertFalse(frame["actors"][0]["controls"]["use_item"])
+
+    # Source: BowItem.releaseUsing and AbstractArrow.tick supply speed/drop; aim rewards are simulator-only.
+    def test_bow_aim_rewards_compensate_drop_and_lead(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+            "ticks_per_action": 1,
+            "observations": [{"feature": "self.health_fraction"}],
+            "actions": [{"name": "use_item", "values": [False, True]}],
+            "requires": ["movement", "equipment", "bow"],
+        })
+        weights = {name: 0.0 for name in DEFAULT_REWARD_WEIGHTS}
+        weights["good_aim"] = 2.0
+        scores = {}
+        cases = (("flat", 0, -90, 64, 0), ("arc", -4, -90, 64, 0),
+                 ("away", -4, 90, 64, 0), ("empty", -4, -90, 0, 0),
+                 ("unled", -4, -90, 64, 1), ("led", -4, -77, 64, 1),
+                 ("wall", -4, -90, 64, 0))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bow-aim.json"
+            for name, pitch, yaw, arrows, target_speed in cases:
+                with self.subTest(case=name):
+                    definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+                    definition.update(profile="configured", policy=contract)
+                    definition["bounds"] = {"min": [-20, 0, -8], "size": [41, 12, 17]}
+                    definition["blocks"] = [{"from": [-20, 0, -8], "to": [20, 0, 8],
+                                             "block": "minecraft:stone"}]
+                    if name == "wall":
+                        definition["blocks"].append({"from": [0, 1, -8], "to": [0, 6, 8],
+                                                     "block": "minecraft:stone"})
+                    for player, position, facing in zip(definition["players"], (-16, 16), (yaw, 90)):
+                        player.update(position=[position, 1, 0], yaw=facing, pitch=pitch)
+                        player["loadout"] = {"weapons": ["minecraft:bow"], "selected": 0, "arrows": arrows}
+                    definition["players"][1]["velocity"][2] = target_speed
+                    path.write_text(json.dumps(definition), encoding="utf-8")
+                    with Environment(1, environment=path, max_ticks=100, weights=weights) as environment:
+                        _, rewards, terminated, truncated = environment.step(np.zeros((1, 2, 1), dtype=np.int32))
+                        self.assertFalse(terminated.any() or truncated.any())
+                        self.assertTrue(np.all((rewards >= 0) & (rewards <= 2 / 100)))
+                        self.assertAlmostEqual(environment.reward_totals()["good_aim"], float(rewards.sum()), places=6)
+                        scores[name] = float(rewards[0, 0])
+        self.assertGreater(scores["arc"], scores["flat"])
+        self.assertGreater(scores["led"], scores["unled"])
+        for name in ("away", "empty", "wall"):
+            self.assertEqual(scores[name], 0.0)
 
     def test_policy_contract_is_descriptive_not_a_schema_id(self):
         contract = from_legacy(SCHEMA_V2)
@@ -961,9 +1133,9 @@ class TrainingChecks(unittest.TestCase):
 
     def test_old_native_reward_abi_requires_rebuild(self):
         with mock.patch("simulator.training.environment.ctypes.CDLL") as library:
-            for version in (1, 2):
+            for version in (1, 2, 3):
                 library.return_value.mcsim_api_version.return_value = version
-                with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "rebuild for combat-event and win-speed rewards"):
+                with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "rebuild for arrow-progress rewards"):
                     Environment(1)
 
     def test_shield_block_reward_excludes_axes(self):
@@ -1160,7 +1332,9 @@ class TrainingChecks(unittest.TestCase):
             for row in metrics:
                 np.testing.assert_allclose(sum(row["reward_types"].values()), row["reward_total"], rtol=1e-6, atol=2e-5)
                 np.testing.assert_allclose(row["reward_mean"] * 16, row["reward_total"], rtol=1e-6, atol=2e-5)
-            for semantics in (None, "episode_shaping_budgets_v1", "health_fraction_damage_episode_shaping_budgets_v2"):
+            for semantics in (None, "episode_shaping_budgets_v1", "health_fraction_damage_episode_shaping_budgets_v2",
+                              "health_fraction_damage_combat_events_win_speed_v3",
+                              "opponent_damage_bow_aim_episode_budgets_v4"):
                 incompatible = {**checkpoint, "metadata": checkpoint["metadata"].copy()}
                 if semantics is None:
                     incompatible["metadata"].pop("reward_semantics")

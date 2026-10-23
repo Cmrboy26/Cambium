@@ -12,6 +12,7 @@ int mcsim_cuda_available(void);
 const char* mcsim_batch_info(void* handle);
 const char* mcsim_scenario(void* handle);
 const char* mcsim_replay_frame(void* handle, int world);
+/* ABI 4 requires ten base reward weights in the build-info reward_inputs order. */
 void* mcsim_create_schema(int worlds, int use_cuda, const char* path, int max_ticks,
                          uint64_t seed, const float* weights, int schema_version);
 void* mcsim_create_contract(int worlds, int use_cuda, const char* path, int max_ticks,
@@ -27,7 +28,7 @@ int mcsim_step(void* handle, const int32_t* actions, float* observations, float*
 int mcsim_set_reward_weights(void* handle, const float* weights);
 /* Last successful tick's reward contributions for selected players.
    mask has worlds*2 boolean entries in world/player order; null selects all.
-   totals has 12 doubles: the seven base types followed by five shaping types
+   ABI 4 totals has 16 doubles: the eleven base types followed by five shaping types
    in the build-info reward_totals order. Reset clears selected worlds' last
    step contributions, without changing the cumulative batch reward totals. */
 int mcsim_step_reward_totals(void* handle, const uint8_t* mask, double* totals);

@@ -44,7 +44,8 @@ final class ReplayTrace {
 			boolean on_ground, boolean sprinting, int pose, float health, float absorption,
 			int damage_cooldown, int hurt_time, int attack_strength_ticks, Controls controls, Outcome outcome,
 			String weapon, boolean shield_equipped, boolean using_shield, int shield_use_ticks, int shield_cooldown,
-			int item_use_delay, boolean attack_suppressed, JsonObject armor, Integer weapon_slot) {
+			int item_use_delay, boolean attack_suppressed, JsonObject armor, Integer weapon_slot,
+			int arrow_count, boolean bow_using, int bow_draw_ticks, float bow_power) {
 		Actor {
 			if (weapon == null) weapon = "minecraft:diamond_sword";
 			if (armor == null) armor = new JsonObject();
@@ -54,21 +55,28 @@ final class ReplayTrace {
 		Actor(int id, double[] position, double[] velocity, float yaw, float pitch, boolean ground, boolean sprint,
 				int pose, float health, float absorption, int cooldown, int hurt, int charge, Controls controls, Outcome outcome) {
 			this(id, position, velocity, yaw, pitch, ground, sprint, pose, health, absorption, cooldown, hurt, charge,
-					controls, outcome, "minecraft:diamond_sword", false, false, 0, 0, 0, false, new JsonObject(), -1);
+					controls, outcome, "minecraft:diamond_sword", false, false, 0, 0, 0, false, new JsonObject(), -1,
+					0, false, 0, 0);
 		}
 		Actor withLoadout(JsonObject loadout) {
 			return new Actor(id, position, velocity, yaw, pitch, on_ground, sprinting, pose, health, absorption,
 					damage_cooldown, hurt_time, attack_strength_ticks, controls, outcome,
 					loadout.getAsJsonArray("weapons").get(loadout.get("selected").getAsInt()).getAsString(),
 					loadout.get("offhand").getAsString().equals("minecraft:shield"), false, 0, 0, 0, false,
-					loadout.getAsJsonObject("armor").deepCopy(), loadout.get("selected").getAsInt());
+					loadout.getAsJsonObject("armor").deepCopy(), loadout.get("selected").getAsInt(),
+					loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0, false, 0, 0);
 		}
 		Actor at(double[] position, float yaw, float pitch) {
 			return new Actor(id, position, new double[]{0, 0, 0}, yaw, pitch, false, false, 0, health, absorption,
-					0, 0, attack_strength_ticks, controls, outcome, weapon, shield_equipped, false, 0, 0, 0, false, armor.deepCopy(), weapon_slot);
+					0, 0, attack_strength_ticks, controls, outcome, weapon, shield_equipped, false, 0, 0, 0, false, armor.deepCopy(), weapon_slot,
+					arrow_count, bow_using, bow_draw_ticks, bow_power);
 		}
 	}
-	record Frame(int tick, List<Actor> actors) {}
+	record Projectile(int owner, double[] position, double[] velocity, int age, boolean left_owner,
+			boolean in_ground, int in_ground_ticks, boolean critical) {}
+	record Frame(int tick, List<Actor> actors, List<Projectile> projectiles) {
+		Frame(int tick, List<Actor> actors) { this(tick, actors, List.of()); }
+	}
 
 	static final class Environment {
 		final JsonObject definition;
@@ -135,6 +143,11 @@ final class ReplayTrace {
 			for (JsonElement player : definition.getAsJsonArray("players")) {
 				loadouts.add(SimulationContract.loadout(player.getAsJsonObject(), definition.has("profile") ? definition.get("profile").getAsString() : "configured"));
 			}
+			boolean bowLoadout = loadouts.stream().anyMatch(loadout -> loadout.getAsJsonArray("weapons")
+					.contains(ReplayAnalysis.JSON.toJsonTree("minecraft:bow")));
+			boolean bowRequired = definition.has("requires")
+					&& definition.getAsJsonArray("requires").contains(ReplayAnalysis.JSON.toJsonTree("bow"));
+			if (bowLoadout && !bowRequired) throw new IOException("Bow loadouts require the bow capability");
 		}
 
 		void validateInitial(Frame frame, Gson gson) throws IOException {
@@ -143,6 +156,8 @@ final class ReplayTrace {
 				Actor actor = frame.actors().get(index);
 				JsonObject loadout = loadouts.get(index);
 				if (!actor.weapon().equals(loadout.getAsJsonArray("weapons").get(loadout.get("selected").getAsInt()).getAsString())
+						|| actor.arrow_count() != (loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0)
+						|| actor.bow_using() || actor.bow_draw_ticks() != 0 || actor.bow_power() != 0
 						|| actor.weapon_slot() >= 0 && actor.weapon_slot() != loadout.get("selected").getAsInt()
 						|| actor.shield_equipped() != loadout.get("offhand").getAsString().equals("minecraft:shield")
 						|| actor.using_shield() || actor.shield_use_ticks() != 0 || actor.shield_cooldown() != 0
@@ -211,13 +226,60 @@ final class ReplayTrace {
 			String line;
 			while ((line = reader.readLine()) != null) {
 				JsonObject raw = JsonParser.parseString(line).getAsJsonObject();
-				Frame frame = gson.fromJson(raw, Frame.class);
+				Frame decoded = gson.fromJson(raw, Frame.class);
+				List<Projectile> projectiles = new ArrayList<>();
+				if (raw.has("projectiles")) {
+					if (!raw.get("projectiles").isJsonArray()) throw new IOException("Frame projectiles must be an array");
+					for (JsonElement element : raw.getAsJsonArray("projectiles")) {
+						if (!element.isJsonObject()) throw new IOException("Projectile state must be an object");
+						JsonObject projectileJson = element.getAsJsonObject();
+						for (String field : List.of("owner", "position", "velocity", "age", "left_owner", "in_ground", "in_ground_ticks", "critical")) {
+							if (!projectileJson.has(field)) throw new IOException("Missing projectile field: " + field);
+						}
+						for (String field : List.of("left_owner", "in_ground", "critical")) {
+							JsonElement value = projectileJson.get(field);
+							if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean()) throw new IOException("Invalid projectile boolean: " + field);
+						}
+						for (String field : List.of("position", "velocity")) {
+							if (!projectileJson.get(field).isJsonArray() || projectileJson.getAsJsonArray(field).size() != 3) {
+								throw new IOException("Projectile " + field + " needs three numeric coordinates");
+							}
+							for (JsonElement coordinate : projectileJson.getAsJsonArray(field)) {
+								if (!coordinate.isJsonPrimitive() || !coordinate.getAsJsonPrimitive().isNumber()) {
+									throw new IOException("Projectile coordinates must be numeric");
+								}
+							}
+						}
+						int owner = SimulationContract.integer(projectileJson.get("owner"));
+						int age = SimulationContract.integer(projectileJson.get("age"));
+						int inGroundTicks = SimulationContract.integer(projectileJson.get("in_ground_ticks"));
+						Projectile projectile = gson.fromJson(projectileJson, Projectile.class);
+						if (projectile == null || owner < 0 || owner > 1 || age < 0 || age > 1000000
+								|| inGroundTicks < 0 || inGroundTicks > 1000000
+								|| !vector(projectile.position(), 29999984) || !vector(projectile.velocity(), 1000)) {
+							throw new IOException("Invalid projectile state at tick " + frames.size());
+						}
+						projectiles.add(projectile);
+					}
+				}
+			Frame frame = decoded == null ? null : new Frame(decoded.tick(), decoded.actors(), projectiles);
 				if (frame == null || frame.tick() != frames.size() || frame.actors() == null
 						|| frame.actors().size() != 2 || frames.size() > 100000) {
 					throw new IOException("Replay needs consecutive ticks from zero and exactly two actors per tick");
 				}
 				for (int index = 0; index < 2; index++) {
 					Actor actor = frame.actors().get(index);
+					if (actor == null) throw new IOException("Invalid actor state at tick " + frame.tick());
+					JsonObject actorJson = raw.getAsJsonArray("actors").get(index).getAsJsonObject();
+					for (String field : List.of("arrow_count", "bow_using", "bow_draw_ticks", "bow_power")) {
+						if (actorJson.has(field) && actorJson.get(field).isJsonNull()) throw new IOException("Invalid bow state field: " + field);
+					}
+					if (actorJson.has("arrow_count")) SimulationContract.integer(actorJson.get("arrow_count"));
+					if (actorJson.has("bow_draw_ticks")) SimulationContract.integer(actorJson.get("bow_draw_ticks"));
+					if (actorJson.has("bow_using") && (!actorJson.get("bow_using").isJsonPrimitive()
+							|| !actorJson.get("bow_using").getAsJsonPrimitive().isBoolean())) throw new IOException("Invalid bow_using flag");
+					if (actorJson.has("bow_power") && (!actorJson.get("bow_power").isJsonPrimitive()
+							|| !actorJson.get("bow_power").getAsJsonPrimitive().isNumber())) throw new IOException("Invalid bow_power value");
 					if (actor == null || actor.id() != index || !vector(actor.position(), 29999984)
 							|| !vector(actor.velocity(), 1000) || !Float.isFinite(actor.yaw())
 							|| !Float.isFinite(actor.pitch()) || Math.abs(actor.pitch()) > 90
@@ -229,13 +291,16 @@ final class ReplayTrace {
 							|| !SimulationContract.weaponItem(actor.weapon()) || actor.shield_use_ticks() < 0 || actor.shield_use_ticks() > 72000
 							|| actor.shield_cooldown() < 0 || actor.shield_cooldown() > 100 || actor.item_use_delay() < 0 || actor.item_use_delay() > 4
 							|| actor.using_shield() && (!actor.shield_equipped() || actor.shield_cooldown() > 0)
+							|| actor.arrow_count() < 0 || actor.arrow_count() > 64 || actor.bow_draw_ticks() < 0 || actor.bow_draw_ticks() > 72000
+							|| !Float.isFinite(actor.bow_power()) || actor.bow_power() < 0 || actor.bow_power() > 1
+							|| actor.bow_using() && !actor.weapon().equals("minecraft:bow")
+							|| !actor.bow_using() && (actor.bow_draw_ticks() != 0 || actor.bow_power() != 0)
 							|| !SimulationContract.weaponItem(actor.controls().weapon())
 							|| !Float.isFinite(actor.controls().yaw_delta())
 							|| !Float.isFinite(actor.controls().pitch_delta())) {
 						throw new IOException("Invalid actor state at tick " + frame.tick());
 					}
 					if (header.get("version").getAsInt() == 3) {
-						JsonObject actorJson = raw.getAsJsonArray("actors").get(index).getAsJsonObject();
 						if (actorJson.has("weapon_slot")) SimulationContract.integer(actorJson.get("weapon_slot"));
 						if (actorJson.getAsJsonObject("controls").has("select_slot")) {
 							SimulationContract.integer(actorJson.getAsJsonObject("controls").get("select_slot"));

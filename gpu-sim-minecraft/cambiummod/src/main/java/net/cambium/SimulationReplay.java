@@ -4,6 +4,7 @@ import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import java.util.HashSet;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
@@ -29,6 +31,12 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.Display.ItemDisplay;
+import net.minecraft.world.entity.projectile.arrow.Arrow;
+import net.minecraft.world.item.ItemDisplayContext;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -36,10 +44,22 @@ import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import net.cambium.mixin.DisplayAccess;
+import net.cambium.mixin.ItemDisplayAccess;
 
 final class SimulationReplay {
 
 	static Session active;
+
+	// Vanilla reference: BowItem#releaseUsing creates an owner-bound Arrow through Arrow(Level, LivingEntity, ...);
+	// the Session adapter records only arrows whose owner is one of its two actors.
+	static void trackArrow(Arrow arrow) {
+		Session current = active;
+		if (current == null || current.level != arrow.level()) return;
+		Entity owner = arrow.getOwner();
+		if (current.actors.stream().anyMatch(actor -> actor == owner)
+				|| current.live != null && current.live.ownsProjectile(owner)) current.ownedArrows.add(arrow);
+	}
 
 	static void initialize() {
 		LiveDuel.initialize();
@@ -195,6 +215,8 @@ final class SimulationReplay {
 		final Path analysisDirectory;
 		boolean absolute = true;
 		final List<ReplayPlayer> actors = new ArrayList<>();
+		final Set<Arrow> ownedArrows = new HashSet<>();
+		final List<RenderedProjectile> renderedProjectiles = new ArrayList<>();
 		BlockState[] originalBlocks;
 		int frame;
 		boolean paused = true;
@@ -206,6 +228,7 @@ final class SimulationReplay {
 		boolean buildArena = true;
 		List<ReplayTrace.Actor> initialActors;
 		LiveDuel live;
+		private record RenderedProjectile(ReplayTrace.Projectile sample, ItemDisplay entity) {}
 
 		Session(MinecraftServer server, ServerLevel level, UUID owner, ReplayTrace trace, Vec3 origin, Path analysisDirectory) {
 			this.server = server;
@@ -225,6 +248,7 @@ final class SimulationReplay {
 		void reset() {
 			finishAnalysis("partial", "reset_or_mode_change");
 			if (live != null) live.reset();
+			clearProjectiles();
 			removeActors();
 			frame = 0;
 			budget = 0;
@@ -268,7 +292,42 @@ final class SimulationReplay {
 				if (live != null && !buildArena) player.setOnGround(!level.noCollision(player, player.getBoundingBox().move(0, -0.001, 0)));
 			}
 			if (live != null) live.updateTargets();
+			else if (absolute) renderRecordedProjectiles(trace.frames.getFirst().projectiles());
 			tell("Replay origin: " + origin.x + ", " + origin.y + ", " + origin.z);
+		}
+
+		// Replay adapter invariant: discard only vanilla arrows captured from these actors and ItemDisplays created below.
+		void clearProjectiles() {
+			for (Arrow arrow : ownedArrows) if (!arrow.isRemoved()) arrow.discard();
+			ownedArrows.clear();
+			for (RenderedProjectile rendered : renderedProjectiles) if (!rendered.entity().isRemoved()) rendered.entity().discard();
+			renderedProjectiles.clear();
+		}
+
+		// Visual-only replay adapter: Display's constructor sets noPhysics (minecraft-26.3-src/net/minecraft/world/entity/Display.java:129-132),
+		// and ItemDisplay renders the recorded sample (Display.java:562-599); these are not vanilla projectile simulation or damage validation.
+		private void renderRecordedProjectiles(List<ReplayTrace.Projectile> projectiles) {
+			for (RenderedProjectile rendered : renderedProjectiles) if (!rendered.entity().isRemoved()) rendered.entity().discard();
+			renderedProjectiles.clear();
+			for (ReplayTrace.Projectile sample : projectiles) {
+				ItemDisplay display = new ItemDisplay(EntityTypes.ITEM_DISPLAY, level);
+				ItemDisplayAccess itemAccess = (ItemDisplayAccess) (Object) display;
+				itemAccess.cambium$setItemStack(new ItemStack(Items.ARROW));
+				itemAccess.cambium$setItemTransform(sample.in_ground() ? ItemDisplayContext.GROUND : ItemDisplayContext.FIXED);
+				display.setPos(origin.x + sample.position()[0], origin.y + sample.position()[1], origin.z + sample.position()[2]);
+				Vec3 velocity = new Vec3(sample.velocity()[0], sample.velocity()[1], sample.velocity()[2]);
+				if (velocity.lengthSqr() > 0) {
+					display.setYRot((float) (Math.atan2(velocity.x, velocity.z) * 180.0 / Math.PI));
+					display.setXRot((float) (Math.atan2(velocity.y, velocity.horizontalDistance()) * 180.0 / Math.PI));
+				}
+				display.setGlowingTag(true);
+				int ownerColor = sample.owner() == 0 ? sample.critical() ? 0x99F0D4 : 0x38A98A : sample.critical() ? 0xFFD28A : 0xC98221;
+				((DisplayAccess) (Object) display).cambium$setGlowColorOverride(ownerColor);
+				display.setCustomName(Component.literal("Replay arrow owner " + sample.owner() + ", age " + sample.age()
+						+ (sample.left_owner() ? ", left owner" : "") + (sample.in_ground() ? ", in ground " + sample.in_ground_ticks() : "")));
+				display.setCustomNameVisible(false);
+				if (level.addFreshEntity(display)) renderedProjectiles.add(new RenderedProjectile(sample, display));
+			}
 		}
 
 		BlockPos environmentPosition(int index) {
@@ -354,6 +413,7 @@ final class SimulationReplay {
 						actors.get(index).swingReplay();
 					}
 				}
+				renderRecordedProjectiles(sample.projectiles());
 			} else {
 				JsonObject phases = analysis == null ? null : new JsonObject();
 				if (phases != null) phases.add("before_prepare", analysisActors());
@@ -548,6 +608,7 @@ final class SimulationReplay {
 		void close() {
 			DuelHud.clear();
 			finishAnalysis("partial", "session_closed");
+			clearProjectiles();
 			if (live != null) live.close();
 			removeActors();
 			if (originalBlocks != null) {

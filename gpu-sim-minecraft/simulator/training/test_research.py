@@ -114,6 +114,11 @@ class PlanChecks(unittest.TestCase):
                 item = f"minecraft:{material}_{kind}"
                 resolved = resolve_players([{"loadout": {"weapons": [item]}}, {}])
                 self.assertEqual(resolved[0]["loadout"]["weapons"], [item])
+        bow = resolve_players([{"loadout": {"weapons": ["minecraft:bow"], "arrows": 17}}, {}])
+        self.assertEqual(bow[0]["loadout"]["weapons"], ["minecraft:bow"])
+        self.assertEqual(bow[0]["loadout"]["arrows"], 17)
+        self.assertEqual(bow[1]["loadout"]["arrows"], 0)
+        self.assertEqual(resolve_players([{}, {}])[0]["loadout"]["arrows"], 0)
         for material in ("leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite"):
             armor = {slot: f"minecraft:{material}_{slot}" for slot in ("helmet", "chestplate", "leggings", "boots")}
             resolved = resolve_players([{"loadout": {"armor": armor}}, {}])
@@ -121,7 +126,9 @@ class PlanChecks(unittest.TestCase):
         invalid = [None, {"weapons": ["minecraft:banana"]}, {"weapons": ["minecraft:iron_sword"] * 2},
                    {"weapons": []}, {"weapons": ["minecraft:air"] * 10}, {"selected": True}, {"selected": 1},
                    {"offhand": "minecraft:banana"}, {"armor": {"head": "minecraft:air"}},
-                   {"armor": {"boots": "minecraft:turtle_helmet"}}, {"unknown": True}]
+                   {"armor": {"boots": "minecraft:turtle_helmet"}}, {"arrows": 1}, {"arrows": True},
+                   {"arrows": -1},
+                   {"arrows": 65}, {"arrows": 1.5}, {"unknown": True}]
         for loadout in invalid:
             with self.subTest(loadout=loadout), self.assertRaises(ValueError):
                 resolve_players([{"loadout": loadout}, {}])
@@ -303,7 +310,7 @@ class SnapshotChecks(unittest.TestCase):
             (self.directory / f"{name}.json").write_text(json.dumps(value))
         self.path = self.directory / "plan.json"
         self.path.write_text(json.dumps(self.raw))
-        self.library = str(ROOT / "simulator/build-research/minecraft_sim_training.so")
+        self.library = str(load_library()._name)
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4", "--hidden-dim", "8",
                       "--rollout-steps", "3", "--epochs", "1", "--minibatch-size", "8", "--save-every", "1"]
 
@@ -333,6 +340,59 @@ class SnapshotChecks(unittest.TestCase):
         sampler.cache[0]["spawns"][0]["yaw"] = float("nan")
         with self.assertRaises(ValueError):
             sampler.players(0)
+
+    # Source: train.arguments defines mutually exclusive episode and global-update replay schedules.
+    def test_update_replay_argument_validation(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            for flags in (["--replay-every-updates", "-1"],
+                          ["--replay-every", "1", "--replay-every-updates", "2"],
+                          ["--replay-dir", "unused"]):
+                with self.subTest(flags=flags), self.assertRaises(SystemExit):
+                    arguments(flags)
+        options = arguments(["--replay-every-updates", "30", "--replay-dir", "unused"])
+        self.assertEqual(options.replay_every, 0)
+        self.assertEqual(options.replay_every_updates, 30)
+
+    # Source: research.run schedules once per global update boundary, including across stage changes and resume.
+    def test_update_replays_ignore_episode_count_and_resume_without_duplicates(self):
+        output = self.directory / "update-replays"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "3", "--output", str(output), "--replay-every-updates", "2"])
+        recordings = list((output / "replays").glob("*.jsonl"))
+        self.assertEqual(len(recordings), 1)
+        with recordings[0].open() as source:
+            self.assertEqual(json.loads(source.readline())["training"]["policy_update"], 2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--resume", str(output / "latest.pt"), "--library", self.library,
+                  "--updates", "1", "--replay-every-updates", "2"])
+        headers = []
+        for path in (output / "replays").glob("*.jsonl"):
+            with path.open() as source:
+                headers.append(json.loads(source.readline())["training"])
+        self.assertEqual(sorted(header["policy_update"] for header in headers), [2, 4])
+        self.assertTrue(all(header["completed_rounds"] > header["policy_update"] for header in headers))
+
+    def test_dashboard_replay_request_waits_for_episode_completion(self):
+        from simulator.training.replay_requests import create_request, read_request
+        from simulator.training.research import collect as collect_training
+
+        output = self.directory / "dashboard-request"
+
+        def collect_then_request(*args, **kwargs):
+            result = collect_training(*args, **kwargs)
+            create_request(output)
+            return result
+
+        with patch("simulator.training.research.collect", side_effect=collect_then_request), \
+                contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(output)])
+        request = read_request(output)
+        self.assertEqual(request["status"], "completed")
+        self.assertGreater(request["completed_rounds"], 0)
+        self.assertEqual(request["policy_update"], 1)
+        self.assertTrue((output / "replays" / request["replay"]).is_file())
+        config = json.loads((output / "config.json").read_text())
+        self.assertTrue(config["options"]["dashboard_replay_requests"])
 
     def test_named_saves_rolling_opponent_resume_evaluation_and_replay(self):
         self.raw["snapshots"] = [{"name": "final", "on_completion": True}]
@@ -595,8 +655,7 @@ class ResearchChecks(unittest.TestCase):
         self.directory.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, self.directory)
         self.path = self.directory / "plan.json"
-        research_library = ROOT / "simulator/build-research/minecraft_sim_training.so"
-        self.library = load_library(research_library if research_library.exists() else None)._build_info["library_path"]
+        self.library = load_library()._build_info["library_path"]
         self.path.write_text(json.dumps(short_plan()))
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4",
                       "--hidden-dim", "8", "--rollout-steps", "3", "--epochs", "1",

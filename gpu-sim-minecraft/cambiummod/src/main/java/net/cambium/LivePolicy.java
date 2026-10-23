@@ -9,15 +9,21 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Comparator;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.BowItem;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.projectile.arrow.Arrow;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
+import net.cambium.mixin.ArrowStateAccess;
 import net.cambium.ObservationEncoder.Equipment;
 import net.cambium.ObservationEncoder.Weapon;
 
@@ -90,6 +96,12 @@ final class LivePolicy implements AutoCloseable {
 
 	int observationCount() { return contract == null ? 22 : contract.observationCount(); }
 
+	boolean fullBowBridgeReady() {
+		return contract != null && contract.supportsFullBowContract() && loadouts != null && loadouts.size() == 2
+				&& loadouts.stream().allMatch(loadout -> loadout.getAsJsonArray("weapons")
+						.contains(ReplayAnalysis.JSON.toJsonTree("minecraft:bow")) && loadout.get("arrows").getAsInt() > 0);
+	}
+
 	ReplayTrace.Controls[] mapActions(JsonObject response, String session, int tick) {
 		if (contract == null) return actions(response, session, tick);
 		if (integer(response.get("protocol")) != 1 || !session.equals(response.get("session").getAsString())
@@ -106,28 +118,75 @@ final class LivePolicy implements AutoCloseable {
 		var ownVelocity = source.getDeltaMovement();
 		var targetVelocity = target.getDeltaMovement();
 		var own = new ObservationEncoder.State(source.getX(), source.getY(), source.getZ(), source.getHealth(), source.getYRot(), source.getXRot(),
-				source.isAlive(), ownVelocity.x, ownVelocity.y, ownVelocity.z);
+				source.isAlive(), ownVelocity.x, ownVelocity.y, ownVelocity.z, bowState(source));
 		var other = new ObservationEncoder.State(target.getX(), target.getY(), target.getZ(), target.getHealth(), target.getYRot(), target.getXRot(),
-				target.isAlive(), targetVelocity.x, targetVelocity.y, targetVelocity.z);
+				target.isAlive(), targetVelocity.x, targetVelocity.y, targetVelocity.z, bowState(target));
 		float[] base = ObservationEncoder.observe(own, other, rays);
 		if (contract == null) return base;
 		float[] catalogue = java.util.Arrays.copyOf(base, SimulationContract.FEATURES.size());
 		catalogue[22] = weaponIsAxe(source) ? 1 : 0;
 		catalogue[23] = weaponIsAxe(target) ? 1 : 0;
-		catalogue[24] = source.isUsingItem() ? 1 : 0;
-		catalogue[25] = target.isUsingItem() ? 1 : 0;
+		catalogue[24] = usingShield(source) ? 1 : 0;
+		catalogue[25] = usingShield(target) ? 1 : 0;
 		int cooldown = shieldCooldown(source);
 		catalogue[26] = cooldown > 0 ? 1 : 0;
 		catalogue[27] = source instanceof ReplayPlayer bot && bot.observedOpponentDisabled() ? 1 : 0;
 		catalogue[28] = Math.min(cooldown / 100.0F, 1);
 		catalogue[29] = source.getAttackStrengthScale(0.5F);
-		catalogue[30] = source.isUsingItem() ? Math.min(source.getTicksUsingItem() / 5.0F, 1) : 0;
+		catalogue[30] = usingShield(source) ? Math.min(source.getTicksUsingItem() / 5.0F, 1) : 0;
 		catalogue[31] = source.getInventory().getSelectedSlot();
 		catalogue[32] = target.getInventory().getSelectedSlot();
 		ObservationEncoder.velocityObservation(catalogue, own, other);
 		ObservationEncoder.movementObservation(catalogue, source.onGround(), target.onGround(), source.isSprinting(), target.isSprinting());
 		ObservationEncoder.equipment(catalogue, equipment(source), equipment(target), weaponSlots(source));
+		ObservationEncoder.bowObservation(catalogue, own, other, nearestOpponentArrow(source, target));
 		return contract.project(catalogue);
+	}
+
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, getUseItem (3589-3590);
+	// item-use identity, rather than the generic using flag, controls shield observations.
+	static boolean usingShield(ServerPlayer player) {
+		return player.isUsingItem() && player.getUseItem().is(Items.SHIELD);
+	}
+
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/item/BowItem.java, use (95-103), and
+	// minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, getTicksUsingItem (3597-3598).
+	private static ObservationEncoder.BowState bowState(ServerPlayer player) {
+		boolean using = usingBow(player);
+		int drawTicks = using ? player.getTicksUsingItem() : 0;
+		return new ObservationEncoder.BowState(ordinaryArrowCount(player), using, drawTicks,
+				using ? BowItem.getPowerForTime(drawTicks) : 0, player.getMainHandItem().is(Items.BOW));
+	}
+
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/item/BowItem.java, use (95-103), which
+	// checks Player#getProjectile; this feature intentionally counts only ordinary finite ARROW stacks.
+	private static int ordinaryArrowCount(ServerPlayer player) {
+		int count = 0;
+		for (ItemStack stack : player.getInventory().getNonEquipmentItems()) {
+			if (stack.is(Items.ARROW)) count += stack.getCount();
+		}
+		return Math.min(count, 64);
+	}
+
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/entity/projectile/arrow/AbstractArrow.java,
+	// tick (173-269), isInGround (358), and getPickupItemStackOrigin (669); Projectile#getOwner (88-89).
+	private static ObservationEncoder.ArrowState nearestOpponentArrow(ServerPlayer source, ServerPlayer target) {
+		AABB search = source.getBoundingBox().inflate(50.0);
+		Arrow nearest = source.level().getEntitiesOfClass(Arrow.class, search, arrow -> arrow.isAlive()
+				&& arrow.getOwner() == target && arrow.getPickupItemStackOrigin().is(Items.ARROW)
+				&& !((ArrowStateAccess) (Object) arrow).cambium$isInGround()
+				&& arrow.getDeltaMovement().lengthSqr() > 0)
+			.stream().filter(arrow -> arrow.position().distanceToSqr(source.position()) <= 2500.0)
+			.min(Comparator.comparingDouble(arrow -> arrow.position().distanceToSqr(source.position()))).orElse(null);
+		if (nearest == null) return null;
+		Vec3 velocity = nearest.getDeltaMovement();
+		return new ObservationEncoder.ArrowState(nearest.getX(), nearest.getY(), nearest.getZ(), velocity.x, velocity.y, velocity.z);
+	}
+
+	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, getUseItem (3589-3590);
+	// `isUsingItem` alone also covers shields, so only the actual main-hand bow counts.
+	static boolean usingBow(ServerPlayer player) {
+		return player.isUsingItem() && player.getUseItem().is(Items.BOW);
 	}
 
 	private static Weapon[] weaponSlots(ServerPlayer player) {

@@ -13,6 +13,12 @@ from urllib.request import Request, urlopen
 
 from simulator.training.dashboard import RunStore, make_server
 from simulator.training.metrics import CATALOG
+from simulator.training.replay_requests import (
+    ReplayRequestConflict,
+    ReplayRequestUnsupported,
+    finish_request,
+    requested_replay_round,
+)
 
 
 class DashboardChecks(unittest.TestCase):
@@ -60,6 +66,8 @@ class DashboardChecks(unittest.TestCase):
         page = PageStructure()
         page.feed(Path(__file__).with_name("dashboard").joinpath("index.html").read_text(encoding="utf-8"))
         self.assertEqual(len(page.ids), len(set(page.ids)), "Dashboard IDs must remain unique")
+        self.assertIn("replay-request", page.ids)
+        self.assertIn("replay-request-status", page.ids)
         ordered = ["run-title", "milestone-browser", "milestone-strip", "milestone-details", "milestone-metrics",
                  "run-identity", "run-context", "stat-update", "stat-remaining",
                    "results", "outcomes-title", "optimization-title", "runtime-title", "curriculum",
@@ -113,7 +121,8 @@ const document = {getElementById(id) {if (!nodes.has(id)) nodes.set(id,new Node(
     addEventListener() {}, dispatchEvent() {}};
 const context = vm.createContext({document, Intl, CustomEvent:class {}, setInterval() {}, cancelAnimationFrame() {}});
 vm.runInContext(fs.readFileSync(path.join(process.argv[1],'dashboard.js'),'utf8'), context);
-for (const [name,label] of [['missed_attack','Missed attack'],['shield_disabled','Shield disabled'],['win_speed','Win speed']]) {
+for (const [name,label] of [['missed_attack','Missed attack'],['shield_disabled','Shield disabled'],['win_speed','Win speed'],
+    ['arrow_progress','Arrow progress']]) {
     assert.equal(vm.runInContext(`rewardTypes.find(([key])=>key==='${name}')?.[1]`, context),label);
 }
 const conditionCharts=[];
@@ -458,6 +467,16 @@ assert.equal(replaySample(frames, 2).actors[0].health, 10);
 assert.deepEqual(replaySample(frames, -2).actors[0].position, [0,1,0]);
 assert.deepEqual(replaySample(frames, 100).actors[0].position, [2,1,0]);
 assert.equal(replaySample([], 0), null);
+assert.deepEqual(middle.projectiles, []);
+const shot = {id: 0, owner: 1, age: 1, position: [0,2,0], velocity: [3,0,0], in_ground: false};
+frames[0].projectiles = [shot];
+frames[1].projectiles = [{...shot, age: 3, position: [6,2,0]}];
+assert.deepEqual(replaySample(frames, 1).projectiles[0].position, [3,2,0]);
+frames[1].projectiles[0].age = 0;
+assert.deepEqual(replaySample(frames, 1).projectiles[0].position, [0,2,0], 'Reused slots must not interpolate unrelated shots');
+frames[0].projectiles[0].in_ground = true;
+frames[1].projectiles[0].age = 3;
+assert.deepEqual(replaySample(frames, 1).projectiles[0].position, [0,2,0], 'Embedded arrows remain stationary');
 const scenario = {players:[{loadout:{weapons:['minecraft:iron_sword','minecraft:netherite_axe'],
     selected:0,offhand:'minecraft:shield',armor:{helmet:'minecraft:diamond_helmet'}}}]};
 const [player] = replayPlayers(scenario, [{...frames[0].actors[0],weapon:'minecraft:netherite_axe',shield_equipped:false}]);
@@ -1215,8 +1234,31 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
         identity = self.store.list_runs()[0]["id"]
         self.assertEqual(self.store.list_replays(identity)[0]["name"], path.name)
 
-    def test_http_read_only_routes(self):
+    def test_dashboard_replay_request_lifecycle(self):
+        identity = self.store.list_runs()[0]["id"]
+        with self.assertRaises(ReplayRequestUnsupported):
+            self.store.request_replay(identity)
+        (self.run_dir / "config.json").write_text(
+            json.dumps({"options": {"dashboard_replay_requests": True}}), encoding="utf-8")
+        self.assertEqual(self.store.replay_request(identity), {"supported": True, "request": None})
+        request = self.store.request_replay(identity)
+        self.assertEqual(request["status"], "pending")
+        with self.assertRaises(ReplayRequestConflict):
+            self.store.request_replay(identity)
+        self.assertIsNone(requested_replay_round(100, 100, []))
+        self.assertEqual(requested_replay_round(100, 101, []), 101)
+        self.assertEqual(requested_replay_round(100, 101, [100, 101]), 100)
+        self.assertTrue(finish_request(self.run_dir, request["request_id"], "completed",
+                                       replay="research-000000101.jsonl", completed_rounds=101))
+        status = self.store.replay_request(identity)
+        self.assertEqual(status["request"]["status"], "completed")
+        self.assertEqual(status["request"]["replay"], "research-000000101.jsonl")
+        self.assertNotEqual(self.store.request_replay(identity)["request_id"], request["request_id"])
+
+    def test_http_replay_request_routes(self):
         self.write_replay()
+        (self.run_dir / "config.json").write_text(
+            json.dumps({"options": {"dashboard_replay_requests": True}}), encoding="utf-8")
         with make_server(self.store, 0) as server:
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
@@ -1231,6 +1273,14 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
                     replay_id = json.load(response)["replays"][0]["id"]
                 with urlopen(base + f"/api/runs/{identity}/replays/{replay_id}", timeout=3) as response:
                     self.assertEqual(len(json.load(response)["frames"]), 3)
+                with urlopen(base + f"/api/runs/{identity}/replay-request", timeout=3) as response:
+                    status = json.load(response)
+                    self.assertTrue(status["supported"])
+                    self.assertIsNone(status["request"])
+                request_url = base + f"/api/runs/{identity}/replay-request"
+                with urlopen(Request(request_url, data=b"", method="POST"), timeout=3) as response:
+                    self.assertEqual(response.status, 202)
+                    self.assertEqual(json.load(response)["request"]["status"], "pending")
                 for route, content_type in (("/", "text/html"), ("/dashboard.css", "text/css"),
                                             ("/dashboard.js", "text/javascript"),
                                             ("/arena.js", "text/javascript"),
@@ -1246,6 +1296,7 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
                 for request, status in ((base + "/api/runs/unknown/metrics", 404),
                                         (base + f"/api/runs/{identity}/replays/unknown", 404),
                                         (base + "/../config.json", 404),
+                                        (Request(request_url, data=b"", method="POST"), 409),
                                         (Request(base + "/api/runs", b"{}"), 405)):
                     with self.assertRaises(HTTPError) as failure:
                         urlopen(request, timeout=3)

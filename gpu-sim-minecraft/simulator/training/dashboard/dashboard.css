@@ -232,6 +232,10 @@ legend { float: left; padding: 0; margin-right: 10px; color: var(--muted); }
 .replay-controls { padding: 10px 12px; border-top: 1px solid var(--line); font-size: 11px; }
 .replay-selection { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .replay-selection select { flex: 1; width: 0; min-width: 0; font-size: 11px; }
+.replay-request-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.replay-controls button.replay-request-button { width: auto; min-height: 32px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.replay-request-button span { font-size: 11px; }
+#replay-request-status { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .replay-controls button { width: 32px; height: 32px; min-height: 32px; padding: 6px; display: inline-grid; place-items: center; flex-shrink: 0; }
 .replay-controls button svg { width: 17px; height: 17px; }
 .replay-controls :disabled { opacity: 0.45; cursor: default; }

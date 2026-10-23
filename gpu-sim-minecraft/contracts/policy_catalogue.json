@@ -29,7 +29,11 @@
     "self.weapon_slot_8.present", "self.weapon_slot_8.is_axe", "self.weapon_slot_8.damage_fraction", "self.weapon_slot_8.speed_fraction",
     "self.velocity.x", "self.velocity.y", "self.velocity.z",
     "relative.velocity.x", "relative.velocity.y", "relative.velocity.z",
-    "self.on_ground", "opponent.on_ground", "self.sprinting", "opponent.sprinting"
+    "self.on_ground", "opponent.on_ground", "self.sprinting", "opponent.sprinting",
+    "self.arrow_count_fraction", "self.bow_using", "self.bow_power_fraction",
+    "self.bow_equipped", "opponent.bow_equipped", "opponent.bow_using",
+    "arrow.present", "arrow.relative.x", "arrow.relative.y", "arrow.relative.z",
+    "arrow.relative.velocity.x", "arrow.relative.velocity.y", "arrow.relative.velocity.z"
   ],
   "actions": [
     {"name": "movement", "kind": "movement"},
@@ -40,9 +44,10 @@
     {"name": "pitch", "kind": "look"},
     {"name": "weapon", "kind": "weapon"},
     {"name": "shield", "kind": "boolean"},
-    {"name": "sneak", "kind": "boolean"}
+    {"name": "sneak", "kind": "boolean"},
+    {"name": "use_item", "kind": "boolean"}
   ],
   "movements": ["neutral", "forward", "forward_right", "right", "backward_right", "backward", "backward_left", "left", "forward_left"],
-  "capabilities": ["movement", "melee", "equipment", "shield", "armor"],
+  "capabilities": ["movement", "melee", "equipment", "shield", "armor", "bow"],
   "armor_slots": ["boots", "leggings", "chestplate", "helmet"]
 }

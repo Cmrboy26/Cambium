@@ -3,6 +3,10 @@
 	"package": "net.cambium.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
+		"ArrowStateAccess",
+		"ArrowTrackingMixin",
+		"DisplayAccess",
+		"ItemDisplayAccess",
 		"LivingEntityRecordingAccessor",
 		"LocalPlayerRecordingAccessor",
 		"LocalPlayerRecordingMixin",

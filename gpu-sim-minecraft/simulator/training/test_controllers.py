@@ -42,6 +42,37 @@ def policy(observations=None, actions=None):
     })
 
 
+def archer_policy(use_head="use_item", velocity=True, bow_slot=False):
+    observation_descriptors = [
+        {"feature": "relative.z", "scale": 2},
+        {"feature": "self.bow_equipped", "encoding": "one_hot", "categories": [0, 1], "scale": -2},
+        {"feature": "relative.x", "scale": -1},
+        {"feature": "self.arrow_count_fraction", "scale": 3},
+        {"feature": "self.yaw_fraction"},
+        {"feature": "relative.y"},
+        {"feature": "self.pitch_fraction"},
+    ]
+    if velocity:
+        observation_descriptors.extend([
+            {"feature": "relative.velocity.z", "scale": -3},
+            {"feature": "relative.velocity.x", "scale": 2},
+            {"feature": "relative.velocity.y", "scale": -1},
+        ])
+    actions = [
+        {"name": "pitch", "values": [-20, -10, 0, 10, 20]},
+        {"name": "yaw", "values": [-90, -60, -45, 0, 45, 60, 90]},
+        {"name": "movement", "values": ["neutral", "forward"]},
+    ]
+    if use_head is not None:
+        actions.insert(1, {"name": use_head, "values": [True, False]})
+    if bow_slot:
+        actions.append({"name": "weapon", "values": [0, 1]})
+    return validate_contract({
+        "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+        "ticks_per_action": 1, "observations": observation_descriptors, "actions": actions, "requires": ["bow"],
+    })
+
+
 def observations(contract, count=3, **features):
     result = np.zeros((count, contract["observation_dim"]), dtype=np.float32)
     catalogue = np.zeros((count, len(FEATURES)), dtype=np.float32)
@@ -378,6 +409,77 @@ class ScriptedChecks(unittest.TestCase):
             with self.assertRaises(ValueError):
                 controller.load_state_dict(invalid)
         self.assertEqual(controller.state_dict()["ticks"], [0, 0])
+
+    def test_archer_reordered_scaled_aim_and_per_actor_release_state(self):
+        contract = archer_policy()
+        definition = {"type": "scripted", "controller": "archer"}
+        controller = create_controller(definition, contract, 3, seed=7)
+        obs = observations(contract, 2, **{
+            "relative.x": [1, -1], "relative.y": [0, 0], "relative.z": [1, 1],
+            "self.bow_equipped": [1, 1], "self.arrow_count_fraction": [0.25, 0.25],
+            "self.yaw_fraction": [0, 0], "self.pitch_fraction": [0, 0],
+            "relative.velocity.x": [1, -1], "relative.velocity.y": [0, 0],
+            "relative.velocity.z": [0, 0],
+        })
+        self.assertEqual(controller.describe["draw_ticks"], 20)
+        for _ in range(20):
+            actions = controller.act(obs, indices=[2, 0])
+            np.testing.assert_array_equal(decoded(contract, actions, "use_item"), [True, True])
+            np.testing.assert_array_equal(decoded(contract, actions, "yaw"), [-60, 60])
+            np.testing.assert_array_equal(decoded(contract, actions, "movement"), ["neutral", "neutral"])
+        saved = controller.state_dict()
+        self.assertEqual(saved["draw_ticks"], [20, 0, 20])
+        clone = create_controller(definition, contract, 3, seed=7)
+        clone.load_state_dict(saved)
+        controller.reset(np.array([False, False, True]))
+        self.assertEqual(controller.state_dict()["draw_ticks"], [20, 0, 0])
+        np.testing.assert_array_equal(decoded(contract, controller.act(obs, indices=[0, 2]), "use_item"),
+                                      [False, True])
+        np.testing.assert_array_equal(decoded(contract, clone.act(obs, indices=[2, 0]), "use_item"),
+                                      [False, False])
+        invalid = deepcopy(saved)
+        invalid["draw_ticks"][0] = 21
+        with self.assertRaisesRegex(ValueError, "draw ticks"):
+            clone.load_state_dict(invalid)
+
+    def test_archer_legacy_alias_ammo_neutrality_and_slot_cancellation(self):
+        contract = archer_policy(use_head="shield", velocity=False, bow_slot=True)
+        controller = create_controller({"type": "scripted", "controller": "archer",
+                                        "options": {"bow_slot": 1}}, contract, 1)
+
+        def sample(equipped, arrows):
+            return observations(contract, 1, **{
+                "relative.x": [1], "relative.y": [0], "relative.z": [1],
+                "self.bow_equipped": [equipped], "self.arrow_count_fraction": [arrows],
+                "self.yaw_fraction": [0], "self.pitch_fraction": [0],
+            })
+
+        empty = controller.act(sample(1, 0))
+        self.assertEqual(decoded(contract, empty, "shield").tolist(), [False])
+        self.assertEqual(decoded(contract, empty, "yaw").tolist(), [0])
+        self.assertEqual(decoded(contract, empty, "weapon").tolist(), [1])
+        self.assertEqual(controller.state_dict()["draw_ticks"], [0])
+        for _ in range(19):
+            self.assertTrue(decoded(contract, controller.act(sample(1, 1)), "shield")[0])
+        cancelled = controller.act(sample(0, 1))
+        self.assertFalse(decoded(contract, cancelled, "shield")[0])
+        self.assertEqual(controller.state_dict()["draw_ticks"], [0])
+        self.assertTrue(decoded(contract, controller.act(sample(1, 1)), "shield")[0])
+        for _ in range(19):
+            self.assertTrue(decoded(contract, controller.act(sample(1, 1)), "shield")[0])
+        self.assertFalse(decoded(contract, controller.act(sample(1, 1)), "shield")[0])
+        self.assertEqual(controller.state_dict()["draw_ticks"], [0])
+
+        with self.assertRaisesRegex(ValueError, "use_item or legacy shield"):
+            create_controller({"type": "scripted", "controller": "archer"},
+                              archer_policy(use_head=None), 1)
+        raw = archer_policy()
+        raw.pop("observation_dim")
+        raw.pop("action_names")
+        raw.pop("action_sizes")
+        raw["actions"].append({"name": "shield", "values": [False, True]})
+        with self.assertRaisesRegex(ValueError, "both shield and use_item"):
+            validate_contract(raw)
 
     def test_registered_and_explicit_import_factories_receive_contract(self):
         contract = policy()

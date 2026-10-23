@@ -22,9 +22,11 @@ function renderEquipment(scenario, playback = false) {
         const loadout = playerLoadout(player, scenario.profile);
         const shield = playback && player.shield_cooldown > 0 ? ` / Shield disabled (${player.shield_cooldown} ticks)`
             : playback && player.using_shield ? " / Shield raised" : "";
-        state.textContent = `${Number((player.health ?? 20).toFixed(1))} HP / ${playback ? "Position" : "Spawn"} ${player.position?.map((value) => Number(value.toFixed(1))).join(", ") ?? "--"}${shield}`;
+        const draw = playback && player.bow_using ? ` / Draw ${Math.round((player.bow_power ?? 0) * 100)}%` : "";
+        state.textContent = `${Number((player.health ?? 20).toFixed(1))} HP / ${playback ? "Position" : "Spawn"} ${player.position?.map((value) => Number(value.toFixed(1))).join(", ") ?? "--"}${shield}${draw}`;
         const fields = [["Main hand", itemLabel(loadout.weapons[loadout.selected]), true],
             ["Weapon slots", loadout.weapons.map(itemLabel).join(" / ")], ["Offhand", itemLabel(loadout.offhand)]];
+        if (loadout.weapons.includes("minecraft:bow")) fields.push(["Arrows", String(player.arrow_count ?? loadout.arrows ?? 0)]);
         for (const [slot, label] of [["helmet", "Helmet"], ["chestplate", "Chestplate"], ["leggings", "Leggings"], ["boots", "Boots"]]) {
             fields.push([label, itemLabel(loadout.armor[slot])]);
         }
@@ -85,7 +87,8 @@ class ArenaViewer {
         this.content = new THREE.Group();
         this.scene.add(this.content);
         this.players = new THREE.Group();
-        this.content.add(this.players);
+        this.projectiles = new THREE.Group();
+        this.content.add(this.players, this.projectiles);
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(host);
         this.renderer.domElement.addEventListener("webglcontextlost", (event) => {
@@ -122,7 +125,8 @@ class ArenaViewer {
         materials.forEach((material) => { material.map?.dispose(); material.dispose(); });
         this.content.clear();
         this.players.clear();
-        this.content.add(this.players);
+        this.projectiles.clear();
+        this.content.add(this.players, this.projectiles);
         this.playerSignature = null;
     }
 
@@ -198,7 +202,12 @@ class ArenaViewer {
         const weapon = loadout.weapons[loadout.selected];
         actor.add(weaponGroup);
         const weaponPart = (size, position, color) => { const part = cube(size, position, color); weaponGroup.attach(part); };
-        if (weapon && weapon !== "minecraft:air") {
+        if (weapon === "minecraft:bow") {
+            for (const [height, offset] of [[0.82, 0], [1.02, 0.08], [1.22, 0]]) {
+                weaponPart([0.055, 0.24, 0.055], [-0.37, height, 0.26 + offset], 0x816346);
+            }
+            weaponPart([0.018, 0.64, 0.018], [-0.37, 1.02, 0.18], 0xd7dce0);
+        } else if (weapon && weapon !== "minecraft:air") {
             weaponPart([0.055, 0.43, 0.055], [-0.37, 0.94, 0.26], 0x816346);
             if (weapon.endsWith("_axe")) weaponPart([0.28, 0.24, 0.08], [-0.3, 1.2, 0.26], equipmentColor(weapon, 0xc9d0d4));
             else {
@@ -249,9 +258,29 @@ class ArenaViewer {
             actor.rotation.y = -THREE.MathUtils.degToRad(player.yaw ?? 0);
             actor.userData.head.rotation.x = THREE.MathUtils.degToRad(player.pitch ?? 0);
             actor.userData.shieldGroup.position.set(player.using_shield ? -0.2 : 0, 0, player.using_shield ? 0.15 : 0);
-            actor.userData.weaponGroup.rotation.x = player.controls?.attack ? 0.45 : 0;
+            actor.userData.weaponGroup.rotation.x = player.bow_using ? -0.55 : player.controls?.attack ? 0.45 : 0;
             actor.scale.y = player.pose === 1 ? 0.85 : player.pose === 2 ? 0.4 : 1;
             actor.visible = player.health === undefined || player.health > 0;
+        });
+        this.draw();
+    }
+
+    // Source: simulator/apps/replay.hpp records authoritative arrow positions; this renders them without physics.
+    setProjectiles(arrows = []) {
+        while (this.projectiles.children.length < arrows.length) {
+            this.projectiles.add(new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(), 0.85,
+                playerColors[0], 0.2, 0.14));
+        }
+        this.projectiles.children.forEach((mesh, index) => {
+            const arrow = arrows[index];
+            mesh.visible = Boolean(arrow);
+            if (!arrow) return;
+            mesh.position.fromArray(arrow.position);
+            const direction = new THREE.Vector3(...arrow.velocity);
+            if (direction.lengthSq() > 1e-12) mesh.setDirection(direction.normalize());
+            else if (mesh.userData.id !== arrow.id || arrow.age < mesh.userData.age) mesh.setDirection(new THREE.Vector3(0, -1, 0));
+            mesh.setColor(playerColors[arrow.owner] ?? 0x68746c);
+            mesh.userData = { id: arrow.id, age: arrow.age };
         });
         this.draw();
     }
@@ -341,10 +370,14 @@ document.getElementById("arena-solid-walls").addEventListener("change", (event) 
 const replaySelect = document.getElementById("replay");
 const timeline = document.getElementById("replay-timeline");
 const replayStatus = document.getElementById("replay-status");
+const replayRequestButton = document.getElementById("replay-request");
+const replayRequestStatus = document.getElementById("replay-request-status");
 const arenaState = document.getElementById("arena-state");
 let runId = "";
 let spawnScenario = {};
 let replay = null;
+let replayRequestTicket = 0;
+let loadedReplayRequest = "";
 let tick = 0;
 let playing = false;
 let animation;
@@ -381,6 +414,7 @@ function showTick(value) {
     const sample = replaySample(frames, tick);
     const players = replayPlayers(replay.header.environment, sample.actors);
     viewer?.setPlayers(players, replay.header.environment.profile);
+    viewer?.setProjectiles(sample.projectiles);
     if (equipmentTick !== sample.index) {
         renderEquipment({ ...replay.header.environment, players }, true);
         equipmentTick = sample.index;
@@ -433,17 +467,81 @@ function restoreSpawn(preserveCamera = true) {
 
 async function refreshReplays() {
     const ticket = ++listRequest;
-    if (!runId) return;
+    if (!runId) return [];
     try {
         const data = await replayJson(`/api/runs/${encodeURIComponent(runId)}/replays`);
-        if (ticket !== listRequest) return;
+        if (ticket !== listRequest) return [];
         const selected = replaySelect.value;
         replaySelect.replaceChildren(new Option("Spawn state", ""), ...data.replays.map((entry) => new Option(entry.name, entry.id)));
         replaySelect.value = data.replays.some((entry) => entry.id === selected) ? selected : "";
         if (selected && !replaySelect.value) restoreSpawn();
         if (!replaySelect.value) replayStatus.textContent = data.replays.length ? `${data.replays.length} recordings available` : "No recordings found for this run.";
+        return data.replays;
     } catch (error) {
         if (ticket === listRequest) replayStatus.textContent = error.message;
+        return [];
+    }
+}
+
+async function refreshReplayRequest() {
+    const ticket = ++replayRequestTicket;
+    const identity = runId;
+    if (!identity) {
+        replayRequestButton.disabled = true;
+        replayRequestStatus.textContent = "Select a training run to request a replay.";
+        return;
+    }
+    try {
+        const data = await replayJson(`/api/runs/${encodeURIComponent(identity)}/replay-request`);
+        if (ticket !== replayRequestTicket || identity !== runId) return;
+        if (!data.supported) {
+            replayRequestButton.disabled = true;
+            replayRequestStatus.textContent = "Replay requests are available on runs started with the updated trainer.";
+            return;
+        }
+        const request = data.request;
+        replayRequestButton.disabled = request?.status === "pending";
+        if (!request) {
+            loadedReplayRequest = "";
+            replayRequestStatus.textContent = "A replay will be captured after the next completed duel.";
+        } else if (request.status === "pending") {
+            replayRequestStatus.textContent = "Replay requested; waiting for a duel to finish.";
+        } else if (request.status === "completed") {
+            replayRequestStatus.textContent = `Replay saved after round ${request.completed_rounds}.`;
+            if (loadedReplayRequest !== request.request_id) {
+                const recordings = await refreshReplays();
+                const match = recordings.find((entry) => entry.name === request.replay);
+                if (match && identity === runId) {
+                    loadedReplayRequest = request.request_id;
+                    replaySelect.value = match.id;
+                    await selectReplay();
+                }
+            }
+        } else {
+            replayRequestStatus.textContent = `Replay request failed: ${request.error ?? "unknown error"}`;
+        }
+    } catch (error) {
+        if (ticket !== replayRequestTicket || identity !== runId) return;
+        replayRequestButton.disabled = true;
+        replayRequestStatus.textContent = error.message;
+    }
+}
+
+async function requestReplay() {
+    if (!runId) return;
+    replayRequestButton.disabled = true;
+    replayRequestStatus.textContent = "Sending replay request...";
+    try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/replay-request`, {
+            method: "POST",
+            cache: "no-store",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status}).`);
+        await refreshReplayRequest();
+    } catch (error) {
+        replayRequestStatus.textContent = error.message;
+        await refreshReplayRequest();
     }
 }
 
@@ -478,11 +576,13 @@ function syncRun(scenario = {}, identity = "") {
     spawnScenario = scenario;
     if (changed) {
         runId = identity;
+        loadedReplayRequest = "";
         listRequest++;
         replaySelect.replaceChildren(new Option("Spawn state", ""));
         restoreSpawn(false);
         replayStatus.textContent = identity ? "Loading recordings..." : "No run selected.";
         refreshReplays();
+        refreshReplayRequest();
     } else if (!replay && environmentChanged) renderArena(spawnScenario);
 }
 
@@ -492,7 +592,11 @@ document.getElementById("show-world").addEventListener("change", (event) => {
     else setPlaying(false);
 });
 document.getElementById("replay-refresh").addEventListener("click", refreshReplays);
+replayRequestButton.addEventListener("click", requestReplay);
 replaySelect.addEventListener("change", selectReplay);
+setInterval(() => {
+    if (runId) refreshReplayRequest();
+}, 2500);
 document.getElementById("replay-play").addEventListener("click", () => {
     if (!replay) return;
     if (!playing && tick >= replay.frames.at(-1).tick) showTick(replay.frames[0].tick);

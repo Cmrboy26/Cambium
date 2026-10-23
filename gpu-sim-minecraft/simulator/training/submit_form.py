@@ -1,6 +1,7 @@
 """Editable terminal form and validation for Rosie training submissions."""
 
 import argparse
+import os
 import re
 import sys
 
@@ -19,6 +20,7 @@ LABELS = {"JOB_NAME": "Job/run name", "TIME": "Wall time", "ENVS": "Parallel wor
           "REPLAY": "Replay interval (0 disables)", "DEPENDENCY": "Wait for job IDs (or none)"}
 ORDER = tuple(LABELS)
 RESOURCE_FIELDS = ("TIME", "CPUS", "MEMORY")
+LOCAL_ORDER = tuple(key for key in ORDER if key not in (*RESOURCE_FIELDS, "DEPENDENCY"))
 
 
 def parse_values(values):
@@ -67,8 +69,18 @@ def parse_values(values):
     return settings, sweep
 
 
-def normalize(values, shared_gpu=False, max_parallel=0):
+def normalize(values, shared_gpu=False, max_parallel=0, local=False):
     settings, sweep = parse_values(values)
+    if local:
+        if shared_gpu:
+            raise ValueError("Local runs do not use shared-GPU Slurm mode")
+        cores = os.cpu_count() or 1
+        if settings["THREADS"] == "auto":
+            settings["THREADS"] = str(min(4, cores))
+        threads = list(map(int, sweep["values"])) if sweep.get("variable") == "THREADS" else [int(settings["THREADS"])]
+        if max(threads) > cores:
+            raise ValueError("Trainer threads exceed local CPU cores")
+        return settings, sweep
     if shared_gpu and (not sweep or sweep["variable"] in RESOURCE_FIELDS):
         raise ValueError("Shared-GPU mode requires a sweep in one training setting, not allocation resources")
     count = len(sweep["values"]) if sweep else 1
@@ -85,7 +97,7 @@ def normalize(values, shared_gpu=False, max_parallel=0):
 
 
 class SubmissionForm:
-    def __init__(self, values, shared_gpu=False, max_parallel=0, input=None, output=None):
+    def __init__(self, values, shared_gpu=False, max_parallel=0, input=None, output=None, local=False):
         from prompt_toolkit import Application
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, VSplit
@@ -93,13 +105,16 @@ class SubmissionForm:
         from prompt_toolkit.styles import Style
         from prompt_toolkit.widgets import Button, Label, TextArea
 
+        self.local = local
+        field_order = LOCAL_ORDER if local else ORDER
         self.fields = {key: TextArea(text=values[key], multiline=False, height=1,
-                                    wrap_lines=False, style="class:value") for key in ORDER}
+                        wrap_lines=False, style="class:value") for key in field_order}
         self.error = Label("", style="class:error")
 
         def submit():
             try:
-                result = normalize({key: field.text for key, field in self.fields.items()}, shared_gpu, max_parallel)
+                result = normalize({key: field.text for key, field in self.fields.items()}, shared_gpu,
+                                   max_parallel, local=self.local)
             except ValueError as error:
                 self.error.text = str(error)
             else:
@@ -135,7 +150,8 @@ class SubmissionForm:
         def cancel(event):
             event.app.exit(exception=KeyboardInterrupt())
 
-        layout = HSplit([Label("Rosie Training Submission"),
+        title = "Local Training Setup" if local else "Rosie Training Submission"
+        layout = HSplit([Label(title),
                  Label("Up/Down: select   Type: edit   Ctrl+U: clear   Ctrl+C: cancel"),
                  Label("Sweep: comma-separated values in one field, e.g. 0,0.01,0.02"),
                          ScrollablePane(HSplit(rows)), self.error, self.submit])
@@ -155,10 +171,13 @@ def main(argv=None):
     parser.add_argument("--rollout-default", default="128")
     parser.add_argument("--time-default", default="1-00:00:00")
     parser.add_argument("--shared-gpu", action="store_true")
+    parser.add_argument("--local", action="store_true", help="Use the local host and omit Slurm resources")
     parser.add_argument("--max-parallel", type=int, default=0)
     parser.add_argument("--override", nargs=2, action="append", default=[])
     parser.add_argument("--learner-only", action="store_true")
     options = parser.parse_args(argv)
+    if options.local and options.shared_gpu:
+        parser.error("Local training does not use shared-GPU Slurm mode")
     plan = load_plan(options.plan)
     budgets = [stage["advance"].get("updates") for stage in plan["stages"]]
     updates = sum(budgets) if budgets and all(type(value) is int for value in budgets) else 1500
@@ -177,7 +196,7 @@ def main(argv=None):
         else:
             from prompt_toolkit.output.defaults import create_output
             result = SubmissionForm(values, options.shared_gpu, options.max_parallel,
-                                    output=create_output(stdout=sys.stderr)).run()
+                                    output=create_output(stdout=sys.stderr), local=options.local).run()
     except (KeyboardInterrupt, EOFError):
         parser.exit(1, "Cancelled; nothing submitted.\n")
     except ImportError:

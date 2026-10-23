@@ -18,8 +18,9 @@ RULES = {"simulate_food": False, "natural_regeneration": False}
 _EQUIPMENT_MATERIALS = ("leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite")
 _WEAPONS = frozenset({"minecraft:air", *(f"minecraft:{material}_{kind}" for material in _EQUIPMENT_MATERIALS
     if material not in ("leather", "chainmail") for kind in ("sword", "axe")),
-    "minecraft:wooden_sword", "minecraft:wooden_axe", "minecraft:stone_sword", "minecraft:stone_axe"})
-_LOADOUT_FIELDS = frozenset(("weapons", "selected", "offhand", "armor"))
+    "minecraft:wooden_sword", "minecraft:wooden_axe", "minecraft:stone_sword", "minecraft:stone_axe",
+    "minecraft:bow"})
+_LOADOUT_FIELDS = frozenset(("weapons", "selected", "offhand", "armor", "arrows"))
 _ARMOR_SLOTS = tuple(CATALOGUE["armor_slots"])
 _ARMOR_ITEMS = {slot: frozenset({"minecraft:air", *(f"minecraft:{material}_{slot}"
     for material in _EQUIPMENT_MATERIALS), *(["minecraft:turtle_helmet"] if slot == "helmet" else [])})
@@ -30,7 +31,8 @@ def categorical_values(feature):
     if feature in ("self.weapon_slot", "opponent.weapon_slot"):
         return tuple(range(LIMITS["weapon_slots"]))
     if feature in FEATURES and feature.endswith((".alive", ".weapon_is_axe", ".shield_using",
-            ".shield_disabled", ".shield_disabled_observed", ".has_shield", ".present", ".is_axe", ".on_ground", ".sprinting")):
+            ".shield_disabled", ".shield_disabled_observed", ".has_shield", ".present", ".is_axe", ".on_ground",
+            ".sprinting", ".bow_using", ".bow_equipped")):
         return (0, 1)
     return ()
 
@@ -101,7 +103,7 @@ def validate_contract(value):
     if observation_dim > LIMITS["observations"]:
         raise ValueError("Expanded policy needs at most 128 observation inputs")
     if not isinstance(actions, list) or not 1 <= len(actions) <= len(HEADS):
-        raise ValueError("Policy needs 1..9 action heads")
+        raise ValueError(f"Policy needs 1..{len(HEADS)} action heads")
     names = []
     sizes = []
     for action in actions:
@@ -123,9 +125,13 @@ def validate_contract(value):
             raise ValueError(f"Invalid choices for action primitive {name}")
         names.append(name)
         sizes.append(len(values))
+    if "shield" in names and "use_item" in names:
+        raise ValueError("Policy cannot contain both shield and use_item action heads")
     required = contract.get("requires", [])
     if not isinstance(required, list) or any(item not in CAPABILITIES for item in required):
         raise ValueError("Policy requires unsupported simulator capabilities")
+    if any(FEATURES.index(observation["feature"]) >= 89 for observation in observations) and "bow" not in required:
+        raise ValueError("Bow observations require the bow capability")
     for key, expected in (("observation_dim", observation_dim), ("action_names", names), ("action_sizes", sizes)):
         if key in contract and contract[key] != expected:
             raise ValueError(f"Policy contract {key} disagrees with its descriptors")
@@ -162,9 +168,10 @@ def resolve_players(players, profile="configured"):
         raise ValueError("Environment needs two players")
     if profile not in ("configured", "unarmored_diamond_sword", "unarmored_sword_axe_shield"):
         raise ValueError("Unsupported environment profile")
-    default = {"weapons": ["minecraft:diamond_sword"], "offhand": "minecraft:air"}
+    default = {"weapons": ["minecraft:diamond_sword"], "offhand": "minecraft:air", "arrows": 0}
     if profile == "unarmored_sword_axe_shield":
-        default = {"weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"], "offhand": "minecraft:shield"}
+        default = {"weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"],
+                   "offhand": "minecraft:shield", "arrows": 0}
     for player in players:
         loadout = player.get("loadout", default)
         if not isinstance(loadout, dict) or set(loadout) - _LOADOUT_FIELDS:
@@ -178,6 +185,11 @@ def resolve_players(players, profile="configured"):
         offhand = loadout.get("offhand", "minecraft:air")
         if offhand not in ("minecraft:air", "minecraft:shield"):
             raise ValueError("Unsupported offhand item")
+        arrows = loadout.get("arrows", 0)
+        if type(arrows) is not int or not 0 <= arrows <= 64:
+            raise ValueError("Loadout arrows must be an integer from 0 to 64")
+        if arrows and "minecraft:bow" not in slots:
+            raise ValueError("Ordinary arrows require a bow in the weapon loadout")
         armor = loadout.get("armor", {})
         if not isinstance(armor, dict) or set(armor) - _ARMOR_ITEMS.keys():
             raise ValueError("Unsupported armor slot")
@@ -185,7 +197,8 @@ def resolve_players(players, profile="configured"):
         for slot, item in armor.items():
             if item not in _ARMOR_ITEMS[slot]:
                 raise ValueError(f"Unsupported armor item: {item}")
-        player["loadout"] = {"weapons": list(slots), "selected": selected, "offhand": offhand, "armor": armor}
+        player["loadout"] = {"weapons": list(slots), "selected": selected, "offhand": offhand,
+                      "armor": armor, "arrows": arrows}
     json.dumps(players, allow_nan=False)
     return players
 
@@ -206,7 +219,9 @@ def resolve_scenario(definition):
     scenario["rules"] = dict(RULES)
     scenario["players"] = resolve_players(scenario["players"], profile)
     scenario["profile"] = "configured"
-    scenario["requires"] = list(CAPABILITIES)
+    scenario["requires"] = [capability for capability in CAPABILITIES if capability != "bow"]
+    if any("minecraft:bow" in player["loadout"]["weapons"] for player in scenario["players"]):
+        scenario["requires"].append("bow")
     scenario.pop("policy", None)
     json.dumps(scenario, allow_nan=False)
     return scenario

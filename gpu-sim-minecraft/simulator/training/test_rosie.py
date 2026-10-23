@@ -42,6 +42,17 @@ class SubmissionFormTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 normalize({**values, **changes}, shared_gpu=True)
 
+    def test_local_form_omits_slurm_resources_and_resolves_threads(self):
+        from simulator.training.submit_form import LOCAL_ORDER, SubmissionForm, normalize
+        values = {key: value for key, value in self.values().items()
+                  if key not in ("TIME", "CPUS", "MEMORY", "DEPENDENCY")}
+        settings, sweep = normalize(values, local=True)
+        self.assertEqual(settings["THREADS"], str(min(4, os.cpu_count() or 1)))
+        self.assertEqual(sweep, {})
+        from prompt_toolkit.output import DummyOutput
+        form = SubmissionForm(self.values(), local=True, output=DummyOutput())
+        self.assertEqual(tuple(form.fields), LOCAL_ORDER)
+
     def test_arrow_navigation_editing_and_enter_on_submit(self):
         from prompt_toolkit.input.defaults import create_pipe_input
         from prompt_toolkit.output import DummyOutput
@@ -472,7 +483,8 @@ print(f"{12345 + count};test-cluster")
             "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
         }))
 
-    def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None, learner=None, **settings):
+    def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None,
+               learner=None, local=False, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
@@ -481,6 +493,8 @@ print(f"{12345 + count};test-cluster")
             arguments.extend(["--profile-every", str(profile_every)])
         if shared_gpu:
             arguments.append("--shared-gpu")
+        if local:
+            arguments.append("--local")
         if max_parallel is not None:
             arguments.extend(["--max-parallel", str(max_parallel)])
         for key, value in (learner or {}).items():
@@ -488,6 +502,15 @@ print(f"{12345 + count};test-cluster")
         return subprocess.run(arguments, input="\n".join(answers or [""] * 17) + "\n",
                               cwd=self.temporary.name, env=environment,
                               capture_output=True, text=True, timeout=20)
+
+    def test_local_dry_run_uses_same_plan_without_slurm(self):
+        result = self.launch(local=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Local CUDA training (architecture 86", result.stdout)
+        self.assertIn("MCSIM_CUDA_ARCHITECTURES=86", result.stdout)
+        self.assertIn("bash rosie/train-local.sh", result.stdout)
+        self.assertNotIn("sbatch --parsable", result.stdout)
+        self.assertNotIn("Wall-time limit", result.stdout)
 
     def test_new_ppo_overrides_and_single_variable_sweep_reach_submissions(self):
         result = self.launch([""] * 16 + ["y"], dry_run=False,
@@ -894,6 +917,101 @@ print(f"{12345 + count};test-cluster")
         result = self.launch([""] * 16 + ["y"], dry_run=False, SUBMIT_TEST_FAIL="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Submitted job", result.stdout)
+
+
+@unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
+class LocalRunnerTests(unittest.TestCase):
+    def test_ppo_overrides_reach_local_trainer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            runner = root / "rosie/train-local.sh"
+            runner.parent.mkdir(parents=True)
+            shutil.copyfile(Path(__file__).resolve().parents[2] / "rosie/train-local.sh", runner)
+            (root / "simulator/training").mkdir(parents=True)
+            plan = root / "simulator/setups/curricula/shield-axe-curriculum.json"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("{}")
+
+            tools = Path(temporary) / "tools"
+            tools.mkdir()
+            cmake = tools / "cmake"
+            cmake.write_text("#!/usr/bin/env bash\n"
+                             "if [[ \"$1\" == --version ]]; then printf 'cmake version 3.24.1\\n'; exit; fi\n"
+                             "while [[ \"$#\" -gt 0 ]]; do\n"
+                             "    if [[ \"$1\" == -B ]]; then build_dir=\"$2\"; shift 2; else shift; fi\n"
+                             "done\n"
+                             "if [[ -n \"${build_dir:-}\" ]]; then\n"
+                             "    mkdir -p \"$build_dir\"\n"
+                             "    : > \"$build_dir/minecraft_sim_training.so\"\n"
+                             "fi\n")
+            cmake.chmod(0o700)
+            for name in ("nvcc", "nvidia-smi"):
+                tool = tools / name
+                tool.write_text("#!/usr/bin/env bash\nexit 0\n")
+                tool.chmod(0o700)
+
+            venv_python = root / ".venv-rosie/bin/python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text(
+                f"#!{sys.executable}\nimport json, os, sys\nfrom pathlib import Path\n"
+                "if sys.argv[1] == '-c':\n"
+                "    print('PyTorch: mocked CUDA: 12.4')\n"
+                "else:\n"
+                "    Path(os.environ['LOCAL_TRAIN_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
+            )
+            venv_python.chmod(0o700)
+            arguments_file = Path(temporary) / "trainer-args.json"
+            environment = {
+                **os.environ,
+                "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                "LOCAL_TRAIN_ARGS": str(arguments_file),
+                "SIM_PLAN": str(plan),
+                "SIM_GAMMA": "0.9",
+                "SIM_GAE_LAMBDA": "0.8",
+                "SIM_CLIP_EPS": "0.1",
+                "SIM_VF_COEF": "0.25",
+                "SIM_ENT_COEF": "0.025",
+                "SIM_MAX_GRAD_NORM": "1",
+            }
+            result = subprocess.run(["bash", str(runner)], cwd=temporary, env=environment,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            arguments = json.loads(arguments_file.read_text())
+            for flag, value in (("--gamma", "0.9"), ("--gae-lambda", "0.8"), ("--clip-eps", "0.1"),
+                                ("--vf-coef", "0.25"), ("--ent-coef", "0.025"), ("--max-grad-norm", "1")):
+                self.assertEqual(arguments[arguments.index(flag) + 1], value)
+
+
+@unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
+class DashboardConnectLocalTests(unittest.TestCase):
+    def test_non_rosie_host_runs_dashboard_command_locally(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            (root / "rosie").mkdir(parents=True)
+            (root / "simulator/training/runs").mkdir(parents=True)
+            shutil.copyfile(Path(__file__).resolve().parents[2] / "rosie/dashboard-connect.sh",
+                            root / "rosie/dashboard-connect.sh")
+            tools = Path(temporary) / "tools"
+            tools.mkdir()
+            hostname = tools / "hostname"
+            hostname.write_text("#!/usr/bin/env bash\nprintf 'local-wsl\\n'\n")
+            hostname.chmod(0o700)
+            python = tools / "python3"
+            python.write_text(f"#!{sys.executable}\nimport json, os, sys\nfrom pathlib import Path\nPath(os.environ['LOCAL_DASHBOARD_ARGS']).write_text(json.dumps(sys.argv[1:]))\n")
+            python.chmod(0o700)
+            arguments_file = Path(temporary) / "python-args.json"
+            environment = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                           "LOCAL_DASHBOARD_ARGS": str(arguments_file), "ROSIE_SSH_JUMP": "",
+                           "ROSIE_PROJECT_DIR": "", "ROSIE_JOB_ID": ""}
+            result = subprocess.run(["bash", str(root / "rosie/dashboard-connect.sh")], cwd=temporary,
+                                    env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Starting the dashboard from this local checkout", result.stdout)
+            arguments = json.loads(arguments_file.read_text())
+            self.assertEqual(arguments[:3], ["-B", "-m", "simulator.training.dashboard"])
+            self.assertIn(str(root / "simulator/training/runs"), arguments)
+            self.assertEqual(arguments[-2:], ["--port", "0"])
+            self.assertNotIn("ssh", arguments)
 
 
 @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")

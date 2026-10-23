@@ -449,6 +449,103 @@ class RandomWalkController(StationaryTargetController):
         self._generators = generators
 
 
+# Source: minecraft-26.3-src/net/minecraft/world/item/BowItem.java, releaseUsing;
+# minecraft-26.3-src/net/minecraft/world/entity/projectile/arrow/AbstractArrow.java, getDefaultGravity.
+# This fixed-speed lead/drop estimate is a controller heuristic, not projectile physics.
+def _archer_target(relative_position, relative_velocity=None):
+    target = np.asarray(relative_position, dtype=np.float64).copy()
+    target[:, 1] -= 0.62
+    velocity = (np.zeros_like(target) if relative_velocity is None
+                else np.asarray(relative_velocity, dtype=np.float64))
+    flight_time = np.clip(np.linalg.norm(target, axis=1) / 3.0, 0.0, 50.0 / 3.0)
+    for _ in range(3):
+        predicted = target + velocity * flight_time[:, None]
+        predicted[:, 1] += 0.5 * 0.05 * flight_time**2
+        flight_time = np.clip(np.linalg.norm(predicted, axis=1) / 3.0, 0.0, 50.0 / 3.0)
+    return predicted
+
+
+class ArcherController(StationaryTargetController):
+    draw_ticks = 20
+
+    def __init__(self, contract, count, seed=1, options=None):
+        options = _options({} if options is None else options, ("bow_slot",))
+        super().__init__(contract, count, seed)
+        self.options = options
+        self._description.update(controller="archer", options=options, draw_ticks=self.draw_ticks,
+                                 aim="ballistic_prediction_heuristic")
+        for feature in ("relative.x", "relative.y", "relative.z", "self.yaw_fraction",
+                        "self.pitch_fraction", "self.bow_equipped", "self.arrow_count_fraction"):
+            self._require_feature(feature)
+        for name in ("yaw", "pitch"):
+            if name not in self._heads or len(self._heads[name][1]) < 2:
+                raise ValueError(f"archer requires at least two {name} choices")
+        use_heads = [name for name in ("use_item", "shield") if name in self._heads]
+        if len(use_heads) != 1:
+            raise ValueError("archer requires use_item or legacy shield, but not both")
+        self.use_head = use_heads[0]
+        self._require_choice(self.use_head, True)
+        self._require_choice(self.use_head, False)
+        self.bow_slot = options.get("bow_slot")
+        if "bow_slot" in options:
+            _integer(self.bow_slot, "bow_slot", 0, 8)
+            self._require_choice("weapon", self.bow_slot)
+        velocity_features = tuple(f"relative.velocity.{axis}" for axis in "xyz")
+        self._lead_features = velocity_features if all(name in self._features for name in velocity_features) else None
+        self._draw_ticks = np.zeros(self.count, dtype=np.int64)
+
+    def act(self, observations, indices=None):
+        observations, indices = self._batch(observations, indices)
+        actions = np.tile(self._neutral, (len(observations), 1))
+        if not len(observations):
+            return actions
+        equipped = self._feature(observations, "self.bow_equipped") >= 0.5
+        has_arrows = self._feature(observations, "self.arrow_count_fraction") > 0
+        eligible = equipped & has_arrows
+        ticks = self._draw_ticks[indices]
+        self._set(actions, self.use_head, eligible & (ticks < self.draw_ticks))
+        if self.bow_slot is not None:
+            self._set(actions, "weapon", np.full(len(actions), self.bow_slot))
+
+        rows = np.flatnonzero(eligible)
+        if len(rows):
+            relative_position = np.column_stack([
+                self._feature(observations, f"relative.{axis}")[rows] * 10.0 for axis in "xyz"
+            ])
+            relative_velocity = (None if self._lead_features is None else np.column_stack([
+                self._feature(observations, name)[rows] for name in self._lead_features
+            ]))
+            # Minecraft 26.3 source anchors: BowItem.java (charge/release),
+            # Projectile.java (launch direction and inherited motion), and AbstractArrow.java (gravity).
+            # This lead/drop estimate is a controller heuristic, not projectile physics.
+            aim = _archer_target(relative_position, relative_velocity)
+            target_yaw = np.degrees(np.arctan2(-aim[:, 0], aim[:, 2]))
+            target_pitch = np.degrees(np.arctan2(-aim[:, 1], np.hypot(aim[:, 0], aim[:, 2])))
+            yaw_delta = ((target_yaw - self._feature(observations, "self.yaw_fraction")[rows] * 180.0 + 180.0)
+                         % 360.0) - 180.0
+            pitch_delta = target_pitch - self._feature(observations, "self.pitch_fraction")[rows] * 90.0
+            for index, name, delta in ((rows, "yaw", yaw_delta), (rows, "pitch", pitch_delta)):
+                column, choices = self._heads[name]
+                actions[index, column] = np.abs(delta[:, None] - np.asarray(choices, dtype=np.float64)).argmin(axis=1)
+
+        self._draw_ticks[indices] = np.where(eligible & (ticks < self.draw_ticks), ticks + 1, 0)
+        return actions
+
+    def reset(self, mask):
+        self._draw_ticks[self._mask(mask)] = 0
+
+    def state_dict(self):
+        return {**super().state_dict(), "draw_ticks": self._draw_ticks.tolist()}
+
+    def load_state_dict(self, state):
+        self._state(state, ("draw_ticks",))
+        ticks = state["draw_ticks"]
+        if (not isinstance(ticks, list) or len(ticks) != self.count
+                or any(type(tick) is not int or not 0 <= tick <= self.draw_ticks for tick in ticks)):
+            raise ValueError("Invalid per-actor archer draw ticks")
+        self._draw_ticks[:] = ticks
+
+
 class _PolicyController(_BatchedController):
     model: "torch.nn.Module"
     device: "torch.device"
@@ -724,3 +821,4 @@ register_controller("basic_melee", BasicMeleeController)
 register_controller("stationary_melee", StationaryMeleeController)
 register_controller("tactical_melee", TacticalMeleeController)
 register_controller("random_walk", RandomWalkController)
+register_controller("archer", ArcherController)

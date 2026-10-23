@@ -3,9 +3,8 @@ set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     printf 'Usage: %s [TRAINING_JOB_ID]\n' "$0"
-    printf 'Open the Rosie dashboard locally; no training job is required.\n'
-    printf 'By default, host it on the management node. An explicit job ID uses that allocation.\n'
-    printf 'When connecting from another computer without a job ID, set ROSIE_PROJECT_DIR to the remote checkout.\n'
+    printf 'On Rosie, open the dashboard through an SSH tunnel; elsewhere, host the local checkout directly.\n'
+    printf 'An explicit job ID uses that Rosie allocation. Set ROSIE_SSH_JUMP and ROSIE_PROJECT_DIR to connect remotely.\n'
     exit 0
 fi
 if [[ "$#" -gt 1 ]]; then
@@ -13,16 +12,37 @@ if [[ "$#" -gt 1 ]]; then
     exit 2
 fi
 
-if ! command -v ssh >/dev/null 2>&1; then
-    printf 'ERROR: ssh is required on this computer.\n' >&2
-    exit 1
-fi
 if command -v python3 >/dev/null 2>&1; then
     LOCAL_PYTHON="python3"
 elif command -v python >/dev/null 2>&1; then
     LOCAL_PYTHON="python"
 else
     printf 'ERROR: Python 3 is required on this computer.\n' >&2
+    exit 1
+fi
+
+CURRENT_HOST="$(hostname -f 2>/dev/null || hostname)"
+JOB_ID="${1:-${ROSIE_JOB_ID:-}}"
+PROJECT_DIR="${ROSIE_PROJECT_DIR:-}"
+SSH_JUMP="${ROSIE_SSH_JUMP:-}"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ ! "$CURRENT_HOST" =~ \.hpc\.msoe\.edu$ \
+    && ! "$CURRENT_HOST" =~ ^dh-mgmt[1-4]$ && -z "$SSH_JUMP" \
+        && -z "$JOB_ID" && -z "$PROJECT_DIR" ]]; then
+    if [[ -n "${ROSIE_RUNS_DIR:-}" ]]; then
+        RUNS_DIR="$ROSIE_RUNS_DIR"
+    else
+        RUNS_DIR="$SCRIPT_ROOT/simulator/training/runs"
+    fi
+    PORT="${ROSIE_DASHBOARD_PORT:-0}"
+    cd "$SCRIPT_ROOT"
+    printf 'Starting the dashboard from this local checkout.\n'
+    printf 'Runs directory: %s\nPress Ctrl+C to stop the dashboard.\n' "$RUNS_DIR"
+    exec "$LOCAL_PYTHON" -B -m simulator.training.dashboard --runs-dir "$RUNS_DIR" --port "$PORT"
+fi
+
+if ! command -v ssh >/dev/null 2>&1; then
+    printf 'ERROR: ssh is required to connect to Rosie from this computer.\n' >&2
     exit 1
 fi
 
@@ -35,8 +55,6 @@ if [[ "$SSH_USER" != *@* ]]; then
     SSH_USER="${SSH_USER}@ad.msoe.edu"
 fi
 
-CURRENT_HOST="$(hostname -f 2>/dev/null || hostname)"
-SSH_JUMP="${ROSIE_SSH_JUMP:-}"
 if [[ -z "$SSH_JUMP" ]]; then
     if [[ "$CURRENT_HOST" =~ ^dh-mgmt[1-4](\.hpc\.msoe\.edu)?$ ]]; then
         SSH_JUMP="$CURRENT_HOST"
@@ -61,8 +79,6 @@ elif [[ ! "$SSH_JUMP" =~ ^dh-mgmt[1-4]\.hpc\.msoe\.edu$ ]]; then
     exit 1
 fi
 SSH_JUMP_TARGET="$SSH_USER@$SSH_JUMP"
-JOB_ID="${1:-${ROSIE_JOB_ID:-}}"
-PROJECT_DIR="${ROSIE_PROJECT_DIR:-}"
 if [[ -z "$PROJECT_DIR" && "$CURRENT_HOST" =~ ^dh-mgmt[1-4](\.hpc\.msoe\.edu)?$ ]]; then
     PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi

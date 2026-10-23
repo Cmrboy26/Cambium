@@ -1,5 +1,6 @@
 #include "minecraft_sim/training_api.h"
 #include "../apps/configuration.hpp"
+#include "../apps/observation.hpp"
 
 #include <nlohmann/json.hpp>
 #include <array>
@@ -35,16 +36,16 @@ json frame(void* handle, int world) {
 
 void checkResetPlayers(const char* environment, int cuda) {
     json contract{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
-        {"ticks_per_action", 1}, {"observations", json::array()},
+        {"ticks_per_action", 1}, {"requires", {"bow"}}, {"observations", json::array()},
         {"actions", {{{"name", "weapon"}, {"values", {0, 1}}}}}};
     for (const auto* name : minecraft_sim::app::feature_names) {
         contract["observations"].push_back({{"feature", name}});
     }
     const auto descriptor = contract.dump();
-    const std::array<float, 6> weights{};
+    const std::array<float, 10> weights{};
     Handle handle(mcsim_create_contract(3, cuda, environment, 100, 123, weights.data(), descriptor.c_str()), mcsim_destroy);
     require(handle != nullptr, "create all-equipment descriptor batch using a two-slot environment");
-    require(mcsim_api_version() == 3, "current training library exposes ABI 3");
+    require(mcsim_api_version() == 4, "current training library exposes ABI 4");
     require(mcsim_set_profiling(nullptr, 1) == -1, "profiling rejects null handles");
     require(mcsim_set_profiling(handle.get(), 2) == -1, "profiling requires a boolean flag");
     require(mcsim_profile(nullptr) == nullptr, "profile rejects null handles");
@@ -190,14 +191,14 @@ void checkResetPlayers(const char* environment, int cuda) {
 }
 
 void checkRewardWeights(int cuda) {
-    std::array<float, 6> weights{};
+    std::array<float, 10> weights{};
     Handle handle(mcsim_create_schema(1, cuda, nullptr, 1, 1, weights.data(), 1), mcsim_destroy);
     require(handle != nullptr, "create legacy reward test batch");
     require(json::parse(mcsim_batch_info(handle.get()))["observation_dim"] == 22, "v1 dimension stays unchanged");
     weights[4] = 3;
     require(mcsim_set_reward_weights(handle.get(), weights.data()) == 0, "set curriculum reward weights");
     auto invalid = weights;
-    invalid[4] = 7; invalid[5] = std::numeric_limits<float>::quiet_NaN();
+    invalid[4] = 7; invalid[9] = std::numeric_limits<float>::quiet_NaN();
     require(mcsim_set_reward_weights(handle.get(), invalid.data()) == -1, "nonfinite late reward rejected atomically");
     require(mcsim_set_reward_weights(nullptr, weights.data()) == -1
         && mcsim_set_reward_weights(handle.get(), nullptr) == -1, "null reward arguments rejected");
@@ -214,10 +215,10 @@ void checkRewardWeights(int cuda) {
 }
 
 void checkStepRewardTotals(int cuda) {
-    const std::array<float, 6> weights{0, 0, 0, 0, -3, -7};
+    const std::array<float, 10> weights{0, 0, 0, 0, -3, -7};
     Handle handle(mcsim_create_schema(2, cuda, nullptr, 1, 1, weights.data(), 1), mcsim_destroy);
     require(handle != nullptr, "create selected-player reward batch");
-    std::array<double, 12> totals{};
+    std::array<double, 16> totals{};
     require(mcsim_step_reward_totals(handle.get(), nullptr, totals.data()) == 0,
         "query initial step reward contributions");
     for (double amount : totals) require(amount == 0, "initial reward contributions are zero");
@@ -257,7 +258,7 @@ void checkStepRewardTotals(int cuda) {
 }
 
 void checkMaxTicks(int cuda) {
-    const std::array<float, 6> weights{};
+    const std::array<float, 10> weights{};
     Handle handle(mcsim_create_schema(1, cuda, nullptr, 1, 1, weights.data(), 1), mcsim_destroy);
     require(handle != nullptr, "create timeout setter batch");
     require(mcsim_set_max_ticks(nullptr, 2) == -1, "null timeout handle rejected");
@@ -287,7 +288,7 @@ void checkEmptySlots(const char* environment, int cuda) {
         {"ticks_per_action", 1},
         {"observations", {{{"feature", "self.weapon_slot"}}, {{"feature", "opponent.weapon_slot"}}}},
         {"actions", {{{"name", "weapon"}, {"values", {0, 1}}}}}};
-    const std::array<float, 6> weights{};
+    const std::array<float, 10> weights{};
     auto descriptor = contract.dump();
     Handle seed(mcsim_create_contract(1, cuda, environment, 100, 1, weights.data(), descriptor.c_str()), mcsim_destroy);
     require(seed != nullptr, "create concrete nine-slot test seed");
@@ -350,6 +351,218 @@ void checkEmptySlots(const char* environment, int cuda) {
         "duplicate nonempty slots still rejected");
     std::cout << "PASS: repeated empty hotbar slots preserve initial selection, actions, charge, observations and replay\n";
 }
+
+void checkArrowObservation() {
+    std::array<minecraft_sim::PlayerState, 2> players{};
+    players[0].position = {0.0, 0.0, 0.0};
+    players[0].velocity = {0.1, 0.2, 0.3};
+    players[0].weapon = minecraft_sim::WeaponItem::bow;
+    players[0].using_bow = true;
+    players[1].position = {0.0, 0.0, 10.0};
+    players[1].weapon = minecraft_sim::WeaponItem::bow;
+    players[1].using_bow = true;
+    std::array<minecraft_sim::ArrowState, 5> arrows{};
+    minecraft_sim::ProjectileWorldState projectiles;
+    projectiles.arrows = arrows.data();
+    projectiles.arrow_capacity = static_cast<int>(arrows.size());
+    projectiles.bows[0].ordinary_arrows = 64;
+    projectiles.bows[0].draw_ticks = 10;
+    arrows[0].active = true;
+    arrows[0].owner = 0;
+    arrows[0].position = {1.0, 0.0, 0.0};
+    arrows[0].velocity = {1.0, 0.0, 0.0};
+    for (int slot = 1; slot <= 2; ++slot) {
+        arrows[slot].active = true;
+        arrows[slot].owner = 1;
+        arrows[slot].position = {3.0, 1.0, 2.0};
+        arrows[slot].velocity = slot == 1 ? minecraft_sim::Vec3{1.0, 2.0, 3.0}
+                                            : minecraft_sim::Vec3{-1.0, 0.0, 0.0};
+    }
+    arrows[3].active = true;
+    arrows[3].owner = 1;
+    arrows[3].in_ground = true;
+    arrows[3].position = {0.1, 0.0, 0.0};
+    arrows[3].velocity = {1.0, 0.0, 0.0};
+    arrows[4].active = true;
+    arrows[4].owner = 1;
+    arrows[4].position = {0.1, 0.0, 0.0};
+
+    std::array<float, minecraft_sim::app::feature_names.size()> catalogue{};
+    minecraft_sim::app::arrowObservation(catalogue.data(), players[0], players[1], projectiles, 0);
+    require(catalogue[89] == 1.0F && catalogue[90] == 1.0F
+        && std::abs(catalogue[91] - minecraft_sim::bowPower(10)) < 1.0e-6F
+        && catalogue[92] == 1.0F && catalogue[93] == 1.0F && catalogue[94] == 1.0F,
+        "bow observations expose own ammo and actual draw state from both players");
+    require(catalogue[95] == 1.0F && std::abs(catalogue[96] - 0.3F) < 1.0e-6F
+        && std::abs(catalogue[97] - 0.1F) < 1.0e-6F && std::abs(catalogue[98] - 0.2F) < 1.0e-6F
+        && std::abs(catalogue[99] - 0.9F) < 1.0e-6F && std::abs(catalogue[100] - 1.8F) < 1.0e-6F
+        && std::abs(catalogue[101] - 2.7F) < 1.0e-6F,
+        "nearest moving opponent arrow uses slot-order tie break and opponent-minus-self velocity");
+
+    minecraft_sim::app::arrowObservation(catalogue.data(), players[1], players[0], projectiles, 1);
+    require(catalogue[95] == 1.0F && std::abs(catalogue[96] - 0.1F) < 1.0e-6F,
+        "the reverse perspective excludes its own arrow and detects the other player's arrow");
+    arrows[1].in_ground = true;
+    arrows[2].active = false;
+    minecraft_sim::app::arrowObservation(catalogue.data(), players[0], players[1], projectiles, 0);
+    for (int index = 95; index < 102; ++index) {
+        require(catalogue[index] == 0.0F, "absent, stuck, stationary, and self-owned arrows encode seven zeros");
+    }
+}
+
+void checkBowAdapter(const char* environment, int cuda) {
+    constexpr std::array<const char*, 13> features{
+        "self.arrow_count_fraction", "self.bow_using", "self.bow_power_fraction",
+        "self.bow_equipped", "opponent.bow_equipped", "opponent.bow_using", "arrow.present",
+        "arrow.relative.x", "arrow.relative.y", "arrow.relative.z", "arrow.relative.velocity.x",
+        "arrow.relative.velocity.y", "arrow.relative.velocity.z"};
+    json contract{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1}, {"requires", {"bow"}}, {"observations", json::array()},
+        {"actions", {{{"name", "weapon"}, {"values", {0, 1}}},
+            {{"name", "use_item"}, {"values", {false, true}}}}}};
+    for (const auto* feature : features) contract["observations"].push_back({{"feature", feature}});
+    const std::array<float, 10> weights{2.0F, 3.0F, 0, 0, 0, 0, 0, 0, 0, 4.0F};
+    const auto descriptor = contract.dump();
+    Handle handle(mcsim_create_contract(2, cuda, environment, 100, 123, weights.data(), descriptor.c_str()), mcsim_destroy);
+    require(handle != nullptr, "create native bow contract with appended observations and binary use_item");
+
+    auto conflicting_contract = contract;
+    conflicting_contract["actions"].push_back({{"name", "shield"}, {"values", {false, true}}});
+    const auto conflicting_descriptor = conflicting_contract.dump();
+    void* conflicting = mcsim_create_contract(1, cuda, environment, 100, 123, weights.data(),
+                                                conflicting_descriptor.c_str());
+    if (conflicting) mcsim_destroy(conflicting);
+    require(conflicting == nullptr && std::string(mcsim_last_error()).find("both shield and use_item") != std::string::npos,
+        "legacy shield and use_item action aliases cannot coexist in one policy");
+
+    json definitions = json::array({scenario(handle.get(), 0)["players"], scenario(handle.get(), 1)["players"]});
+    for (int world = 0; world < 2; ++world) {
+        definitions[world][0]["position"] = {0.5, 1.0, -1.5};
+        definitions[world][0]["yaw"] = 0.0;
+        definitions[world][0]["loadout"] = {{"weapons", {"minecraft:diamond_sword", "minecraft:bow"}},
+            {"selected", 1}, {"offhand", "minecraft:air"}, {"arrows", 3}};
+        definitions[world][1]["position"] = {0.5, 1.0, 1.5};
+        definitions[world][1]["yaw"] = 180.0;
+        definitions[world][1]["loadout"] = {{"weapons", {"minecraft:bow", "minecraft:diamond_sword"}},
+            {"selected", 1}, {"offhand", world == 1 ? "minecraft:shield" : "minecraft:air"}, {"arrows", 0}};
+    }
+    std::vector<float> observations(2 * 2 * features.size());
+    require(mcsim_reset_players(handle.get(), nullptr, definitions.dump().c_str(), observations.data()) == 0,
+        "reset bow loadouts with finite ordinary arrow counts and optional shield");
+    require(scenario(handle.get(), 0)["players"][0]["loadout"]["arrows"] == 3,
+        "scenario serialization preserves configured ordinary arrow count");
+    const auto featureIndex = [&](const char* name) {
+        const auto found = std::find_if(features.begin(), features.end(), [name](const char* value) {
+            return std::string(value) == name;
+        });
+        if (found == features.end()) throw std::runtime_error("Unknown bow observation feature");
+        return static_cast<std::size_t>(found - features.begin());
+    };
+    const auto observation = [&](int actor, const char* name) {
+        return observations[static_cast<std::size_t>(actor) * features.size() + featureIndex(name)];
+    };
+    require(std::abs(observation(0, "self.arrow_count_fraction") - 3.0F / 64.0F) < 1.0e-6F
+        && observation(0, "self.bow_equipped") == 1.0F
+        && observation(0, "opponent.bow_equipped") == 0.0F
+        && observation(1, "opponent.bow_equipped") == 1.0F,
+        "adapter observes scalar ammo and selected bow equipment from both perspectives");
+    require(observation(0, "arrow.present") == 0.0F && observation(1, "arrow.present") == 0.0F,
+        "reset leaves all arrow-relative observations absent");
+
+    std::array<int32_t, 8> actions{};
+    for (int world = 0; world < 2; ++world) {
+        for (int player = 0; player < 2; ++player) {
+            const auto offset = static_cast<std::size_t>(world * 2 + player) * 2;
+            actions[offset] = 1;
+            actions[offset + 1] = 1;
+        }
+    }
+    std::array<float, 4> rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    for (int tick = 0; tick < 20; ++tick) {
+        require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0, "hold bow and legacy shield actions through their use phases");
+    }
+    const auto drawing_frame = frame(handle.get(), 0);
+    require(drawing_frame["capabilities"]["bow"] == true
+        && drawing_frame["actors"][0]["bow_using"] == true
+        && drawing_frame["actors"][0]["bow_draw_ticks"] == 20
+        && drawing_frame["actors"][0]["bow_power"] == 1.0
+        && drawing_frame["actors"][0]["arrow_count"] == 3
+        && drawing_frame["actors"][0]["controls"]["use_item"] == true,
+        "replay reports actual bow draw, ammunition, power, and held semantic control");
+    require(drawing_frame["actors"][1]["using_shield"] == false
+        && frame(handle.get(), 1)["actors"][1]["using_shield"] == true
+        && observation(0, "self.bow_using") == 1.0F
+        && observation(1, "opponent.bow_using") == 1.0F,
+        "use_item starts bow use or shield use according to the selected main-hand item");
+
+    for (int world = 0; world < 2; ++world) {
+        for (int player = 0; player < 2; ++player) {
+            const auto offset = static_cast<std::size_t>(world * 2 + player) * 2;
+            actions[offset] = 1;
+            actions[offset + 1] = player == 0 ? 0 : 1;
+        }
+    }
+    require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(),
+        terminated.data(), truncated.data()) == 0, "release the bow once while keeping the shield held");
+    const auto released = frame(handle.get(), 0);
+    require(released["actors"][0]["bow_using"] == false
+        && released["actors"][0]["bow_draw_ticks"] == 0
+        && released["actors"][0]["arrow_count"] == 2
+        && released["actors"][0]["controls"]["use_item"] == false
+        && released["projectiles"].size() == 1
+        && released["projectiles"][0]["owner"] == 0
+        && released["projectiles"][0]["age"] == 0,
+        "release creates one deferred projectile and updates replay state without advancing its age");
+    require(observation(0, "arrow.present") == 0.0F && observation(1, "arrow.present") == 1.0F,
+        "arrow observation excludes its owner and exposes it to the opponent");
+    const auto& arrow_velocity = released["projectiles"][0]["velocity"];
+    const auto& observer_velocity = released["actors"][1]["velocity"];
+    require(std::abs(observation(1, "arrow.relative.velocity.x")
+                - (arrow_velocity[0].get<float>() - observer_velocity[0].get<float>())) < 1.0e-6F
+        && std::abs(observation(1, "arrow.relative.velocity.z")
+                - (arrow_velocity[2].get<float>() - observer_velocity[2].get<float>())) < 1.0e-6F,
+        "relative arrow velocity is world arrow velocity minus observer velocity");
+
+    require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(),
+        terminated.data(), truncated.data()) == 0, "advance delayed arrow hits and shield deflection");
+    const auto hit_frame = frame(handle.get(), 0);
+    const auto blocked_frame = frame(handle.get(), 1);
+    const double health_lost = 20.0 - hit_frame["actors"][1]["health"].get<double>();
+    require(health_lost > 0.0 && hit_frame["projectiles"].empty()
+        && blocked_frame["actors"][1]["health"] == 20.0
+        && blocked_frame["projectiles"].size() == 1,
+        "delayed ordinary arrow damages health, while an active shield deflects without health loss");
+    std::array<double, 16> totals{};
+    const std::array<uint8_t, 4> hit_world{1, 1, 0, 0};
+    require(mcsim_step_reward_totals(handle.get(), hit_world.data(), totals.data()) == 0
+        && std::abs(totals[0] - 2.0 * health_lost / 20.0) < 1.0e-6
+        && std::abs(totals[1] - 3.0 * health_lost / 20.0) < 1.0e-6
+        && totals[9] == 4.0,
+        "arrow reward terms use owner-attributed health loss and full progress on enemy contact");
+    const std::array<uint8_t, 4> shooter_only{1, 0, 0, 0};
+    require(mcsim_step_reward_totals(handle.get(), shooter_only.data(), totals.data()) == 0
+        && totals[9] == 4.0,
+        "the arrow-progress event is credited to its shooter only");
+    const std::array<uint8_t, 4> target_only{0, 1, 0, 0};
+    require(mcsim_step_reward_totals(handle.get(), target_only.data(), totals.data()) == 0
+        && totals[9] == 0.0,
+        "the arrow-progress event is not credited to its target");
+    const std::array<uint8_t, 4> shield_world{0, 0, 1, 1};
+    require(mcsim_step_reward_totals(handle.get(), shield_world.data(), totals.data()) == 0
+        && totals[0] == 0.0 && totals[1] == 0.0 && totals[9] == 4.0,
+        "enemy shield contact earns progress without creating health-based rewards");
+
+    const auto untouched = frame(handle.get(), 1);
+    const std::array<uint8_t, 2> reset_first{1, 0};
+    require(mcsim_reset(handle.get(), reset_first.data(), observations.data()) == 0
+        && frame(handle.get(), 0)["tick"] == 0 && frame(handle.get(), 0)["projectiles"].empty()
+        && frame(handle.get(), 0)["actors"][0]["arrow_count"] == 3
+        && frame(handle.get(), 1) == untouched,
+        "selective reset restores selected ammo/draw/projectiles and leaves the other world untouched");
+    std::cout << "PASS: bow adapter observations, actions, delayed rewards, replay, and selective CPU/CUDA reset\n";
+}
 }
 
 int main(int argc, char** argv) {
@@ -360,6 +573,8 @@ int main(int argc, char** argv) {
         if (cuda && !mcsim_cuda_available()) return 77;
         checkResetPlayers(argv[1], cuda);
         checkEmptySlots(argv[1], cuda);
+        checkArrowObservation();
+        checkBowAdapter(argv[1], cuda);
         checkRewardWeights(cuda);
         checkStepRewardTotals(cuda);
         checkMaxTicks(cuda);
