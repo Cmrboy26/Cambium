@@ -6,6 +6,8 @@
     {"feature": "self.health_fraction"}, {"feature": "opponent.health_fraction"},
     {"feature": "opponent.alive"},
     {"feature": "relative.x"}, {"feature": "relative.y"}, {"feature": "relative.z"},
+    {"feature": "target.distance_fraction"},
+    {"feature": "target.yaw_error"}, {"feature": "target.pitch_error"},
     {"feature": "self.yaw_fraction"}, {"feature": "self.pitch_fraction"},
     {"feature": "opponent.yaw_fraction"}, {"feature": "opponent.pitch_fraction"},
     {"feature": "self.velocity.x"}, {"feature": "self.velocity.y"}, {"feature": "self.velocity.z"},
@@ -30,6 +32,7 @@
     {"name": "sprint", "values": [false, true]},
     {"name": "yaw", "values": [-20, -10, -5, -2, 0, 2, 5, 10, 20]},
     {"name": "pitch", "values": [-10, -5, -2, 0, 2, 5, 10]},
-    {"name": "use_item", "values": [false, true]}
+    {"name": "use_item", "values": [false, true]},
+    {"name": "sneak", "values": [false, true]}
   ]
 }

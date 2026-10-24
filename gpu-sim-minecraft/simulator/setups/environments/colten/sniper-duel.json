@@ -1,7 +1,7 @@
 {
   "format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
   "name": "colten-sniper-duel",
-  "arena": "../../arenas/colten/sniper-duel.json",
+  "arena": "../../arenas/colten/sniper-duel-nopillars.json",
   "players": {
     "shared": {
       "health": 20,
@@ -9,8 +9,8 @@
         "offhand": "minecraft:air", "armor": {}}
     },
     "overrides": [
-      {"position": [-16, 1, 0], "yaw": -90, "pitch": -5},
-      {"position": [16, 1, 0], "yaw": 90, "pitch": -5}
+      {"position": [-4, 1, 0], "yaw": -90, "pitch": -5},
+      {"position": [4, 1, 0], "yaw": 90, "pitch": -5}
     ]
   },
   "task": {

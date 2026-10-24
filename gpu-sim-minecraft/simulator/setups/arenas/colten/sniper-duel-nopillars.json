@@ -1,0 +1,14 @@
+{
+  "format": "minecraft_sim_arena", "version": 1, "minecraft": "26.3",
+  "name": "colten-sniper-duel",
+  "requires": ["movement", "equipment", "bow"],
+  "rules": {"simulate_food": false, "natural_regeneration": false},
+  "bounds": {"min": [-25, 0, -12], "size": [51, 16, 25]},
+  "blocks": [
+    {"from": [-25, 0, -12], "to": [25, 0, 12], "block": "minecraft:stone"},
+    {"from": [-25, 1, -12], "to": [-25, 3, 12], "block": "minecraft:stone"},
+    {"from": [25, 1, -12], "to": [25, 3, 12], "block": "minecraft:stone"},
+    {"from": [-24, 1, -12], "to": [24, 3, -12], "block": "minecraft:stone"},
+    {"from": [-24, 1, 12], "to": [24, 3, 12], "block": "minecraft:stone"}
+  ]
+}

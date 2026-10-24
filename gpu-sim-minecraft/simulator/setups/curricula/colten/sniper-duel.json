@@ -7,43 +7,88 @@
   "opponents": {
     "target": {"type": "scripted", "controller": "stationary_target"},
     "walker": {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 30, "wall_margin": 2}},
+    "crouching_walker": {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 30, "wall_margin": 2, "sneak": true}},
     "archer": {"type": "scripted", "controller": "archer"},
     "past_learner": {"type": "frozen_self_play", "every_updates": 20}
   },
   "mixtures": {
     "stationary": [{"id": "target", "weight": 1}],
-    "moving": [{"id": "walker", "weight": 1}],
+    "crouching": [{"id": "crouching_walker", "weight": 1}],
+    "mixed_moving": [{"id": "crouching_walker", "weight": 1}, {"id": "walker", "weight": 1}],
     "duel": [{"id": "archer", "weight": 1}, {"id": "past_learner", "weight": 1}]
   },
   "stages": [
     {
       "name": "stationary", "opponents": "stationary",
-      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false}},
+      "spawns": {
+        "sample": "episode",
+        "region": {"min": [-5, 1, -3], "max": [5, 1, 3]},
+        "minimum_separation": 6,
+        "yaw": {"uniform": [-180, 180]},
+        "pitch": {"uniform": [-10, 10]}
+      },
+      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false, "sneak": false}},
       "task_override": {"max_ticks": 300, "rewards": {
-        "doing_damage": 150, "taking_damage": -5, "won_duel": 50, "death": -25,
+        "doing_damage": 100, "taking_damage": -5, "won_duel": 50, "death": -25,
         "win_speed": 10, "episode_timeout": -5, "no_damage_penalty": -10,
         "good_aim": 2, "arrow_progress": 5
       }},
       "snapshots": [{"name": "stationary-complete", "on_completion": true}],
       "evaluations": {"stationary_accuracy": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 1729}},
-      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "stationary_accuracy", "metric": "win_rate", "at_least": 0.8}}]}
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "stationary_accuracy", "metric": "win_rate", "at_least": 0.9}}]}
     },
     {
-      "name": "moving", "opponents": "moving",
-      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false}},
-      "task_override": {"rewards": {
+      "name": "crouching", "opponents": "crouching",
+      "environment": "../../environments/colten/sniper-duel-medium.json",
+      "spawns": {
+        "sample": "episode",
+        "region": {"min": [-9, 1, -5], "max": [9, 1, 5]},
+        "minimum_separation": 8,
+        "yaw": {"uniform": [-180, 180]},
+        "pitch": {"uniform": [-10, 10]}
+      },
+      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false, "sneak": false}},
+      "task_override": {"max_ticks": 300, "rewards": {
         "doing_damage": 20, "taking_damage": -5, "won_duel": 50, "death": -25,
         "win_speed": 10, "episode_timeout": -5, "no_damage_penalty": -10,
         "good_aim": 2, "arrow_progress": 3
       }},
-      "snapshots": [{"name": "moving-complete", "on_completion": true}],
-      "evaluations": {"moving_accuracy": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 1730}},
-      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "moving_accuracy", "metric": "win_rate", "at_least": 0.65}}]}
+      "snapshots": [{"name": "crouching-complete", "on_completion": true}],
+      "evaluations": {"crouching_accuracy": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 1730}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "crouching_accuracy", "metric": "win_rate", "at_least": 0.5}}]}
+    },
+    {
+      "name": "mixed_moving", "opponents": "mixed_moving",
+      "environment": "../../environments/colten/sniper-duel-medium.json",
+      "spawns": {
+        "sample": "episode",
+        "region": {"min": [-9, 1, -5], "max": [9, 1, 5]},
+        "minimum_separation": 12,
+        "yaw": {"uniform": [-180, 180]},
+        "pitch": {"uniform": [-10, 10]}
+      },
+      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false, "sneak": false}},
+      "task_override": {"max_ticks": 300, "rewards": {
+        "doing_damage": 20, "taking_damage": -5, "won_duel": 50, "death": -25,
+        "win_speed": 10, "episode_timeout": -5, "no_damage_penalty": -10,
+        "good_aim": 2, "arrow_progress": 3
+      }},
+      "snapshots": [{"name": "mixed-moving-complete", "on_completion": true}],
+      "evaluations": {"mixed_moving_accuracy": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 1731}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "mixed_moving_accuracy", "metric": "win_rate", "at_least": 0.65}}]}
     },
     {
       "name": "duel", "opponents": "duel", "controls": {"fixed": {}},
+      "environment": "../../environments/colten/sniper-duel-long.json",
+      "spawns": {
+        "sample": "episode",
+        "region": {"min": [-14, 1, -8], "max": [14, 1, 8]},
+        "minimum_separation": 24,
+        "yaw": {"uniform": [-180, 180]},
+        "pitch": {"uniform": [-10, 10]}
+      },
       "snapshots": [{"name": "duel-complete", "on_completion": true}],
-      "evaluations": {"archer_duel": {"every_updates": 20, "worlds": 32, "episodes": 64, "seed": 1731,
+      "evaluations": {"archer_duel": {"every_updates": 20, "worlds": 32, "episodes": 64, "seed": 1732,
         "overrides": {"opponents": "duel"}}},
       "advance": {"updates": 200}
     }

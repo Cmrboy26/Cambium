@@ -10,8 +10,9 @@ strafe_interval (20 ticks), sprint (False), shield (False), and optional
 axe_slot/sword_slot (explicit loadout slots, supplied together). Equipment
 behaviors require their relevant observations and controls, never guessed slots.
 stationary_melee retains aim/attacks/equipment without locomotion options.
-random_walk accepts change_interval (20 ticks) and wall_margin (1.25 blocks),
-using yaw/world rays and independent checkpointed RNG streams per actor.
+random_walk accepts change_interval (20 ticks), wall_margin (1.25 blocks) and
+sneak (False), using yaw/world rays and independent checkpointed RNG streams
+per actor.
 tactical_melee accepts basic_melee options plus style: evasive, aggressive or
 patient. These vary retreat/pressure/charge-based movement, not just timing.
 Checkpoint files are trusted standalone PPO archives, loaded with weights_only.
@@ -378,10 +379,14 @@ class TacticalMeleeController(BasicMeleeController):
 class RandomWalkController(StationaryTargetController):
     def __init__(self, contract, count, seed=1, options=None):
         super().__init__(contract, count, seed)
-        self.options = _options({} if options is None else options, ("change_interval", "wall_margin"))
+        self.options = _options(
+            {} if options is None else options,
+            ("change_interval", "wall_margin", "sneak"),
+        )
         self._description.update(controller="random_walk", options=self.options)
         self.change_interval = _integer(self.options.get("change_interval", 20), "change_interval", 1, 1_000_000)
         self.wall_margin = self.options.get("wall_margin", 1.25)
+        self.sneak = _boolean(self.options, "sneak")
         if (type(self.wall_margin) not in (int, float) or not math.isfinite(self.wall_margin)
                 or not 0 < self.wall_margin < 10):
             raise ValueError("wall_margin must be finite and strictly between 0 and 10 blocks")
@@ -395,6 +400,10 @@ class RandomWalkController(StationaryTargetController):
         for name in ("attack", "jump", "sprint", "shield"):
             if name in self._heads:
                 self._require_choice(name, False)
+        if "sneak" in self._heads:
+            self._require_choice("sneak", False)
+        if self.sneak:
+            self._require_choice("sneak", True)
         self._directions = np.zeros(self.count, dtype=np.int64)
         self._remaining = np.zeros(self.count, dtype=np.int64)
         self._generators = [np.random.default_rng(np.random.SeedSequence([self.seed, actor]))
@@ -417,6 +426,8 @@ class RandomWalkController(StationaryTargetController):
                 self._remaining[actor] = self.change_interval
             self._remaining[actor] -= 1
         self._set(actions, "movement", np.asarray(self._movements)[self._directions[indices]])
+        if self.sneak:
+            self._set(actions, "sneak", np.ones(len(actions), dtype=bool))
         return actions
 
     def reset(self, mask):

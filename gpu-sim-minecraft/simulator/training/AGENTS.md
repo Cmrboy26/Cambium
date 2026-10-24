@@ -415,7 +415,9 @@ Additional scripted controllers:
 - `random_walk` uses `self.yaw_fraction` and all eight `arena.ray_world_*`
   features (50-block normalized distances) to choose among all eight non-neutral
   movement choices. `change_interval` defaults to 20 ticks (integer 1..1,000,000);
-  `wall_margin` defaults to 1.25 blocks (finite, strictly between 0 and 10).
+  `wall_margin` defaults to 1.25 blocks (finite, strictly between 0 and 10), and
+  `sneak` defaults to false. Sneaking requires the policy's boolean `sneak` head;
+  when that head exists, false must be an available choice.
   Resample when the interval expires or a wall blocks the current direction;
   if every direction is obstructed, choose the greatest reported clearance.
   It never attacks, jumps, sprints or uses a shield; those heads require a

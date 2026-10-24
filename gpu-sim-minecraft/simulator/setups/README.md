@@ -168,7 +168,7 @@ Opponent IDs such as `fighter` are names you choose; stages select a named mixtu
 | --- | --- | --- |
 | `scripted` | `stationary_target` | Idle target; no `options` |
 | `scripted` | `basic_melee` | Approaches, aims and attacks; optional settings below |
-| `scripted` | `random_walk` | Roams without attacking; `change_interval` (20 ticks), `wall_margin` (1.25 blocks); needs yaw and all eight world-ray observations |
+| `scripted` | `random_walk` | Roams without attacking; `change_interval` (20 ticks), `wall_margin` (1.25 blocks), optional `sneak` (false); needs yaw and all eight world-ray observations |
 | `scripted` | `stationary_melee` | Aims and retaliates without moving; accepts attack/distance/shield/weapon options, not locomotion options |
 | `scripted` | `tactical_melee` | `basic_melee` options plus `style`: `evasive` retreats/circles, `aggressive` presses forward/jumps, `patient` retreats while recharging |
 | `checkpoint` | Omit | Frozen saved policy; requires compatible checkpoint `path` |

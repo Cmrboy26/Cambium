@@ -187,6 +187,29 @@ class ScriptedChecks(unittest.TestCase):
         for _ in range(8):
             np.testing.assert_array_equal(controller.act(obs), clone.act(obs))
 
+    def test_random_walk_sneak_is_opt_in_and_requires_action_choice(self):
+        legacy = from_legacy(SCHEMA)
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+            "ticks_per_action": 1, "observations": legacy["observations"],
+            "actions": [*legacy["actions"], {"name": "sneak", "values": [False, True]}],
+            "requires": legacy["requires"],
+        })
+        features = {f"arena.ray_world_{angle}": 1 for angle in range(0, 360, 45)}
+        obs = observations(contract, 2, **features)
+        normal = create_controller({"type": "scripted", "controller": "random_walk"},
+                                   contract, 2, seed=9)
+        crouching = create_controller({"type": "scripted", "controller": "random_walk",
+                                       "options": {"sneak": True}}, contract, 2, seed=9)
+        self.assertFalse(decoded(contract, normal.act(obs), "sneak").any())
+        self.assertTrue(decoded(contract, crouching.act(obs), "sneak").all())
+        with self.assertRaisesRegex(ValueError, "requires action sneak"):
+            create_controller({"type": "scripted", "controller": "random_walk",
+                               "options": {"sneak": True}}, from_legacy(SCHEMA), 1)
+        with self.assertRaises(ValueError):
+            create_controller({"type": "scripted", "controller": "random_walk",
+                               "options": {"sneak": "yes"}}, contract, 1)
+
     def test_frozen_self_play_replacement_episode_pinning_and_resume(self):
         contract = policy()
         learner = ActorCritic(contract["observation_dim"], 8,
