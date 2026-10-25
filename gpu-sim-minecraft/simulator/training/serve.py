@@ -51,7 +51,7 @@ class Policy:
             try:
                 schema = validate_contract(manifest.get("schema"))
             except (ValueError, TypeError, KeyError) as error:
-                raise ValueError("Checkpoint is not a compatible standalone two-player PPO policy") from error
+                raise ValueError(f"Checkpoint is not a compatible standalone two-player PPO policy: {error}") from error
         if (saved.get("format") != "minecraft_sim_ppo" or saved.get("version") != 1
             or schema is None or manifest.get("players_per_environment") != 2
                 or manifest.get("learner") not in ("both_shared_policy", "opponent_pool")):

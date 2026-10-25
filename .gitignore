@@ -81,3 +81,4 @@ server/world_backup*/
 server/world_terrain_backup/
 server/logs/
 server/crash-reports/
+.vscode/settings.json
