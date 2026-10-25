@@ -20,6 +20,7 @@ SIM_ENT_COEF="${SIM_ENT_COEF:-}"
 SIM_MAX_GRAD_NORM="${SIM_MAX_GRAD_NORM:-}"
 SIM_THREADS="${SIM_THREADS:-4}"
 SIM_PROFILE_EVERY="${SIM_PROFILE_EVERY:-0}"
+SIM_SAVE_EVERY="${SIM_SAVE_EVERY:-10}"
 SIM_PLAN="${SIM_PLAN:-}"
 SIM_REPLAY_EVERY="${SIM_REPLAY_EVERY:-0}"
 SIM_REPLAY_EVERY_UPDATES="${SIM_REPLAY_EVERY_UPDATES:-0}"
@@ -27,6 +28,7 @@ SIM_REPLAY_DIR="${SIM_REPLAY_DIR:-}"
 SIM_OUTPUT="${SIM_OUTPUT:-$SIM_ROOT/simulator/training/runs/local-$(date +%Y%m%d-%H%M%S)}"
 SIM_RESUME="${SIM_RESUME:-}"
 SIM_INITIALIZE="${SIM_INITIALIZE:-}"
+SIM_START_STAGE="${SIM_START_STAGE:-}"
 
 cd "$SIM_ROOT"
 if [[ ! -d "$SIM_ROOT/simulator/training" ]]; then
@@ -44,12 +46,20 @@ if [[ -n "$SIM_RESUME" && -n "$SIM_INITIALIZE" ]]; then
     echo "ERROR: Choose SIM_RESUME or SIM_INITIALIZE, not both."
     exit 1
 fi
+if [[ -n "$SIM_START_STAGE" && -n "$SIM_RESUME" ]]; then
+    echo "ERROR: SIM_START_STAGE is for new runs and cannot be combined with SIM_RESUME."
+    exit 1
+fi
 for checkpoint in "$SIM_RESUME" "$SIM_INITIALIZE"; do
     if [[ -n "$checkpoint" && ! -f "$checkpoint" ]]; then
         echo "ERROR: Checkpoint not found: $checkpoint"
         exit 1
     fi
 done
+if [[ ! "$SIM_SAVE_EVERY" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: SIM_SAVE_EVERY must be a positive integer."
+    exit 1
+fi
 if [[ "$SIM_REPLAY_EVERY" -lt 0 || ! "$SIM_REPLAY_EVERY_UPDATES" =~ ^(0|[1-9][0-9]*)$ ]]; then
     echo "ERROR: Replay intervals must be nonnegative integers."
     exit 1
@@ -117,6 +127,7 @@ TRAIN_ARGS=(
     --updates "$SIM_UPDATES"
     --threads "$SIM_THREADS"
     --profile-every "$SIM_PROFILE_EVERY"
+    --save-every "$SIM_SAVE_EVERY"
     --library "$LIBRARY"
     --output "$SIM_OUTPUT"
 )
@@ -125,6 +136,7 @@ if [[ -n "$SIM_ROLLOUT_STEPS" ]]; then TRAIN_ARGS+=(--rollout-steps "$SIM_ROLLOU
 if [[ -n "$SIM_PLAN" ]]; then TRAIN_ARGS+=(--plan "$SIM_PLAN"); fi
 if [[ -n "$SIM_RESUME" ]]; then TRAIN_ARGS+=(--resume "$SIM_RESUME"); fi
 if [[ -n "$SIM_INITIALIZE" ]]; then TRAIN_ARGS+=(--initialize "$SIM_INITIALIZE"); fi
+if [[ -n "$SIM_START_STAGE" ]]; then TRAIN_ARGS+=(--start-stage "$SIM_START_STAGE"); fi
 if [[ -n "$SIM_EPOCHS" ]]; then TRAIN_ARGS+=(--epochs "$SIM_EPOCHS"); fi
 if [[ -n "$SIM_MINIBATCH_SIZE" ]]; then TRAIN_ARGS+=(--minibatch-size "$SIM_MINIBATCH_SIZE"); fi
 if [[ -n "$SIM_HIDDEN_DIM" ]]; then TRAIN_ARGS+=(--hidden-dim "$SIM_HIDDEN_DIM"); fi

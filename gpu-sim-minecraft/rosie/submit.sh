@@ -9,6 +9,9 @@ PROFILE_EVERY=0
 SHARED_GPU=false
 MAX_PARALLEL=0
 LINE_MODE=false
+INITIALIZE=""
+START_STAGE=""
+SAVE_EVERY=10
 LEARNER_OVERRIDES=()
 while (( $# )); do
     case "$1" in
@@ -16,6 +19,19 @@ while (( $# )); do
         --local) LOCAL=true; shift ;;
         --line-mode) LINE_MODE=true; shift ;;
         --shared-gpu) SHARED_GPU=true; shift ;;
+        --initialize|--start-stage|--save-every)
+            if (( $# < 2 )); then printf 'Expected a value after %s.\n' "$1" >&2; exit 1; fi
+            case "$1" in
+                --initialize) INITIALIZE="$2" ;;
+                --start-stage) START_STAGE="$2" ;;
+                --save-every)
+                    if [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+                        printf 'Expected a positive integer after --save-every.\n' >&2
+                        exit 1
+                    fi
+                    SAVE_EVERY="$2" ;;
+            esac
+            shift 2 ;;
         --gamma|--gae-lambda|--clip-eps|--vf-coef|--ent-coef|--max-grad-norm)
             if (( $# < 2 )); then printf 'Expected a value after %s.\n' "$1" >&2; exit 1; fi
             variable="${1#--}"
@@ -37,7 +53,7 @@ while (( $# )); do
             PROFILE_EVERY="$2"
             shift 2 ;;
         -h|--help)
-            printf 'Usage: bash rosie/submit.sh [--local] [--dry-run] [--line-mode] [--profile-every N] [--shared-gpu [--max-parallel N]]\n--local builds and trains on this WSL/Linux host; use a local checkout with CUDA installed.\nInteractive settings: Up/Down to navigate, type to edit, Enter on Submit.\nUse comma-separated values in one field for a single-variable sweep.\n--line-mode retains sequential prompts (also used for piped input).\nPPO overrides: --gamma, --gae-lambda, --clip-eps, --vf-coef, --ent-coef, --max-grad-norm VALUE.\nA comma-separated override also works in line mode.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
+            printf 'Usage: bash rosie/submit.sh [--local] [--dry-run] [--line-mode] [--profile-every N] [--shared-gpu [--max-parallel N]] [--initialize CHECKPOINT] [--start-stage NAME] [--save-every N]\n--local builds and trains on this WSL/Linux host; use a local checkout with CUDA installed.\nInteractive settings: Up/Down to navigate, type to edit, Enter on Submit.\nUse comma-separated values in one field for a single-variable sweep.\n--line-mode retains sequential prompts (also used for piped input).\n--initialize loads compatible weights into a new run; --start-stage skips earlier stages.\n--save-every sets the rolling checkpoint cadence in optimizer updates (default 10).\nPPO overrides: --gamma, --gae-lambda, --clip-eps, --vf-coef, --ent-coef, --max-grad-norm VALUE.\nA comma-separated override also works in line mode.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nProfiling defaults to off (0); the interval applies to every submitted job.\n'
             exit 0 ;;
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
@@ -48,6 +64,10 @@ if ! "$SHARED_GPU" && (( MAX_PARALLEL != 0 )); then
 fi
 if "$LOCAL" && "$SHARED_GPU"; then
     printf -- '--local cannot be combined with --shared-gpu. Local sweeps run sequentially.\n' >&2
+    exit 1
+fi
+if "$SHARED_GPU" && { [[ -n "$INITIALIZE" || -n "$START_STAGE" ]] || (( SAVE_EVERY != 10 )); }; then
+    printf 'Checkpoint initialization, stage selection, and custom save cadence are not supported with --shared-gpu.\n' >&2
     exit 1
 fi
 
@@ -185,6 +205,23 @@ if ! "$PYTHON" -m simulator.training.validate_plans "$PLAN"; then
     printf 'Selected training plan validation failed; nothing submitted.\n' >&2
     exit 1
 fi
+if [[ -n "$INITIALIZE" && ! -f "$INITIALIZE" ]]; then
+    printf 'Initialization checkpoint not found from %s: %s\nNothing submitted.\n' "$ROOT" "$INITIALIZE" >&2
+    exit 1
+fi
+if [[ -n "$START_STAGE" ]] && ! "$PYTHON" - "$PLAN" "$START_STAGE" <<'PY'
+import sys
+from simulator.training.plans import load_plan
+
+plan = load_plan(sys.argv[1])
+stages = [stage["name"] for stage in plan["stages"]]
+if sys.argv[2] not in stages:
+    raise SystemExit(f"Unknown start stage {sys.argv[2]!r}; choose one of: {', '.join(stages)}")
+PY
+then
+    printf 'Selected start stage is invalid; nothing submitted.\n' >&2
+    exit 1
+fi
 if "$LOCAL" && ! "$DRY_RUN"; then
     for tool in cmake nvcc flock nvidia-smi; do
         if ! command -v "$tool" >/dev/null 2>&1; then
@@ -198,7 +235,7 @@ if "$LOCAL" && ! "$DRY_RUN"; then
     fi
     nvidia-smi --query-gpu=name --format=csv,noheader
 fi
-if ! DEFAULTS="$("$PYTHON" - "$PLAN" <<'PY'
+if ! DEFAULTS="$("$PYTHON" - "$PLAN" "$START_STAGE" <<'PY'
 import json
 import sys
 from simulator.training.compiler import LEARNER_DEFAULTS
@@ -208,7 +245,9 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 if plan.get("format") != "minecraft_sim_training_plan" or plan.get("version") != 2:
     raise SystemExit("Expected a version-2 training plan")
 stages = plan.get("stages", [])
-budgets = [stage.get("advance", {}).get("updates") for stage in stages]
+start_stage = sys.argv[2]
+start_index = next((index for index, stage in enumerate(stages) if stage.get("name") == start_stage), 0)
+budgets = [stage.get("advance", {}).get("updates") for stage in stages[start_index:]]
 updates = sum(budgets) if budgets and all(type(value) is int and value > 0 for value in budgets) else 1500
 learner = {**LEARNER_DEFAULTS, **plan.get("learner", {})}
 keys = ("hidden_dim", "epochs", "minibatch_size", "lr", "gamma", "gae_lambda", "clip_eps", "vf_coef", "ent_coef", "max_grad_norm")
@@ -370,7 +409,7 @@ prepare_command() {
         printf -v "$SWEEP_VARIABLE" '%s' "${SWEEP_VALUES[index]}"
     fi
     RUN_OUTPUT="simulator/training/runs/${RUN_NAMES[index]}"
-    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY,SIM_PROFILE_EVERY=$PROFILE_EVERY,SIM_GAMMA=$GAMMA,SIM_GAE_LAMBDA=$GAE_LAMBDA,SIM_CLIP_EPS=$CLIP_EPS,SIM_VF_COEF=$VF_COEF,SIM_ENT_COEF=$ENT_COEF,SIM_MAX_GRAD_NORM=$MAX_GRAD_NORM"
+    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_SAVE_EVERY=$SAVE_EVERY,SIM_INITIALIZE=$INITIALIZE,SIM_START_STAGE=$START_STAGE,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY,SIM_PROFILE_EVERY=$PROFILE_EVERY,SIM_GAMMA=$GAMMA,SIM_GAE_LAMBDA=$GAE_LAMBDA,SIM_CLIP_EPS=$CLIP_EPS,SIM_VF_COEF=$VF_COEF,SIM_ENT_COEF=$ENT_COEF,SIM_MAX_GRAD_NORM=$MAX_GRAD_NORM"
     COMMAND=(sbatch --parsable "--job-name=${RUN_NAMES[index]}" "--partition=$PARTITION" "--gres=$GRES"
         "--time=$TIME" "--cpus-per-gpu=$CPUS" "--mem=$MEMORY" "--export=$EXPORTS")
     if [[ "$dependency" != none ]]; then
@@ -391,6 +430,7 @@ prepare_local_command() {
         "SIM_OUTPUT=$RUN_OUTPUT"
         "SIM_ENVS=$ENVS"
         "SIM_UPDATES=$UPDATES"
+        "SIM_SAVE_EVERY=$SAVE_EVERY"
         "SIM_ROLLOUT_STEPS=$ROLLOUT"
         "SIM_HIDDEN_DIM=$HIDDEN"
         "SIM_EPOCHS=$EPOCHS"
@@ -402,7 +442,8 @@ prepare_local_command() {
         "SIM_REPLAY_DIR="
         "SIM_PROFILE_EVERY=$PROFILE_EVERY"
         "SIM_RESUME="
-        "SIM_INITIALIZE="
+        "SIM_INITIALIZE=$INITIALIZE"
+        "SIM_START_STAGE=$START_STAGE"
         "SIM_SWEEP="
         "SIM_GAMMA=$GAMMA"
         "SIM_GAE_LAMBDA=$GAE_LAMBDA"

@@ -484,13 +484,19 @@ print(f"{12345 + count};test-cluster")
         }))
 
     def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None,
-               learner=None, local=False, **settings):
+               learner=None, local=False, initialize=None, start_stage=None, save_every=None, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
         arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
         if profile_every is not None:
             arguments.extend(["--profile-every", str(profile_every)])
+        if initialize is not None:
+            arguments.extend(["--initialize", str(initialize)])
+        if start_stage is not None:
+            arguments.extend(["--start-stage", str(start_stage)])
+        if save_every is not None:
+            arguments.extend(["--save-every", str(save_every)])
         if shared_gpu:
             arguments.append("--shared-gpu")
         if local:
@@ -511,6 +517,19 @@ print(f"{12345 + count};test-cluster")
         self.assertIn("bash rosie/train-local.sh", result.stdout)
         self.assertNotIn("sbatch --parsable", result.stdout)
         self.assertNotIn("Wall-time limit", result.stdout)
+
+    def test_local_dry_run_exports_stage_checkpoint_and_cadence(self):
+        checkpoint = self.root / "prior-run" / "snapshots" / "aim-1.pt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"snapshot")
+        result = self.launch(local=True, initialize=checkpoint, start_stage="stage-2", save_every=250)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = next(shlex.split(line) for line in result.stdout.splitlines()
+                       if line.lstrip().startswith("env MCSIM_CUDA_ARCHITECTURES="))
+        settings = dict(item.split("=", 1) for item in command[1:] if "=" in item)
+        self.assertEqual(settings["SIM_INITIALIZE"], str(checkpoint))
+        self.assertEqual(settings["SIM_START_STAGE"], "stage-2")
+        self.assertEqual(settings["SIM_SAVE_EVERY"], "250")
 
     def test_new_ppo_overrides_and_single_variable_sweep_reach_submissions(self):
         result = self.launch([""] * 16 + ["y"], dry_run=False,
@@ -589,6 +608,31 @@ print(f"{12345 + count};test-cluster")
                          "SIM_LR=0.0003", "Validated 1 plan(s); 0 failed", "Dry run: nothing submitted"):
             self.assertIn(expected, result.stdout)
         self.assertFalse(self.log.exists())
+
+    def test_stage_start_initialization_and_checkpoint_cadence_reach_dry_run(self):
+        checkpoint = self.root / "prior-run" / "latest.pt"
+        checkpoint.parent.mkdir()
+        checkpoint.write_bytes(b"checkpoint")
+        result = self.launch(initialize=checkpoint, start_stage="stage-2", save_every=250)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = next(shlex.split(line) for line in result.stdout.splitlines()
+                       if line.lstrip().startswith("sbatch --parsable"))
+        export = next(argument for argument in command if argument.startswith("--export="))
+        settings = dict(item.split("=", 1) for item in export.removeprefix("--export=ALL,").split(","))
+        self.assertEqual(settings["SIM_INITIALIZE"], str(checkpoint))
+        self.assertEqual(settings["SIM_START_STAGE"], "stage-2")
+        self.assertEqual(settings["SIM_SAVE_EVERY"], "250")
+        self.assertEqual(settings["SIM_UPDATES"], "1700")
+
+    def test_unknown_start_stage_and_missing_checkpoint_block_submission(self):
+        checkpoint = self.root / "missing.pt"
+        for kwargs, expected in (({"start_stage": "missing"}, "Unknown start stage"),
+                                 ({"initialize": checkpoint}, "checkpoint not found")):
+            with self.subTest(kwargs=kwargs):
+                result = self.launch(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+                self.assertFalse(self.log.exists())
 
     def test_shared_gpu_preview_is_one_job_without_creating_files(self):
         result = self.launch(self.sweep_answers(10, [".0001", ".0003", ".0006"]), shared_gpu=True)

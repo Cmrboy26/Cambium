@@ -555,8 +555,17 @@ def run(options, checkpoint=None):
               ROOT / "simulator/training/runs" / datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
     if output.exists() and any(output.iterdir()) and checkpoint is None:
         raise ValueError("Output directory is not empty; choose another output or use --resume")
-    stage_index = saved.get("stage_index", 0)
-    progress = saved.get("progress", {"updates": 0, "episodes": 0, "transitions": 0})
+    if options.start_stage:
+        if checkpoint is not None:
+            raise ValueError("--start-stage cannot be combined with --resume; use --initialize for a new run")
+        stage_names = [stage["name"] for stage in plan["stages"]]
+        if options.start_stage not in stage_names:
+            raise ValueError(f"Unknown start stage {options.start_stage!r}; expected one of: {', '.join(stage_names)}")
+        stage_index = stage_names.index(options.start_stage)
+        progress = {"updates": 0, "episodes": 0, "transitions": 0}
+    else:
+        stage_index = saved.get("stage_index", 0)
+        progress = saved.get("progress", {"updates": 0, "episodes": 0, "transitions": 0})
     completed = saved.get("completed", False)
     if completed:
         raise ValueError("Curriculum is complete; initialize a new plan to continue training")

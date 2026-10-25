@@ -107,6 +107,13 @@ to preview without submitting. Profiling defaults off, ignores inherited
 `SIM_PROFILE_EVERY` in the wizard, and does not add or shift prompts. Choose a
 unique baseline run name. See the [timing schema and report commands](../simulator/training/AGENTS.md#collection-profiling)
 before comparing profiled and ordinary update throughput.
+For a fresh run, `--initialize PATH` loads compatible weights from a prior
+`latest.pt` or retained `snapshots/*.pt` file; `--start-stage NAME` begins at a
+named stage with new optimizer/progress state. Combine them to seed a later
+stage. `--save-every N` sets full-checkpoint cadence in optimizer updates, for
+example `--save-every 250`. These options are not supported in shared-GPU sweep
+mode. Use `--resume PATH` instead to restore full optimizer and stage progress;
+it cannot be combined with `--start-stage`.
 The wizard changes to the project root. Choose GPU and plan first (Enter accepts
 their defaults), then use the editable terminal form: Up/Down or Tab/Shift+Tab
 select a row, type to edit, Ctrl+U clears its value, and Ctrl+C/Ctrl+D cancel.

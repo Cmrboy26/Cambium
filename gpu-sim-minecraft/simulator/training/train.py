@@ -20,6 +20,7 @@ def arguments(argv=None):
     parser.add_argument("--plan", help="Version 2 training plan; defaults to the shield/axe curriculum")
     parser.add_argument("--resume", help="Resume a resolved-experiment checkpoint with fresh episodes")
     parser.add_argument("--initialize", help="Initialize compatible weights for a new experiment")
+    parser.add_argument("--start-stage", help="Start a new plan at this stage; may be combined with --initialize")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--envs", type=positive, help="Worlds: default 16 CPU / 8192 CUDA; restored on resume")
     parser.add_argument("--updates", type=positive, default=100, help="Maximum additional PPO updates")
@@ -58,6 +59,8 @@ def arguments(argv=None):
         parser.error(str(error))
     if options.initialize and options.resume:
         parser.error("Choose --initialize or --resume, not both")
+    if options.start_stage and options.resume:
+        parser.error("Choose --start-stage for a new run or --resume to restore checkpoint progress")
     if (options.replay_every < 0 or options.replay_every_updates < 0
             or options.replay_dir and not (options.replay_every or options.replay_every_updates)):
         parser.error("Replay intervals must be nonnegative; replay-dir requires an enabled replay interval")

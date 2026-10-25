@@ -26,10 +26,12 @@ SIM_HIDDEN_DIM="${SIM_HIDDEN_DIM:-}"
 SIM_LR="${SIM_LR:-}"
 SIM_THREADS="${SIM_THREADS:-4}"
 SIM_PROFILE_EVERY="${SIM_PROFILE_EVERY:-0}"
+SIM_SAVE_EVERY="${SIM_SAVE_EVERY:-10}"
 SIM_PLAN="${SIM_PLAN:-}"
 SIM_SWEEP="${SIM_SWEEP:-}"
 SIM_RESUME="${SIM_RESUME:-}"
 SIM_INITIALIZE="${SIM_INITIALIZE:-}"
+SIM_START_STAGE="${SIM_START_STAGE:-}"
 SIM_REPLAY_EVERY="${SIM_REPLAY_EVERY:-0}"
 SIM_REPLAY_EVERY_UPDATES="${SIM_REPLAY_EVERY_UPDATES:-0}"
 SIM_REPLAY_DIR="${SIM_REPLAY_DIR:-}"
@@ -49,8 +51,8 @@ if [[ -n "${SIM_ENVIRONMENT:-}" || -n "${SIM_SCHEMA:-}" || -n "${SIM_SEED:-}" ]]
     echo "ERROR: SIM_ENVIRONMENT/SIM_SCHEMA/SIM_SEED were replaced by the environment, policy and seed in SIM_PLAN."
     exit 1
 fi
-if [[ -n "$SIM_SWEEP" && ( ! -f "$SIM_SWEEP" || -n "$SIM_PLAN" || -n "$SIM_RESUME" || -n "$SIM_INITIALIZE" ) ]]; then
-    echo "ERROR: SIM_SWEEP needs an existing manifest and cannot be combined with plan/resume/initialize."
+if [[ -n "$SIM_SWEEP" && ( ! -f "$SIM_SWEEP" || -n "$SIM_PLAN" || -n "$SIM_RESUME" || -n "$SIM_INITIALIZE" || -n "$SIM_START_STAGE" ) ]]; then
+    echo "ERROR: SIM_SWEEP needs an existing manifest and cannot be combined with plan/resume/initialize/start-stage."
     exit 1
 fi
 if [[ -z "$SIM_PLAN" && -z "$SIM_RESUME" && -z "$SIM_SWEEP" ]]; then
@@ -68,6 +70,10 @@ if [[ -n "$SIM_RESUME" && -n "$SIM_INITIALIZE" ]]; then
     echo "ERROR: Choose SIM_RESUME or SIM_INITIALIZE, not both."
     exit 1
 fi
+if [[ -n "$SIM_START_STAGE" && -n "$SIM_RESUME" ]]; then
+    echo "ERROR: SIM_START_STAGE is for new runs and cannot be combined with SIM_RESUME."
+    exit 1
+fi
 for checkpoint in "$SIM_RESUME" "$SIM_INITIALIZE"; do
     if [[ -n "$checkpoint" && ! -f "$checkpoint" ]]; then
         echo "ERROR: Checkpoint not found from $SIM_ROOT: $checkpoint"
@@ -76,6 +82,10 @@ for checkpoint in "$SIM_RESUME" "$SIM_INITIALIZE"; do
 done
 if [[ ! "$SIM_PROFILE_EVERY" =~ ^(0|[1-9][0-9]*)$ ]]; then
     echo "ERROR: SIM_PROFILE_EVERY must be a nonnegative integer."
+    exit 1
+fi
+if [[ ! "$SIM_SAVE_EVERY" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: SIM_SAVE_EVERY must be a positive integer."
     exit 1
 fi
 if [[ "$SIM_REPLAY_EVERY" -lt 0 ]]; then
@@ -190,6 +200,7 @@ TRAIN_ARGS=(
     --updates "$SIM_UPDATES" \
     --threads "$SIM_THREADS" \
     --profile-every "$SIM_PROFILE_EVERY" \
+    --save-every "$SIM_SAVE_EVERY" \
     --library "$LIBRARY" \
     --output "$SIM_OUTPUT"
 )
@@ -200,6 +211,7 @@ if [[ -n "$SIM_PLAN" ]]; then
 fi
 if [[ -n "$SIM_RESUME" ]]; then TRAIN_ARGS+=(--resume "$SIM_RESUME"); fi
 if [[ -n "$SIM_INITIALIZE" ]]; then TRAIN_ARGS+=(--initialize "$SIM_INITIALIZE"); fi
+if [[ -n "$SIM_START_STAGE" ]]; then TRAIN_ARGS+=(--start-stage "$SIM_START_STAGE"); fi
 if [[ -n "$SIM_EPOCHS" ]]; then TRAIN_ARGS+=(--epochs "$SIM_EPOCHS"); fi
 if [[ -n "$SIM_MINIBATCH_SIZE" ]]; then TRAIN_ARGS+=(--minibatch-size "$SIM_MINIBATCH_SIZE"); fi
 if [[ -n "$SIM_HIDDEN_DIM" ]]; then TRAIN_ARGS+=(--hidden-dim "$SIM_HIDDEN_DIM"); fi

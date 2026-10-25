@@ -90,7 +90,7 @@
       "snapshots": [{"name": "duel-complete", "on_completion": true}],
       "evaluations": {"archer_duel": {"every_updates": 20, "worlds": 32, "episodes": 64, "seed": 1732,
         "overrides": {"opponents": "duel"}}},
-      "advance": {"updates": 200}
+      "advance": {"updates": 5000}
     }
   ]
 }

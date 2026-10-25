@@ -412,6 +412,16 @@ class SnapshotChecks(unittest.TestCase):
         aim_one = torch.load(output / "snapshots/aim-1.pt", weights_only=True)
         for name, value in first["model"].items():
             torch.testing.assert_close(aim_one["model"][name], value, rtol=0, atol=0)
+        staged_output = self.directory / "snapshot-start-combat"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(staged_output), "--initialize",
+                  str(output / "snapshots/aim-1.pt"), "--start-stage", "combat"])
+        staged = torch.load(staged_output / "latest.pt", weights_only=True)
+        self.assertEqual(staged["research"]["stage_index"], 1)
+        self.assertEqual(staged["research"]["progress"]["updates"], 1)
+        for name, value in aim_one["model"].items():
+            torch.testing.assert_close(staged["research"]["pool"]["controllers"]["past"]["snapshots"][0]["model"][name],
+                                       value, rtol=0, atol=0)
         for path in self.directory.glob("*.json"):
             path.unlink()
         for _ in range(3):
@@ -613,6 +623,14 @@ class SnapshotChecks(unittest.TestCase):
         for name, value in source["model"].items():
             torch.testing.assert_close(frozen["model"][name], value, rtol=0, atol=0)
         self.assertEqual(frozen["fixed"], {"attack": 0})
+        staged = self.directory / "initialized-combat"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "1", "--output", str(staged), "--initialize",
+                  str(output / "latest.pt"), "--start-stage", "combat"])
+        staged_research = torch.load(staged / "latest.pt", weights_only=True)["research"]
+        self.assertEqual(staged_research["stage_index"], 1)
+        self.assertEqual(staged_research["plan"]["stages"][staged_research["stage_index"]]["name"], "combat")
+        self.assertEqual(staged_research["progress"]["updates"], 1)
 
 
 class ResearchChecks(unittest.TestCase):
