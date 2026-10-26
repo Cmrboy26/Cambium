@@ -110,6 +110,12 @@ function Get-MinecraftGameDirectory {
         }
     }
     $game = Resolve-RepositoryPath $selected
+    foreach ($child in @('minecraft', '.minecraft')) {
+        $nestedGame = Join-Path $game $child
+        if (Test-Path -LiteralPath $nestedGame -PathType Container) {
+            throw "Selected directory appears to be a launcher instance folder. Select its Minecraft game folder: $nestedGame"
+        }
+    }
     if ((Split-Path -Leaf $game) -in @('mods', 'sim-replays')) {
         throw 'Select the Minecraft game folder containing mods and sim-replays, not either subfolder.'
     }

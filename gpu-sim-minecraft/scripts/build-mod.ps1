@@ -2,9 +2,11 @@
 .SYNOPSIS
 Build or check the Fabric mod; install only when explicitly requested.
 .DESCRIPTION
-Requires JDK 25 or newer. JavaHome overrides the cached project JDK, JAVA_HOME
-and PATH discovery. Installation requires Minecraft to be closed; it replaces
-the same-named mod JAR but does not remove differently named older versions.
+Generates the shared policy catalogue, then requires JDK 25 or newer. Python
+overrides the standard interpreter discovery. JavaHome overrides the cached
+project JDK, JAVA_HOME and PATH discovery. Installation requires Minecraft to
+be closed; it replaces the same-named mod JAR but does not remove differently
+named older versions.
 .EXAMPLE
 .\scripts\build-mod.ps1
 .EXAMPLE
@@ -15,6 +17,7 @@ the same-named mod JAR but does not remove differently named older versions.
 [CmdletBinding()]
 param(
     [ValidateSet('build', 'check', 'compileJava', 'replayAnalysisChecks')][string] $Task = 'build',
+    [string] $Python,
     [string] $JavaHome,
     [string] $MinecraftDirectory,
     [switch] $Install,
@@ -55,6 +58,8 @@ try {
     }
     $env:JAVA_HOME = $selectedJavaHome
     Write-Host "JAVA_HOME=$selectedJavaHome (restored on exit)"
+    Invoke-WorkflowCommand (Get-WorkflowPython $Python) @('-B',
+        (Join-Path $RepositoryRoot 'scripts/generate-contract.py')) -DryRun:$DryRun
     Invoke-WorkflowCommand (Join-Path $RepositoryRoot 'cambiummod/gradlew.bat') @('-p',
         (Join-Path $RepositoryRoot 'cambiummod'), $Task, '--console=plain', '--no-daemon') -DryRun:$DryRun
 } finally {

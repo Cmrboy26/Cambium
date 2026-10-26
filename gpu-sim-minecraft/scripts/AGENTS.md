@@ -220,15 +220,18 @@ See [dashboard internals](../simulator/training/AGENTS.md#training-dashboard).
 | Parameter | Accepted value / purpose | Default |
 | --- | --- | --- |
 | `-Task` | `build`, `check`, `compileJava`, `replayAnalysisChecks` | `build` |
+| `-Python` | Interpreter command or executable path for policy catalogue generation | Auto Python |
 | `-JavaHome` | JDK 25+ directory | Cached project JDK, then `JAVA_HOME`, then PATH |
 | `-MinecraftDirectory` | Game folder; requires `-Install` | Auto Minecraft when installing |
 | `-Install` | Copy installable JAR into `mods` | Off: build only |
 | `-DryRun` | Preview build/copy | Off |
 
-Cached Java lives in `cambiummod/.gradle/java25`; fresh clones do not contain it.
-The helper never downloads Java or changes the system installation. Default
-output is `cambiummod/build/libs/cambiumfabric-1.0.0.jar`, not `-sources.jar`.
-Close Minecraft before installing. `-Install` requires `-Task build`; it replaces
+The helper first regenerates the shared C++/Java policy tables from
+`contracts/policy_catalogue.json`, then invokes Gradle. Cached Java lives in
+`cambiummod/.gradle/java25`; fresh clones do not contain it. The helper never
+downloads Java or changes the system installation. Default output is
+`cambiummod/build/libs/cambiumfabric-1.0.0.jar`, not `-sources.jar`. Close
+Minecraft before installing. `-Install` requires `-Task build`; it replaces
 only the same-named JAR and does not remove differently named older versions.
 Build-only mode never changes the game installation.
 

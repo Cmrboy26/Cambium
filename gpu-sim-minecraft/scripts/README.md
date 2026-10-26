@@ -44,8 +44,9 @@ checkpoints. CUDA requests never silently fall back to CPU.
 
 ## Minecraft Folder
 
-Install JDK 25 and create a Fabric Minecraft **26.3** instance with matching
-Fabric API. Select its game folder containing `mods`, with Minecraft closed:
+Install Python and JDK 25, and create a Fabric Minecraft **26.3** instance with
+matching Fabric API. The mod build regenerates its policy catalogue from the
+shared contract. Select the game folder containing `mods`, with Minecraft closed:
 
 ```powershell
 $env:MCSIM_MINECRAFT_DIRECTORY = Read-Host 'Minecraft game folder (containing mods)'
