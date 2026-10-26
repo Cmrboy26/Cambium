@@ -1,3 +1,7 @@
 - look for more observation ideas and test them
 - velocity, enemy attack charge (or time since last hit), if they're sprinting or on the ground, stuff like that
 - verify that yaw and pitch are not represented as angles (instead they're represented as sine and cosing or something)
+
+- FUNNY: mcduelresme-2048 vs mc-duelresme-4096 bow duel
+    - 2048 kills themselves when they get to low health lmao
+    - how was this reward created

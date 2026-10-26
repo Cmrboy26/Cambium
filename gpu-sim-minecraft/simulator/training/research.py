@@ -7,6 +7,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import time
 
@@ -793,6 +794,16 @@ def run(options, checkpoint=None):
                     "rng_state": torch.get_rng_state(),
                     "cuda_rng_state": torch.cuda.get_rng_state() if device.type == "cuda" else None}, temporary)
                 temporary.replace(output / "latest.pt")
+                checkpoint_dir = output / "checkpoints"
+                checkpoint_dir.mkdir(exist_ok=True)
+                checkpoint = checkpoint_dir / f"update-{update:08d}.pt"
+                suffix = 1
+                while checkpoint.exists():
+                    checkpoint = checkpoint_dir / f"update-{update:08d}-{suffix:03d}.pt"
+                    suffix += 1
+                checkpoint_temporary = checkpoint.with_suffix(".tmp")
+                shutil.copyfile(output / "latest.pt", checkpoint_temporary)
+                checkpoint_temporary.replace(checkpoint)
             if completed:
                 break
         print(f"Checkpoint: {output / 'latest.pt'}")

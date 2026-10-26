@@ -634,6 +634,22 @@ class SnapshotChecks(unittest.TestCase):
 
 
 class ResearchChecks(unittest.TestCase):
+    def test_save_every_retains_full_checkpoint_history(self):
+        plan = short_plan()
+        for stage in plan["stages"]:
+            stage["advance"] = {"updates": 10}
+        self.path.write_text(json.dumps(plan))
+        output = self.directory / "checkpoint-history"
+        flags = self.flags[:self.flags.index("--save-every")]
+        with contextlib.redirect_stdout(io.StringIO()):
+            main([*flags, "--updates", "5", "--output", str(output), "--save-every", "2"])
+        checkpoints = sorted((output / "checkpoints").glob("update-*.pt"))
+        self.assertEqual([path.name for path in checkpoints],
+                         ["update-00000002.pt", "update-00000004.pt", "update-00000005.pt"])
+        for path, update in zip(checkpoints, (2, 4, 5)):
+            self.assertEqual(torch.load(path, weights_only=True)["update"], update)
+        self.assertEqual(torch.load(output / "latest.pt", weights_only=True)["update"], 5)
+
     def test_learner_overrides_reach_training_metadata_and_resume(self):
         from simulator.training.ppo import compute_gae
         values = {"gamma": 0.8, "gae_lambda": 0.7, "clip_eps": 0.15,

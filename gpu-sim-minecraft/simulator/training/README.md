@@ -40,8 +40,9 @@ For direct combat with guaranteed sword/axe/shield, use
 
 ## Checkpoints
 
-Runs under `simulator/training/runs` contain configuration, metrics and `latest.pt`.
-Checkpoints save every ten updates and on normal completion.
+Runs under `simulator/training/runs` contain configuration, metrics, and the
+rolling `latest.pt`. Full checkpoints are also retained in `checkpoints/` beside
+`replays/`, every ten optimizer updates and on normal completion.
 
 ```powershell
 .\scripts\train.ps1 -Resume latest -Updates 100
