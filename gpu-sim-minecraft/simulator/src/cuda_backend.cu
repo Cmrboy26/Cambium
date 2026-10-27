@@ -86,7 +86,7 @@ std::size_t cellCount(BlockWorldView blocks) {
     return count;
 }
 
-__global__ void advanceEnvironments(BatchView batch, int ticks) {
+__global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* arrow_summaries, int ticks) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(batch.environment_count)) {
         return;
@@ -100,10 +100,18 @@ __global__ void advanceEnvironments(BatchView batch, int ticks) {
             world.processTick();
         }
     }
+    if (arrow_summaries && batch.projectile_states) {
+        for (int player = 0; player < projectile_player_count; ++player) {
+            const auto player_index = index * batch.players_per_environment + player;
+            arrow_summaries[player_index] = summarizeArrowObservation(
+                batch.players[player_index], batch.projectile_states[index], player);
+        }
+    }
 }
 
 __global__ void resetSelected(BatchView batch, const int* ids, int count, const PlayerState* players,
-                              const ProjectileWorldState* projectile_states) {
+                              const ProjectileWorldState* projectile_states,
+                              ArrowObservationSummary* arrow_summaries) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(count)) {
         return;
@@ -126,6 +134,13 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
         for (int slot = 0; slot < destination_state.arrow_capacity; ++slot) {
             destination_state.arrows[slot] = {};
         }
+        if (arrow_summaries) {
+            for (int player = 0; player < projectile_player_count; ++player) {
+                const int player_index = destination * batch.players_per_environment + player;
+                arrow_summaries[player_index] = summarizeArrowObservation(
+                    batch.players[player_index], destination_state, player);
+            }
+        }
     }
 }
 
@@ -139,12 +154,14 @@ struct CudaBatch::Storage {
     DeviceBuffer<ProjectileWorldState> projectile_states;
     DeviceBuffer<ProjectileWorldState> reset_projectile_states;
     DeviceBuffer<ArrowState> projectile_arrows;
+    DeviceBuffer<ArrowObservationSummary> arrow_summaries;
     DeviceBuffer<int> reset_ids;
     DeviceBuffer<PlayerState> reset_players;
     DeviceBuffer<Block> cells;
     DeviceBuffer<BlockWorldView> block_worlds;
     DeviceBuffer<float> sine;
     BatchView view;
+    bool summarize_arrows = false;
 };
 
 bool CudaBatch::available() {
@@ -152,13 +169,14 @@ bool CudaBatch::available() {
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
-CudaBatch::CudaBatch(BatchView initial) : storage_(std::make_unique<Storage>()) {
+CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows) : storage_(std::make_unique<Storage>()) {
     validateHostBatch(initial);
     if (!initial.math.sine_table) {
         throw std::invalid_argument("A shared sine table is required");
     }
     const auto player_count = std::size_t(initial.environment_count) * initial.players_per_environment;
     auto& storage = *storage_;
+    storage.summarize_arrows = summarize_arrows;
     storage.players.allocate(player_count);
     storage.queued.allocate(player_count);
     storage.held.allocate(player_count);
@@ -177,6 +195,9 @@ CudaBatch::CudaBatch(BatchView initial) : storage_(std::make_unique<Storage>()) 
         storage.projectile_states.allocate(initial.environment_count);
         storage.reset_projectile_states.allocate(initial.environment_count);
         storage.projectile_arrows.allocate(arrow_count);
+        if (summarize_arrows) {
+            storage.arrow_summaries.allocate(player_count);
+        }
         std::vector<ProjectileWorldState> projectile_states(initial.environment_count);
         std::vector<ArrowState> arrows(arrow_count);
         for (int index = 0; index < initial.environment_count; ++index) {
@@ -192,6 +213,18 @@ CudaBatch::CudaBatch(BatchView initial) : storage_(std::make_unique<Storage>()) 
         }
         storage.projectile_arrows.upload(arrows.data());
         storage.projectile_states.upload(projectile_states.data());
+        if (summarize_arrows) {
+            std::vector<ArrowObservationSummary> summaries(player_count);
+            for (int environment = 0; environment < initial.environment_count; ++environment) {
+                for (int player = 0; player < initial.players_per_environment; ++player) {
+                    summaries[std::size_t(environment) * initial.players_per_environment + player]
+                        = summarizeArrowObservation(
+                            initial.players[std::size_t(environment) * initial.players_per_environment + player],
+                            initial.projectile_states[environment], player);
+                }
+            }
+            storage.arrow_summaries.upload(summaries.data());
+        }
     }
 
     std::vector<Block> cells;
@@ -235,7 +268,8 @@ void CudaBatch::step(int ticks) {
         throw std::invalid_argument("Tick count must be positive");
     }
     const auto count = static_cast<unsigned int>(storage_->view.environment_count);
-    advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block>>>(storage_->view, ticks);
+    advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block>>>(
+        storage_->view, storage_->arrow_summaries.data, ticks);
     checkCuda(cudaGetLastError());
 }
 
@@ -269,7 +303,8 @@ void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const Playe
                     threads_per_block>>>(storage_->view, storage_->reset_ids.data,
                                         static_cast<int>(count), storage_->reset_players.data,
                                         storage_->projectile_states.count != 0
-                                            ? storage_->reset_projectile_states.data : nullptr);
+                                            ? storage_->reset_projectile_states.data : nullptr,
+                                        storage_->arrow_summaries.data);
     checkCuda(cudaGetLastError());
 }
 
@@ -303,6 +338,22 @@ void CudaBatch::download(BatchView destination) const {
             std::copy_n(arrows.data() + index * projectile_arrow_capacity, projectile_arrow_capacity,
                         destination_state.arrows);
         }
+    }
+}
+
+void CudaBatch::downloadForTraining(BatchView destination, ArrowObservationSummary* arrow_summaries) const {
+    validateHostBatch(destination);
+    if (destination.environment_count != storage_->view.environment_count
+        || destination.players_per_environment != storage_->view.players_per_environment) {
+        throw std::invalid_argument("Training batch size mismatch");
+    }
+    if (arrow_summaries && storage_->arrow_summaries.count == 0) {
+        throw std::invalid_argument("Arrow summaries were not enabled for this CUDA batch");
+    }
+    storage_->players.download(destination.players);
+    storage_->worlds.download(destination.worlds);
+    if (arrow_summaries) {
+        storage_->arrow_summaries.download(arrow_summaries);
     }
 }
 

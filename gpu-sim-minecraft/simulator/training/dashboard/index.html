@@ -172,6 +172,15 @@
             <section class="chart-group" aria-labelledby="runtime-title">
                 <h3 id="runtime-title">Runtime &amp; throughput</h3>
                 <dl class="runtime-summary"><div><dt>Latest transitions / second</dt><dd id="stat-throughput">--</dd></div><div><dt>Completed rounds</dt><dd id="stat-rounds">--</dd></div><div><dt>Recorded timeouts</dt><dd id="stat-timeouts">--</dd></div></dl>
+                <div class="analytics-controls">
+                    <button type="button" id="analytics-request" class="analytics-request-button" aria-label="Profile the next training rollout" title="Profile the next training rollout" disabled><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i><span>Profile next rollout</span></button>
+                    <p id="analytics-request-status" role="status">Select a supported research run to request a profile.</p>
+                </div>
+                <details id="analytics-profile" class="analytics-profile" hidden>
+                    <summary>Collection profile</summary>
+                    <p id="analytics-profile-meta"></p>
+                    <div id="analytics-profile-details" class="analytics-profile-details"></div>
+                </details>
                 <div class="charts">
                     <article class="chart"><h2>Throughput <span>Player transitions / second</span></h2><div class="plot"><canvas id="throughput-chart" role="img" aria-label="Player transitions per second by PPO update"></canvas></div></article>
                     <article class="chart"><h2>Update duration <span>Seconds</span></h2><div class="plot"><canvas id="duration-chart" role="img" aria-label="Collection, optimization, evaluation and replay seconds by PPO update"></canvas></div></article>

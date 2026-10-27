@@ -26,16 +26,18 @@ squeue -u "$USER"
 tail -f rosie/logs/gpu-sim-<JOB_ID>.out
 ```
 
-The selected plan is validated; `bash rosie/submit.sh --dry-run` previews without submitting.
+The wizard validates the selected plan before submitting; an invalid plan stops
+with no job submitted. `bash rosie/submit.sh --dry-run` also validates and
+previews the job without submitting.
 The job/run name appears in the dashboard. Sweep one field with comma-separated
 values (e.g. entropy `0,0.005,0.01`). Jobs get `-<value>` suffixes and train
 concurrently with locked builds and private libraries. [Options](AGENTS.md#interactive-submission).
-Start a fresh run from compatible weights and/or a named plan stage with
-`--initialize PATH` and `--start-stage NAME`. `--save-every N` sets rolling
-full-checkpoint cadence in optimizer updates (use `--save-every 250` for
-250-update intervals). These options are not available in shared-GPU sweep mode.
-Use `--resume PATH` only when restoring optimizer and stage progress from a full
-`latest.pt` checkpoint; it cannot be combined with `--start-stage`.
+The form includes optional checkpoint initialization/resume, curriculum start
+stage, full-checkpoint save cadence, and verbose timing-profile interval fields.
+Alternatively, `--initialize PATH`, `--resume PATH`, `--start-stage NAME`,
+`--save-every N`, and `--profile-every N` set their initial values. Resume restores
+optimizer and curriculum progress from a full checkpoint and cannot be combined
+with initialization or stage selection.
 Use `--line-mode` for the original sequential prompts and `multiple` entry.
 Use `--shared-gpu` for one job and an overlaid PNG; `--max-parallel N` caps concurrency. [Details](AGENTS.md#shared-gpu-sweeps).
 For a one-update CUDA smoke test, use `sbatch rosie/train.sbatch` instead.

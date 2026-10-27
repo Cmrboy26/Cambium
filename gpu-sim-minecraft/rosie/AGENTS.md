@@ -104,16 +104,21 @@ Run `bash rosie/submit.sh` from any working directory using the script's path.
 Use `bash rosie/submit.sh --profile-every 10` to record collection profiles every
 ten global updates for all jobs in that invocation; combine with `--dry-run`
 to preview without submitting. Profiling defaults off, ignores inherited
-`SIM_PROFILE_EVERY` in the wizard, and does not add or shift prompts. Choose a
+`SIM_PROFILE_EVERY` in the wizard, and can also be set in the editable form.
+Choose a
 unique baseline run name. See the [timing schema and report commands](../simulator/training/AGENTS.md#collection-profiling)
 before comparing profiled and ordinary update throughput.
-For a fresh run, `--initialize PATH` loads compatible weights from a prior
-`latest.pt` or retained `snapshots/*.pt` file; `--start-stage NAME` begins at a
-named stage with new optimizer/progress state. Combine them to seed a later
-stage. `--save-every N` sets full-checkpoint cadence in optimizer updates, for
-example `--save-every 250`. These options are not supported in shared-GPU sweep
-mode. Use `--resume PATH` instead to restore full optimizer and stage progress;
-it cannot be combined with `--start-stage`.
+The editable form exposes the verbose timing-profile interval (zero disables
+profiling), checkpoint mode/path, curriculum start stage, and full-checkpoint
+save cadence. For a fresh run, `--initialize PATH` loads compatible weights from
+a prior `latest.pt` or retained `snapshots/*.pt` file; `--start-stage NAME`
+begins at a named stage with new optimizer/progress state. Combine them to seed a
+later stage. `--save-every N` sets full-checkpoint cadence in optimizer updates,
+for example `--save-every 250`. Use `--resume PATH` to restore full optimizer
+and stage progress instead; resume requires the original plan and compatible
+world-count, rollout, and model settings, and cannot be combined with
+initialization or stage selection. Checkpoint controls, stage selection, and a
+custom save cadence are not supported in shared-GPU sweep mode.
 The wizard changes to the project root. Choose GPU and plan first (Enter accepts
 their defaults), then use the editable terminal form: Up/Down or Tab/Shift+Tab
 select a row, type to edit, Ctrl+U clears its value, and Ctrl+C/Ctrl+D cancel.
@@ -147,9 +152,10 @@ paths separately to check all curricula.
 
 World counts are starting points, not benchmarked optima. Each job requests one
 GPU, eight CPUs and 24 GB host RAM by default. Other prompts cover plan selection,
-job name, update cap, learner settings, CPU threads and replay cadence. Learner
-defaults come from the selected plan; the default update cap sums plain update
-budgets, or falls back to 1,500 for other advancement rules. All values are editable.
+job name, update cap, learner settings, CPU threads, replay cadence, checkpoint
+controls and profiling/checkpoint intervals. Learner defaults come from the
+selected plan; the default update cap sums plain update budgets, or falls back
+to 1,500 for other advancement rules. All values are editable.
 The wizard requires Bash 4+ and Python 3 with the training requirements to preview a submission.
 
 The job/run name sets both the Slurm name and `SIM_OUTPUT` under

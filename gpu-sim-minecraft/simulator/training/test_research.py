@@ -394,6 +394,36 @@ class SnapshotChecks(unittest.TestCase):
         config = json.loads((output / "config.json").read_text())
         self.assertTrue(config["options"]["dashboard_replay_requests"])
 
+    def test_dashboard_analytics_request_profiles_only_the_next_rollout(self):
+        from simulator.training.analytics_requests import create_request, read_request
+        from simulator.training.research import collect as collect_training
+
+        output = self.directory / "dashboard-analytics-request"
+        profile_modes = []
+
+        def collect_then_request(*args, **kwargs):
+            profile_modes.append(kwargs.get("profile", False))
+            result = collect_training(*args, **kwargs)
+            if len(profile_modes) == 1:
+                create_request(output)
+            return result
+
+        with patch("simulator.training.research.collect", side_effect=collect_then_request), \
+                contextlib.redirect_stdout(io.StringIO()):
+            main([*self.flags, "--updates", "3", "--output", str(output)])
+        request = read_request(output)
+        self.assertEqual(profile_modes, [False, True, False])
+        self.assertEqual(request["status"], "completed")
+        self.assertEqual(request["update"], 2)
+        self.assertEqual(request["stage"], "combat")
+        self.assertEqual(request["profile"]["version"], 1)
+        rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertNotIn("collection_profile", rows[0])
+        self.assertEqual(rows[1]["collection_profile"], request["profile"])
+        self.assertNotIn("collection_profile", rows[2])
+        config = json.loads((output / "config.json").read_text())
+        self.assertTrue(config["options"]["dashboard_analytics_requests"])
+
     def test_named_saves_rolling_opponent_resume_evaluation_and_replay(self):
         self.raw["snapshots"] = [{"name": "final", "on_completion": True}]
         self.raw["stages"][0]["snapshots"] = [{"name": "aim-1", "at_updates": 1},

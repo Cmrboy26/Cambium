@@ -1321,6 +1321,70 @@ async function getJson(path, signal) {
     return response.json();
 }
 
+function appendProfileGroup(container, title, values, unit, digits = 3) {
+    if (!values || !Object.keys(values).length) return;
+    const section = document.createElement("section");
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    const list = document.createElement("dl");
+    for (const [name, value] of Object.entries(values).sort((left, right) => right[1] - left[1])) {
+        const term = document.createElement("dt");
+        term.textContent = name.replaceAll("_", " ");
+        const detail = document.createElement("dd");
+        detail.textContent = `${format(value, digits)}${unit}`;
+        list.append(term, detail);
+    }
+    section.append(heading, list);
+    container.append(section);
+}
+
+function renderAnalyticsRequest(data) {
+    const button = element("analytics-request");
+    const request = data?.request;
+    const supported = data?.supported === true;
+    button.disabled = !supported || request?.status === "pending" || request?.status === "running";
+    const status = element("analytics-request-status");
+    if (!supported) status.textContent = "This run does not support dashboard analytics requests.";
+    else if (!request) status.textContent = "Profile the next rollout at an update boundary.";
+    else if (request.status === "pending") status.textContent = "Queued; profiling will start at the next update boundary.";
+    else if (request.status === "running") status.textContent = `Profiling update ${format(request.update)} (${request.stage}).`;
+    else if (request.status === "failed") status.textContent = `Profile failed: ${request.error ?? "The trainer could not collect timings."}`;
+    else status.textContent = `Profile captured at update ${format(request.update)} (${request.stage}).`;
+
+    const profile = request?.status === "completed" ? request.profile : null;
+    const disclosure = element("analytics-profile");
+    disclosure.hidden = !profile;
+    if (!profile) return;
+    element("analytics-profile-meta").textContent =
+        `Collection ${format(profile.total_seconds, 3)}s; final synchronization ${format(profile.synchronize_seconds, 3)}s; unaccounted ${format(profile.unaccounted_seconds, 3)}s.`;
+    const details = element("analytics-profile-details");
+    details.replaceChildren();
+    const wall = Object.fromEntries(Object.entries(profile.seconds ?? {}).filter(([name]) => !name.includes(".")));
+    const subphases = Object.fromEntries(Object.entries(profile.seconds ?? {}).filter(([name]) => name.includes(".")));
+    appendProfileGroup(details, "Wall phases (seconds)", wall, "s");
+    appendProfileGroup(details, "Subphases included in wall phases (seconds)", subphases, "s");
+    appendProfileGroup(details, "Native calls (seconds)", profile.native_seconds, "s");
+    appendProfileGroup(details, "CUDA stream spans (seconds)", profile.cuda_stream_seconds, "s");
+    appendProfileGroup(details, "Collection counts", profile.counts, "", 0);
+}
+
+async function requestAnalytics() {
+    const identity = element("run").value;
+    if (!identity) return;
+    const button = element("analytics-request");
+    button.disabled = true;
+    element("analytics-request-status").textContent = "Submitting profile request...";
+    try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(identity)}/analytics-request`,
+            {method: "POST", cache: "no-store"});
+        if (!response.ok) throw new Error(`Request failed (${response.status}).`);
+        await refresh();
+    } catch (error) {
+        element("analytics-request-status").textContent = error.message;
+        button.disabled = false;
+    }
+}
+
 async function refresh() {
     const ticket = ++requestNumber;
     pending?.abort();
@@ -1339,6 +1403,7 @@ async function refresh() {
         if (displayedRun !== identity) {
             windowStart = windowEnd = null;
             windowStage = "";
+            renderAnalyticsRequest(null);
             element("window-stage").value = "";
             records = [];
             renderConfig(null);
@@ -1355,6 +1420,9 @@ async function refresh() {
             element("empty").textContent = "Waiting for the first PPO update.";
             renderConfig(data.config);
             renderRecords();
+            const analytics = await getJson(`/api/runs/${encodeURIComponent(identity)}/analytics-request`, controller.signal);
+            if (ticket !== requestNumber || identity !== select.value) return;
+            renderAnalyticsRequest(analytics);
             notice([...data.warnings, preferenceError].filter(Boolean).join(" "));
         } else {
             element("run-path").textContent = "";
@@ -1363,6 +1431,7 @@ async function refresh() {
             records = [];
             renderConfig(null);
             renderRecords();
+            renderAnalyticsRequest(null);
             notice(preferenceError);
         }
         element("connection").textContent = element("live").checked ? "Connected" : "Paused";
@@ -1398,6 +1467,7 @@ try {
         element(id).addEventListener("change", () => {renderPerformance(); redrawCharts();});
     }
     element("run").addEventListener("change", refresh);
+    element("analytics-request").addEventListener("click", requestAnalytics);
     element("refresh").addEventListener("click", refresh);
     element("live").addEventListener("change", () => {
         if (element("live").checked) refresh();

@@ -16,6 +16,18 @@ For Linux or manual Python/library setup, see [AGENTS.md](AGENTS.md#setup).
 CUDA needs a CUDA-built simulator and CUDA-enabled PyTorch; see
 [CUDA setup](AGENTS.md#cuda-mode). Recreate `.venv` and builds on each machine.
 
+### Linux CPU Smoke Test
+
+After the [Linux native build](../README.md#linux-build), from the repository root:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r simulator/training/requirements.txt
+.venv/bin/python -B -m simulator.training.train --device cpu --envs 2 --updates 1 --rollout-steps 16
+```
+
+Add `--plan simulator/setups/curricula/<owner>/<plan>.json` to run your setup.
+
 ## Train
 
 ```powershell

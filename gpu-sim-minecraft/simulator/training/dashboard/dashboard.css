@@ -229,6 +229,19 @@ legend { float: left; padding: 0; margin-right: 10px; color: var(--muted); }
 .chart-mode { margin: -5px 0 12px; font-size: 11px; }
 .chart-mode span { padding: 5px 10px; }
 .plot { position: relative; height: 225px; width: 100%; }
+.analytics-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.analytics-request-button { width: auto; min-height: 34px; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.analytics-request-button svg { width: 16px; height: 16px; }
+.analytics-request-button:disabled { opacity: 0.5; cursor: default; }
+#analytics-request-status, #analytics-profile-meta { margin: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.analytics-profile { margin: 10px 0 16px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 11px; }
+.analytics-profile summary { cursor: pointer; color: var(--ink); font-weight: 600; }
+.analytics-profile-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 10px 20px; margin-top: 10px; }
+.analytics-profile-details section { min-width: 0; }
+.analytics-profile-details h4 { margin: 0 0 4px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.analytics-profile-details dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; margin: 0; }
+.analytics-profile-details dt { overflow-wrap: anywhere; }
+.analytics-profile-details dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 .replay-controls { padding: 10px 12px; border-top: 1px solid var(--line); font-size: 11px; }
 .replay-selection { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .replay-selection select { flex: 1; width: 0; min-width: 0; font-size: 11px; }

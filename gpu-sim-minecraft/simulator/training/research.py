@@ -508,6 +508,11 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
 
 
 def run(options, checkpoint=None):
+    from simulator.training.analytics_requests import (
+        finish_request as finish_analytics_request,
+        mark_running as mark_analytics_request_running,
+        read_request as read_analytics_request,
+    )
     from simulator.training.replay_requests import finish_request, read_request, requested_replay_round
 
     run_started = time.perf_counter()
@@ -618,6 +623,7 @@ def run(options, checkpoint=None):
         evaluations = saved.get("evaluations", {})
         config = vars(options).copy()
         config["dashboard_replay_requests"] = True
+        config["dashboard_analytics_requests"] = True
         run_metadata = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
         run_metadata.update(learner="opponent_pool", controls=stage["controls"],
                             experiment=deployment_summary(plan, stage, stage_index))
@@ -632,10 +638,30 @@ def run(options, checkpoint=None):
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
             fixed = fixed_indices(plan["policy"], stage["controls"])
-            rollout, observations, endings, timeouts = collect(
-                model, worlds, pool, observations, options.rollout_steps, device, fixed,
-                profile=options.profile_every > 0 and update % options.profile_every == 0,
-                learner=plan["learner"])
+            periodic_profile = options.profile_every > 0 and update % options.profile_every == 0
+            analytics_request = None
+            try:
+                request = read_analytics_request(output)
+                if (request is not None and request["status"] in ("pending", "running")
+                        and mark_analytics_request_running(output, request["request_id"], update, stage["name"])):
+                    analytics_request = request
+            except (OSError, ValueError) as error:
+                print(f"Dashboard analytics request could not be read: {error}")
+            try:
+                rollout, observations, endings, timeouts = collect(
+                    model, worlds, pool, observations, options.rollout_steps, device, fixed,
+                    profile=periodic_profile or analytics_request is not None, learner=plan["learner"])
+            except RuntimeError as error:
+                if (analytics_request is None or periodic_profile
+                        or "collection profiling" not in str(error)):
+                    raise
+                finish_analytics_request(output, analytics_request["request_id"], "failed",
+                                         error=str(error)[:500])
+                print(f"Dashboard analytics request failed: {error}")
+                analytics_request = None
+                rollout, observations, endings, timeouts = collect(
+                    model, worlds, pool, observations, options.rollout_steps, device, fixed,
+                    profile=False, learner=plan["learner"])
             collection_seconds = time.perf_counter() - start
             optimization_start = time.perf_counter()
             statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs,
@@ -773,6 +799,13 @@ def run(options, checkpoint=None):
             print(json.dumps(statistics, allow_nan=False))
             with (output / "metrics.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps(statistics, allow_nan=False) + "\n")
+            if analytics_request is not None:
+                try:
+                    finish_analytics_request(output, analytics_request["request_id"], "completed",
+                                             update=update, stage=stage["name"],
+                                             profile=rollout["collection_profile"])
+                except (OSError, ValueError) as error:
+                    print(f"Dashboard analytics request could not be completed: {error}")
             if update % options.save_every == 0 or update == base_update + options.updates or completed:
                 scenario, _ = worlds.episode(0)
                 manifest = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])

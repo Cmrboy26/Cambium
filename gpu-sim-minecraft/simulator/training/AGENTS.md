@@ -112,6 +112,13 @@ allocation/thread count and replay/evaluation cadence. Keep each job's config,
 metrics and Slurm log as its baseline provenance. Timing instrumentation itself
 does not draw RNG or alter the order of sampling, policy actions or updates.
 
+Research runs expose a dashboard one-shot profile request. The dashboard writes
+an atomic request record in the run directory; the trainer consumes it at an
+update boundary, profiles that rollout, and stores the result in both the
+request record and that update's metrics row. This intentionally slows one
+update. A request remains pending until training reaches another update; runs
+started without the request-support marker cannot service it.
+
 ## Standalone Baseline Diagnostics
 
 `python -B -m simulator.training.evaluate_checkpoints prepare --output NEW_BUNDLE`

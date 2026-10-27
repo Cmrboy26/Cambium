@@ -52,44 +52,29 @@ inline void movementObservation(float* catalogue, const PlayerState& source, con
 // Source: minecraft-26.3-src/net/minecraft/world/entity/projectile/Projectile.java, getOwner (379);
 // minecraft-26.3-src/net/minecraft/world/entity/projectile/arrow/AbstractArrow.java, tick (173-266).
 inline void arrowObservation(float* catalogue, const PlayerState& source, const PlayerState& target,
-                             const ProjectileWorldState& projectiles, int source_player) {
-    const auto& bow = projectiles.bows[source_player];
-    catalogue[89] = static_cast<float>(bow.ordinary_arrows) / 64.0F;
+                             const ArrowObservationSummary& summary) {
+    catalogue[89] = static_cast<float>(summary.ordinary_arrows) / 64.0F;
     catalogue[90] = source.using_bow ? 1.0F : 0.0F;
-    catalogue[91] = source.using_bow ? bowPower(bow.draw_ticks) : 0.0F;
+    catalogue[91] = source.using_bow ? bowPower(summary.draw_ticks) : 0.0F;
     catalogue[92] = source.weapon == WeaponItem::bow ? 1.0F : 0.0F;
     catalogue[93] = target.weapon == WeaponItem::bow ? 1.0F : 0.0F;
     catalogue[94] = target.using_bow ? 1.0F : 0.0F;
     std::fill_n(catalogue + 95, 7, 0.0F);
-
-    int nearest_slot = -1;
-    double nearest_distance = 2500.0;
-    for (int slot = 0; slot < projectiles.arrow_capacity; ++slot) {
-        const auto& arrow = projectiles.arrows[slot];
-        if (!arrow.active || arrow.in_ground || arrow.owner != 1 - source_player
-            || arrow.velocity.lengthSquared() == 0.0) {
-            continue;
-        }
-        const Vec3 relative{arrow.position.x - source.position.x, arrow.position.y - source.position.y,
-                            arrow.position.z - source.position.z};
-        const double distance = relative.lengthSquared();
-        if (distance <= 2500.0 && (nearest_slot < 0 || distance < nearest_distance)) {
-            nearest_slot = slot;
-            nearest_distance = distance;
-        }
-    }
-    if (nearest_slot < 0) {
+    if (!summary.found) {
         return;
     }
-
-    const auto& arrow = projectiles.arrows[nearest_slot];
     catalogue[95] = 1.0F;
-    catalogue[96] = static_cast<float>((arrow.position.x - source.position.x) / 10.0);
-    catalogue[97] = static_cast<float>((arrow.position.y - source.position.y) / 10.0);
-    catalogue[98] = static_cast<float>((arrow.position.z - source.position.z) / 10.0);
-    catalogue[99] = static_cast<float>(arrow.velocity.x - source.velocity.x);
-    catalogue[100] = static_cast<float>(arrow.velocity.y - source.velocity.y);
-    catalogue[101] = static_cast<float>(arrow.velocity.z - source.velocity.z);
+    catalogue[96] = static_cast<float>(summary.relative_position.x / 10.0);
+    catalogue[97] = static_cast<float>(summary.relative_position.y / 10.0);
+    catalogue[98] = static_cast<float>(summary.relative_position.z / 10.0);
+    catalogue[99] = static_cast<float>(summary.relative_velocity.x);
+    catalogue[100] = static_cast<float>(summary.relative_velocity.y);
+    catalogue[101] = static_cast<float>(summary.relative_velocity.z);
+}
+
+inline void arrowObservation(float* catalogue, const PlayerState& source, const PlayerState& target,
+                             const ProjectileWorldState& projectiles, int source_player) {
+    arrowObservation(catalogue, source, target, summarizeArrowObservation(source, projectiles, source_player));
 }
 
 inline std::array<float, 22> baseObservation(const PlayerState& source, const PlayerState& target,

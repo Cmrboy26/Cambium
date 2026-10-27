@@ -6,19 +6,24 @@ with the Cambium Fabric mod. This is a focused simulation, not a server replacem
 
 ## Get Started
 
-Follow the [setup guide](scripts/README.md#first-time-setup) on a new machine.
-From the repository root:
+On Windows, follow the [first-time setup guide](scripts/README.md#first-time-setup)
+from the repository root. It installs Python requirements, builds the CPU
+simulator and runs checks:
 
 ```powershell
 .\scripts\setup.ps1
-.\scripts\check.ps1 -Build
-.\scripts\train.ps1
+.\scripts\train.ps1 -Updates 1 -Environments 2 -RolloutSteps 16
 ```
 
-For GPU training on a configured CUDA machine:
+For local Linux CPU training, use the [Linux native build](simulator/README.md#linux-build)
+and the short [training smoke test](simulator/training/README.md#linux-cpu-smoke-test).
+For GPU jobs on Rosie, follow the [Rosie setup and submission guide](rosie/README.md).
+For manual native builds and CUDA checks, see the [simulator guide](simulator/README.md).
+
+On a configured Windows CUDA machine, train with:
 
 ```powershell
-.\scripts\train.ps1 -Device cuda -Environments 8192 -Schema v2
+.\scripts\train.ps1 -Device cuda -Environments 8192
 ```
 
 Runs, metrics, checkpoints and replay samples are saved under
@@ -32,10 +37,10 @@ Runs, metrics, checkpoints and replay samples are saved under
 | [Scripts](scripts/README.md) | Setup, training, dashboard, inference and replay commands. |
 | [Simulator](simulator/README.md) | Native builds, checks and benchmarks. |
 | [Training](simulator/training/README.md) | Python setup, experiments and checkpoints. |
+| [Training setups](simulator/setups/README.md) | Author, validate and train experiment definitions. |
+| [Rosie](rosie/README.md) | Linux/WSL setup, GPU job submission, artifacts and dashboard. |
 | [Minecraft mod](cambiummod/README.md) | Install the mod, record sessions and run live duels. |
 | [Backend](backend/README.md) | Shared policy model and PPO constants. |
-
-For Linux setup and the standalone simulator on Rosie, see the [Rosie guide](rosie/README.md).
 
 Experiment with terrain, loadouts and policy inputs using
 [research-duel.json](simulator/environments/research-duel.json) and the

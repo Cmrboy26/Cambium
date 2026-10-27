@@ -11,6 +11,11 @@ from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from simulator.training.analytics_requests import (
+    AnalyticsRequestConflict,
+    AnalyticsRequestUnsupported,
+    finish_request as finish_analytics_request,
+)
 from simulator.training.dashboard import RunStore, make_server
 from simulator.training.metrics import CATALOG
 from simulator.training.replay_requests import (
@@ -68,6 +73,9 @@ class DashboardChecks(unittest.TestCase):
         self.assertEqual(len(page.ids), len(set(page.ids)), "Dashboard IDs must remain unique")
         self.assertIn("replay-request", page.ids)
         self.assertIn("replay-request-status", page.ids)
+        self.assertIn("analytics-request", page.ids)
+        self.assertIn("analytics-request-status", page.ids)
+        self.assertIn("analytics-profile", page.ids)
         ordered = ["run-title", "milestone-browser", "milestone-strip", "milestone-details", "milestone-metrics",
                  "run-identity", "run-context", "stat-update", "stat-remaining",
                    "results", "outcomes-title", "optimization-title", "runtime-title", "curriculum",
@@ -95,6 +103,38 @@ class DashboardChecks(unittest.TestCase):
             self.assertEqual(page.window_controls[f"window-{bound}"][1]["type"], "number")
             self.assertEqual(page.window_controls[f"window-{bound}-slider"][1]["type"], "range")
         self.assertEqual(page.window_controls["window-stage"][0], "select")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for analytics rendering checks")
+    def test_analytics_profile_rendering_uses_text_nodes(self):
+        script = Path(__file__).with_name("dashboard") / "dashboard.js"
+        result = subprocess.run(["node", "-e", r"""
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
+class Node {
+    constructor(){this.children=[];this.dataset={};this.hidden=false;}
+    set textContent(value){this.text=String(value);this.children=[];}
+    get textContent(){return this.text??this.children.map(child=>child.textContent).join(' ');}
+    set innerHTML(value){throw new Error('Profile values must never use innerHTML');}
+    append(...children){this.children.push(...children);}
+    replaceChildren(...children){this.children=children;}
+}
+const nodes=new Map();
+const document={getElementById(id){if(!nodes.has(id))nodes.set(id,new Node());return nodes.get(id);},
+    createElement:()=>new Node(),createDocumentFragment:()=>new Node(),querySelectorAll:()=>[],addEventListener(){}};
+const context=vm.createContext({document,Intl,setInterval(){},window:{location:{hash:''},addEventListener(){}}});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);
+context.profile={version:1,seconds:{physics:1.25,'reset.apply':0.2},native_seconds:{download:0.4},
+    cuda_stream_seconds:{transfer:0.3},counts:{worlds:4},total_seconds:1.8,synchronize_seconds:0.1,
+    unaccounted_seconds:0.15};
+vm.runInContext(`renderAnalyticsRequest({supported:true,request:{status:'completed',update:7,
+    stage:'<img src=x>',profile}});`,context);
+assert.match(document.getElementById('analytics-request-status').textContent,/<img src=x>/);
+assert.equal(document.getElementById('analytics-profile').hidden,false);
+assert.match(document.getElementById('analytics-profile-meta').textContent,/1.8s/);
+assert.match(document.getElementById('analytics-profile-details').textContent,/physics.*1.25s.*reset.apply.*0.2s.*download.*0.4s.*transfer.*0.3s.*worlds.*4/);
+""", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for curriculum DOM checks")
     def test_experiment_stage_evaluation_and_replay_dom(self):
@@ -1255,10 +1295,33 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
         self.assertEqual(status["request"]["replay"], "research-000000101.jsonl")
         self.assertNotEqual(self.store.request_replay(identity)["request_id"], request["request_id"])
 
+    def test_dashboard_analytics_request_lifecycle(self):
+        identity = self.store.list_runs()[0]["id"]
+        with self.assertRaises(AnalyticsRequestUnsupported):
+            self.store.request_analytics(identity)
+        (self.run_dir / "config.json").write_text(
+            json.dumps({"options": {"dashboard_analytics_requests": True}}), encoding="utf-8")
+        self.assertEqual(self.store.analytics_request(identity), {"supported": True, "request": None})
+        request = self.store.request_analytics(identity)
+        self.assertEqual(request["status"], "pending")
+        with self.assertRaises(AnalyticsRequestConflict):
+            self.store.request_analytics(identity)
+        profile = {"version": 1, "seconds": {"physics": 0.2}, "native_seconds": {},
+                   "cuda_stream_seconds": {}, "counts": {"worlds": 4}, "total_seconds": 0.3,
+                   "synchronize_seconds": 0.01, "unaccounted_seconds": 0.09}
+        self.assertTrue(finish_analytics_request(self.run_dir, request["request_id"], "completed",
+                                                 update=8, stage="combat", profile=profile))
+        status = self.store.analytics_request(identity)
+        self.assertEqual(status["request"]["status"], "completed")
+        self.assertEqual(status["request"]["profile"], profile)
+        self.assertEqual(status["request"]["update"], 8)
+        self.assertNotEqual(self.store.request_analytics(identity)["request_id"], request["request_id"])
+
     def test_http_replay_request_routes(self):
         self.write_replay()
         (self.run_dir / "config.json").write_text(
-            json.dumps({"options": {"dashboard_replay_requests": True}}), encoding="utf-8")
+            json.dumps({"options": {"dashboard_replay_requests": True,
+                                     "dashboard_analytics_requests": True}}), encoding="utf-8")
         with make_server(self.store, 0) as server:
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
@@ -1277,6 +1340,14 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
                     status = json.load(response)
                     self.assertTrue(status["supported"])
                     self.assertIsNone(status["request"])
+                analytics_url = base + f"/api/runs/{identity}/analytics-request"
+                with urlopen(analytics_url, timeout=3) as response:
+                    status = json.load(response)
+                    self.assertTrue(status["supported"])
+                    self.assertIsNone(status["request"])
+                with urlopen(Request(analytics_url, data=b"", method="POST"), timeout=3) as response:
+                    self.assertEqual(response.status, 202)
+                    self.assertEqual(json.load(response)["request"]["status"], "pending")
                 request_url = base + f"/api/runs/{identity}/replay-request"
                 with urlopen(Request(request_url, data=b"", method="POST"), timeout=3) as response:
                     self.assertEqual(response.status, 202)
@@ -1296,6 +1367,7 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
                 for request, status in ((base + "/api/runs/unknown/metrics", 404),
                                         (base + f"/api/runs/{identity}/replays/unknown", 404),
                                         (base + "/../config.json", 404),
+                                        (Request(analytics_url, data=b"", method="POST"), 409),
                                         (Request(request_url, data=b"", method="POST"), 409),
                                         (Request(base + "/api/runs", b"{}"), 405)):
                     with self.assertRaises(HTTPError) as failure:

@@ -17,18 +17,30 @@ LABELS = {"JOB_NAME": "Job/run name", "TIME": "Wall time", "ENVS": "Parallel wor
           "GAMMA": "Discount gamma", "GAE_LAMBDA": "GAE lambda", "CLIP_EPS": "PPO clipping epsilon",
           "VF_COEF": "Value loss coefficient", "ENT_COEF": "Entropy coefficient", "MAX_GRAD_NORM": "Maximum gradient norm",
           "CPUS": "Allocated CPU cores", "MEMORY": "Host RAM", "THREADS": "Trainer threads (auto allowed)",
-          "REPLAY": "Replay interval (0 disables)", "DEPENDENCY": "Wait for job IDs (or none)"}
+          "REPLAY": "Replay interval (0 disables)", "PROFILE_EVERY": "Verbose timing profile every N updates (0 off)",
+          "SAVE_EVERY": "Full checkpoint interval (updates)", "RESUME": "Resume full checkpoint (optional)",
+          "INITIALIZE": "Initialize from checkpoint (optional)", "START_STAGE": "Start at stage (blank = first)",
+          "DEPENDENCY": "Wait for job IDs (or none)"}
 ORDER = tuple(LABELS)
 RESOURCE_FIELDS = ("TIME", "CPUS", "MEMORY")
 LOCAL_ORDER = tuple(key for key in ORDER if key not in (*RESOURCE_FIELDS, "DEPENDENCY"))
+OPTIONAL_TEXT_FIELDS = ("RESUME", "INITIALIZE", "START_STAGE")
 
 
 def parse_values(values):
     settings, sweep = {}, {}
     for key, text in values.items():
+        if key in OPTIONAL_TEXT_FIELDS:
+            value = text.strip()
+            if "," in value:
+                raise ValueError(f"{LABELS[key]}: commas are not supported")
+            settings[key] = value
+            continue
         choices = [part.strip() for part in text.split(",")]
         if not all(choices):
             raise ValueError(f"{LABELS[key]}: a value is required")
+        if key in ("PROFILE_EVERY", "SAVE_EVERY") and len(choices) > 1:
+            raise ValueError(f"{LABELS[key]}: this setting cannot be swept")
         if len(choices) > 1 and (key in ("JOB_NAME", "DEPENDENCY") or sweep):
             raise ValueError("Only one training/resource field may contain a comma-separated sweep")
         seen = set()
@@ -43,12 +55,16 @@ def parse_values(values):
                 if key == "HIDDEN" and number > 4096:
                     raise ValueError("Hidden width must be <=4096")
                 identity = number
-            elif key in ("ENVS", "UPDATES", "ROLLOUT", "CPUS", "THREADS", "REPLAY"):
+            elif key in ("ENVS", "UPDATES", "ROLLOUT", "CPUS", "THREADS", "REPLAY",
+                         "PROFILE_EVERY", "SAVE_EVERY"):
                 if key == "THREADS" and value == "auto" and len(choices) == 1:
                     identity = value
                 else:
-                    if not re.fullmatch(r"0|[1-9][0-9]*", value) or (int(value) == 0 and key != "REPLAY"):
-                        raise ValueError(f"{LABELS[key]}: expected a positive integer" + (" or zero" if key == "REPLAY" else ""))
+                    zero_allowed = key in ("REPLAY", "PROFILE_EVERY")
+                    if (not re.fullmatch(r"0|[1-9][0-9]*", value)
+                            or (int(value) == 0 and not zero_allowed)):
+                        qualifier = " or zero" if zero_allowed else ""
+                        raise ValueError(f"{LABELS[key]}: expected a positive integer{qualifier}")
                     identity = int(value)
                     if key == "ENVS" and identity > 65536:
                         raise ValueError("Parallel worlds must be <=65536")
@@ -71,6 +87,13 @@ def parse_values(values):
 
 def normalize(values, shared_gpu=False, max_parallel=0, local=False):
     settings, sweep = parse_values(values)
+    if settings["RESUME"] and settings["INITIALIZE"]:
+        raise ValueError("Choose resume or initialize from a checkpoint, not both")
+    if settings["RESUME"] and settings["START_STAGE"]:
+        raise ValueError("Resume restores the checkpoint's stage; clear the start-stage field")
+    if shared_gpu and (settings["RESUME"] or settings["INITIALIZE"] or settings["START_STAGE"]
+                       or int(settings["SAVE_EVERY"]) != 10):
+        raise ValueError("Checkpoint controls, stage selection, and custom save cadence are not supported in shared-GPU mode")
     if local:
         if shared_gpu:
             raise ValueError("Local runs do not use shared-GPU Slurm mode")
@@ -173,6 +196,11 @@ def main(argv=None):
     parser.add_argument("--shared-gpu", action="store_true")
     parser.add_argument("--local", action="store_true", help="Use the local host and omit Slurm resources")
     parser.add_argument("--max-parallel", type=int, default=0)
+    parser.add_argument("--profile-every-default", default="0")
+    parser.add_argument("--save-every-default", default="10")
+    parser.add_argument("--resume-default", default="")
+    parser.add_argument("--initialize-default", default="")
+    parser.add_argument("--start-stage-default", default="")
     parser.add_argument("--override", nargs=2, action="append", default=[])
     parser.add_argument("--learner-only", action="store_true")
     options = parser.parse_args(argv)
@@ -184,7 +212,10 @@ def main(argv=None):
     values = {"JOB_NAME": options.plan.replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".json"),
               "TIME": options.time_default, "ENVS": options.envs_default, "UPDATES": str(updates),
               "ROLLOUT": options.rollout_default, "CPUS": "8", "MEMORY": "24G", "THREADS": "auto",
-              "REPLAY": "50000", "DEPENDENCY": "none",
+              "REPLAY": "50000", "PROFILE_EVERY": options.profile_every_default,
+              "SAVE_EVERY": options.save_every_default, "RESUME": options.resume_default,
+              "INITIALIZE": options.initialize_default, "START_STAGE": options.start_stage_default,
+              "DEPENDENCY": "none",
               **{key: str(plan["learner"][name]) for key, name in LEARNER_FIELDS.items()}}
     for key, value in options.override:
         if key not in LEARNER_FIELDS:

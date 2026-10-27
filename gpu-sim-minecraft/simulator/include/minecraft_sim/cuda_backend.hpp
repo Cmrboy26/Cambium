@@ -1,6 +1,6 @@
 #pragma once
 
-#include "minecraft_sim/core.hpp"
+#include "minecraft_sim/projectiles.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -11,7 +11,7 @@ class CudaBatch {
 public:
     static constexpr unsigned int threads_per_block = 128;
 
-    explicit CudaBatch(BatchView initial);
+    explicit CudaBatch(BatchView initial, bool summarize_arrows = false);
     ~CudaBatch();
     CudaBatch(const CudaBatch&) = delete;
     CudaBatch& operator=(const CudaBatch&) = delete;
@@ -24,6 +24,7 @@ public:
     void step(int ticks = 1);
     void synchronize() const;
     void download(BatchView destination) const;
+    void downloadForTraining(BatchView destination, ArrowObservationSummary* arrow_summaries = nullptr) const;
 
 private:
     struct Storage;

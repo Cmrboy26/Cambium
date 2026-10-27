@@ -27,7 +27,9 @@ class SubmissionFormTests(unittest.TestCase):
         from simulator.training.compiler import LEARNER_DEFAULTS
         return {"JOB_NAME": "test", "TIME": "1-00:00:00", "ENVS": "8192", "UPDATES": "1500",
                 "ROLLOUT": "128", "CPUS": "8", "MEMORY": "24G", "THREADS": "auto", "REPLAY": "0",
-                "DEPENDENCY": "none", **{key: str(LEARNER_DEFAULTS[name]) for key, name in LEARNER_FIELDS.items()}}
+                "PROFILE_EVERY": "0", "SAVE_EVERY": "10", "RESUME": "", "INITIALIZE": "",
+                "START_STAGE": "", "DEPENDENCY": "none",
+                **{key: str(LEARNER_DEFAULTS[name]) for key, name in LEARNER_FIELDS.items()}}
 
     def test_form_validates_numeric_sweeps_and_cpu_limits(self):
         from simulator.training.submit_form import normalize
@@ -41,6 +43,24 @@ class SubmissionFormTests(unittest.TestCase):
                         {"CLIP_EPS": "nan"}, {"THREADS": "4"}, {"ENT_COEF": "0.01,"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 normalize({**values, **changes}, shared_gpu=True)
+
+    def test_form_validates_checkpoint_controls_and_timing_intervals(self):
+        from simulator.training.submit_form import normalize
+        values = self.values()
+        for changes in ({"PROFILE_EVERY": "-1"}, {"PROFILE_EVERY": "0,10"}, {"SAVE_EVERY": "0"},
+                        {"RESUME": "latest.pt", "INITIALIZE": "latest.pt"},
+                        {"RESUME": "latest.pt", "START_STAGE": "duel"},
+                        {"RESUME": "latest.pt,other.pt"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                normalize({**values, **changes})
+        with self.assertRaisesRegex(ValueError, "shared-GPU"):
+            normalize({**values, "SAVE_EVERY": "250"}, shared_gpu=True)
+        settings, sweep = normalize({**values, "PROFILE_EVERY": "10", "SAVE_EVERY": "250",
+                                     "RESUME": "", "START_STAGE": "duel"})
+        self.assertEqual(settings["PROFILE_EVERY"], "10")
+        self.assertEqual(settings["SAVE_EVERY"], "250")
+        self.assertEqual(settings["START_STAGE"], "duel")
+        self.assertEqual(sweep, {})
 
     def test_local_form_omits_slurm_resources_and_resolves_threads(self):
         from simulator.training.submit_form import LOCAL_ORDER, SubmissionForm, normalize
@@ -484,13 +504,15 @@ print(f"{12345 + count};test-cluster")
         }))
 
     def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None,
-               learner=None, local=False, initialize=None, start_stage=None, save_every=None, **settings):
+               learner=None, local=False, resume=None, initialize=None, start_stage=None, save_every=None, **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
         arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
         if profile_every is not None:
             arguments.extend(["--profile-every", str(profile_every)])
+        if resume is not None:
+            arguments.extend(["--resume", str(resume)])
         if initialize is not None:
             arguments.extend(["--initialize", str(initialize)])
         if start_stage is not None:
@@ -522,7 +544,8 @@ print(f"{12345 + count};test-cluster")
         checkpoint = self.root / "prior-run" / "snapshots" / "aim-1.pt"
         checkpoint.parent.mkdir(parents=True)
         checkpoint.write_bytes(b"snapshot")
-        result = self.launch(local=True, initialize=checkpoint, start_stage="stage-2", save_every=250)
+        result = self.launch(local=True, initialize=checkpoint, start_stage="stage-2", save_every=250,
+                             profile_every=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         command = next(shlex.split(line) for line in result.stdout.splitlines()
                        if line.lstrip().startswith("env MCSIM_CUDA_ARCHITECTURES="))
@@ -530,6 +553,27 @@ print(f"{12345 + count};test-cluster")
         self.assertEqual(settings["SIM_INITIALIZE"], str(checkpoint))
         self.assertEqual(settings["SIM_START_STAGE"], "stage-2")
         self.assertEqual(settings["SIM_SAVE_EVERY"], "250")
+        self.assertEqual(settings["SIM_PROFILE_EVERY"], "10")
+
+    def test_resume_checkpoint_reaches_rosie_and_local_launchers(self):
+        checkpoint = self.root / "prior-run" / "latest.pt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"checkpoint")
+        rosie = self.launch(resume=checkpoint, profile_every=25)
+        self.assertEqual(rosie.returncode, 0, rosie.stderr)
+        command = next(shlex.split(line) for line in rosie.stdout.splitlines()
+                       if line.lstrip().startswith("sbatch --parsable"))
+        export = next(argument for argument in command if argument.startswith("--export="))
+        settings = dict(item.split("=", 1) for item in export.removeprefix("--export=ALL,").split(","))
+        self.assertEqual(settings["SIM_RESUME"], str(checkpoint))
+        self.assertEqual(settings["SIM_PROFILE_EVERY"], "25")
+
+        local = self.launch(local=True, resume=checkpoint)
+        self.assertEqual(local.returncode, 0, local.stderr)
+        local_command = next(shlex.split(line) for line in local.stdout.splitlines()
+                             if line.lstrip().startswith("env MCSIM_CUDA_ARCHITECTURES="))
+        local_settings = dict(item.split("=", 1) for item in local_command[1:] if "=" in item)
+        self.assertEqual(local_settings["SIM_RESUME"], str(checkpoint))
 
     def test_new_ppo_overrides_and_single_variable_sweep_reach_submissions(self):
         result = self.launch([""] * 16 + ["y"], dry_run=False,
@@ -582,9 +626,18 @@ print(f"{12345 + count};test-cluster")
                     os.write(primary, b"\n")
                     phase = 2
                 if phase == 2 and b"Rosie Training Submission" in captured:
-                    target = ORDER.index("ENT_COEF")
-                    keys = "\x15arrow-submit" + "\x1b[B" * target + "\x15" + "0.025"
-                    keys += "\x1b[B" * (len(ORDER) - target) + "\r"
+                    checkpoint = self.root / "prior run" / "latest.pt"
+                    checkpoint.parent.mkdir(parents=True)
+                    checkpoint.write_bytes(b"checkpoint")
+                    entropy = ORDER.index("ENT_COEF")
+                    profile = ORDER.index("PROFILE_EVERY")
+                    resume = ORDER.index("RESUME")
+                    save_every = ORDER.index("SAVE_EVERY")
+                    keys = "\x15arrow-submit" + "\x1b[B" * entropy + "\x15" + "0.025"
+                    keys += "\x1b[B" * (profile - entropy) + "\x15" + "10"
+                    keys += "\x1b[B" * (save_every - profile) + "\x15" + "250"
+                    keys += "\x1b[B" * (resume - save_every) + "\x15" + str(checkpoint)
+                    keys += "\x1b[B" * (len(ORDER) - resume) + "\r"
                     os.write(primary, keys.encode())
                     phase = 3
             self.assertEqual(process.wait(timeout=2), 0, captured.decode(errors="replace"))
@@ -597,6 +650,9 @@ print(f"{12345 + count};test-cluster")
         self.assertIn("--job-name=arrow-submit", submission["arguments"])
         export = next(value for value in submission["arguments"] if value.startswith("--export="))
         self.assertIn("SIM_ENT_COEF=0.025", export)
+        self.assertIn("SIM_PROFILE_EVERY=10", export)
+        self.assertIn("SIM_SAVE_EVERY=250", export)
+        self.assertIn(f"SIM_RESUME={self.root}/prior run/latest.pt", export)
         self.assertEqual(len(self.history.read_text().splitlines()), 1)
 
     def test_enter_defaults_use_h100_and_current_plan_budget(self):

@@ -399,6 +399,13 @@ void checkArrowObservation() {
         && std::abs(catalogue[101] - 2.7F) < 1.0e-6F,
         "nearest moving opponent arrow uses slot-order tie break and opponent-minus-self velocity");
 
+    std::array<float, minecraft_sim::app::feature_names.size()> summarized{};
+    const auto summary = minecraft_sim::summarizeArrowObservation(players[0], projectiles, 0);
+    minecraft_sim::app::arrowObservation(summarized.data(), players[0], players[1], summary);
+    for (int feature = 89; feature <= 101; ++feature) {
+        require(summarized[feature] == catalogue[feature], "compact arrow summary preserves observation features");
+    }
+
     minecraft_sim::app::arrowObservation(catalogue.data(), players[1], players[0], projectiles, 1);
     require(catalogue[95] == 1.0F && std::abs(catalogue[96] - 0.1F) < 1.0e-6F,
         "the reverse perspective excludes its own arrow and detects the other player's arrow");

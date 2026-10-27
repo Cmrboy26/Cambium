@@ -54,6 +54,50 @@ struct ProjectileWorldState {
     LegacyRandom random;
 };
 
+struct ArrowObservationSummary {
+    int ordinary_arrows = 0;
+    int draw_ticks = 0;
+    bool found = false;
+    Vec3 relative_position;
+    Vec3 relative_velocity;
+};
+
+MCSIM_HD inline ArrowObservationSummary summarizeArrowObservation(
+        const PlayerState& source, const ProjectileWorldState& projectiles, int source_player) {
+    ArrowObservationSummary summary;
+    const auto& bow = projectiles.bows[source_player];
+    summary.ordinary_arrows = bow.ordinary_arrows;
+    summary.draw_ticks = bow.draw_ticks;
+
+    int nearest_slot = -1;
+    double nearest_distance = 2500.0;
+    for (int slot = 0; slot < projectiles.arrow_capacity; ++slot) {
+        const auto& arrow = projectiles.arrows[slot];
+        if (!arrow.active || arrow.in_ground || arrow.owner != 1 - source_player
+            || arrow.velocity.lengthSquared() == 0.0) {
+            continue;
+        }
+        const Vec3 relative{arrow.position.x - source.position.x, arrow.position.y - source.position.y,
+                            arrow.position.z - source.position.z};
+        const double distance = relative.lengthSquared();
+        if (distance <= 2500.0 && (nearest_slot < 0 || distance < nearest_distance)) {
+            nearest_slot = slot;
+            nearest_distance = distance;
+        }
+    }
+    if (nearest_slot >= 0) {
+        const auto& arrow = projectiles.arrows[nearest_slot];
+        summary.found = true;
+        summary.relative_position = {arrow.position.x - source.position.x,
+                                     arrow.position.y - source.position.y,
+                                     arrow.position.z - source.position.z};
+        summary.relative_velocity = {arrow.velocity.x - source.velocity.x,
+                                     arrow.velocity.y - source.velocity.y,
+                                     arrow.velocity.z - source.velocity.z};
+    }
+    return summary;
+}
+
 struct BowActionResult {
     BowActionStatus status = BowActionStatus::idle;
     int arrow_slot = -1;

@@ -52,6 +52,7 @@ struct TrainingBatch {
     std::vector<WorldState> worlds;
     std::vector<ProjectileWorldState> projectile_states;
     std::vector<ArrowState> projectile_arrows;
+    std::vector<ArrowObservationSummary> arrow_summaries;
     std::vector<BlockWorldView> blocks;
     std::vector<std::uint8_t> finished;
     std::vector<std::uint8_t> dealt_damage;
@@ -89,6 +90,7 @@ struct TrainingBatch {
           players(std::size_t(count) * 2),
           queued(players.size()), held(players.size()), selected_slots(players.size()), worlds(count),
           projectile_states(count), projectile_arrows(std::size_t(count) * projectile_arrow_capacity),
+          arrow_summaries(players.size()),
           blocks(count, terrain.blocks),
           finished(count), dealt_damage(players.size()), episodes(count), observed_opponent_disable(players.size()),
           step_reward_totals(players.size()),
@@ -123,7 +125,7 @@ struct TrainingBatch {
             if (!CudaBatch::available()) {
                 throw std::runtime_error("CUDA requested but no CUDA device is available");
             }
-            gpu = std::make_unique<CudaBatch>(view());
+            gpu = std::make_unique<CudaBatch>(view(), layout != nullptr);
 #else
             throw std::runtime_error("CUDA requested but library was built without MCSIM_ENABLE_CUDA");
 #endif
@@ -143,6 +145,13 @@ struct TrainingBatch {
     BatchView view() {
         return {players.data(), queued.data(), held.data(), worlds.data(),
                 static_cast<int>(worlds.size()), 2, blocks.data(), {terrain.sine.data()}, projectile_states.data()};
+    }
+
+    const ArrowObservationSummary* currentArrowSummaries() const {
+#if defined(MCSIM_HAS_CUDA)
+        if (gpu && layout) return arrow_summaries.data();
+#endif
+        return nullptr;
     }
 
     void reset(const std::uint8_t* mask) {
@@ -165,6 +174,8 @@ struct TrainingBatch {
                 players[index] = episode_players[environment].players[player];
                 players[index].random.setSeed(seed + index * 1000003ULL + episode * 1000033ULL);
                 projectile_states[environment].bows[player].ordinary_arrows = players[index].ordinary_arrow_count;
+                arrow_summaries[index] = summarizeArrowObservation(
+                    players[index], projectile_states[environment], player);
                 queued[index] = {};
                 held[index] = {};
                 selected_slots[index] = episode_players[environment].resolved[player]["loadout"]["selected"].get<int>();
@@ -238,7 +249,7 @@ struct TrainingBatch {
             || position.y < bounds.origin_y - 4;
     }
 
-    void observe(float* output) const {
+    void observe(float* output, const ArrowObservationSummary* summaries = nullptr) const {
 #if defined(_OPENMP)
 #pragma omp parallel for
 #endif
@@ -276,7 +287,11 @@ struct TrainingBatch {
                     app::movementObservation(catalogue, source, target);
                     app::equipmentObservation(catalogue, source, target,
                         episode_players[environment].weapon_slots[player]);
-                    app::arrowObservation(catalogue, source, target, projectile_states[environment], player);
+                    if (summaries) {
+                        app::arrowObservation(catalogue, source, target, summaries[index]);
+                    } else {
+                        app::arrowObservation(catalogue, source, target, projectile_states[environment], player);
+                    }
                     layout->project(catalogue, output + index * features);
                 }
             }
@@ -407,7 +422,7 @@ struct TrainingBatch {
                 if (profiling) gpu->synchronize();
                 profileEnd(Physics, physics_start);
                 const auto download_start = profileStart();
-            gpu->download(view());
+            gpu->downloadForTraining(view(), layout ? arrow_summaries.data() : nullptr);
                 profileEnd(StateDownload, download_start);
         } else
 #endif
@@ -492,7 +507,7 @@ struct TrainingBatch {
         }
         profileEnd(Rewards, rewards_start);
         const auto observation_start = profileStart();
-        observe(observations);
+        observe(observations, currentArrowSummaries());
         profileEnd(StepObserve, observation_start);
     }
 };
@@ -676,7 +691,7 @@ MCSIM_EXPORT int mcsim_observe(void* handle, float* observations) {
         if (!handle || !observations) { throw std::invalid_argument("Null observation argument"); }
         auto& batch = *static_cast<TrainingBatch*>(handle);
         const auto start = batch.profileStart();
-        batch.observe(observations);
+        batch.observe(observations, batch.currentArrowSummaries());
         batch.profileEnd(Observe, start);
     });
 }
@@ -725,10 +740,13 @@ MCSIM_EXPORT const char* mcsim_replay_frame(void* handle, int environment) {
     thread_local std::string frame;
     const auto result = protect([&] {
         if (!handle) { throw std::invalid_argument("Null replay handle"); }
-        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        auto& batch = *static_cast<TrainingBatch*>(handle);
         if (environment < 0 || environment >= static_cast<int>(batch.worlds.size())) {
             throw std::invalid_argument("Replay environment index outside batch");
         }
+    #if defined(MCSIM_HAS_CUDA)
+        if (batch.gpu) batch.gpu->download(batch.view());
+    #endif
         frame = minecraft_sim::app::replayFrame(batch.worlds[environment].tick,
             batch.players.data() + environment * 2, batch.held.data() + environment * 2, true,
             batch.selected_slots.data() + environment * 2,
@@ -742,7 +760,7 @@ MCSIM_EXPORT int mcsim_reset(void* handle, const std::uint8_t* mask, float* obse
         auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.reset(mask);
         const auto start = batch.profileStart();
-        batch.observe(observations);
+        batch.observe(observations, batch.currentArrowSummaries());
         batch.profileEnd(ResetObserve, start);
     });
 }
@@ -756,7 +774,7 @@ MCSIM_EXPORT int mcsim_reset_players(void* handle, const std::uint8_t* mask,
         batch.profileEnd(ResetJson, parse_start);
         batch.resetPlayers(mask, definitions);
         const auto observation_start = batch.profileStart();
-        batch.observe(observations);
+        batch.observe(observations, batch.currentArrowSummaries());
         batch.profileEnd(ResetObserve, observation_start);
     });
 }

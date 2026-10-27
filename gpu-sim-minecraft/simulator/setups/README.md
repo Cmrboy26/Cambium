@@ -7,6 +7,41 @@ Paths resolve relative to the JSON file containing them, not the working directo
 For a guided authoring and validation workflow, use the
 [setup skill](../../../.github/skills/gpu-sim-setup/SKILL.md) (`/gpu-sim-setup`).
 
+## Author, Validate, Train
+
+Run commands from the `gpu-sim-minecraft` root. Set up the project first with the
+[workflow scripts](../../scripts/README.md#first-time-setup), or use the
+[Linux build](../README.md#linux-build) and [Linux CPU smoke test](../training/README.md#linux-cpu-smoke-test).
+
+1. Copy only the example definitions you plan to change into your own
+	same-named subfolders under `arenas/`, `environments/`, `policies/` and
+	`curricula/`. Rename their JSON `name` values and update references. You can
+	keep referencing example or shared definitions you do not need to change.
+2. Validate the plan from the project root with the training environment active:
+
+	```sh
+	python -B -m simulator.training.validate_plans simulator/setups/curricula/<owner>/<plan>.json
+	```
+
+3. Train locally from PowerShell:
+
+	```powershell
+	.\scripts\train.ps1 -Plan simulator/setups/curricula/<owner>/<plan>.json
+	```
+
+	For a Linux CPU run, use the [Linux CPU smoke test](../training/README.md#linux-cpu-smoke-test)
+	with `--plan simulator/setups/curricula/<owner>/<plan>.json`. For a Rosie job,
+	run the submission wizard and select your plan:
+
+	```sh
+	bash rosie/submit.sh
+	```
+
+	The wizard validates the selected plan before submitting; invalid plans stop
+	without submitting a job. `bash rosie/submit.sh --dry-run` also validates and
+	previews the job without submitting it. See the [Rosie guide](../../rosie/README.md)
+	for cluster setup and submission options.
+
 Create your own person-named subfolder inside each of the four folders below
 for definitions you author; use the same name across all four. Keep intentionally
 shared definitions directly at the category root, outside personal folders.
@@ -240,17 +275,9 @@ the curriculum completes; stages also support `on_completion`. Saves go to the r
 `snapshots/<name>.pt` for checkpoint opponents or `--initialize`, not `--resume`.
 See [snapshot rules](../training/AGENTS.md#retained-policy-snapshots) for details.
 
-## Validate And Run
+## More Details
 
-From the project root, with the Python environment activated:
-
-```sh
-python -m simulator.training.validate_plans simulator/setups/curricula/example/melee.json
-bash rosie/submit.sh --dry-run
-bash rosie/submit.sh
-```
-
-Validation checks JSON/references/semantics without training; omit paths to scan all curricula.
-Use a fresh run name after edits; resume restores saved conditions, not edited JSON.
-More: [plan reference](../training/AGENTS.md#research-training-plans),
-[environment contract](../../docs/simulation_contract.md), [Rosie](../../rosie/README.md).
+Validation checks JSON, references and plan semantics without training. Use a
+fresh run after edits; resume restores saved conditions, not edited JSON. For
+the full plan schema, see the [training-plan reference](../training/AGENTS.md#research-training-plans),
+[environment contract](../../docs/simulation_contract.md) and [Rosie guide](../../rosie/README.md).

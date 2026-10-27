@@ -9,7 +9,7 @@
     "walker": {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 30, "wall_margin": 2}},
     "crouching_walker": {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 30, "wall_margin": 2, "sneak": true}},
     "archer": {"type": "scripted", "controller": "archer"},
-    "previous_4096": {"type": "checkpoint", "path": "../../../training/runs/mcduelresme-4096/latest.pt", "deterministic": true},
+    "previous_4096": {"type": "checkpoint", "path": "../colten/4096-checkpoint.pt", "deterministic": true},
     "past_learner": {"type": "frozen_self_play", "every_updates": 20}
   },
   "mixtures": {
