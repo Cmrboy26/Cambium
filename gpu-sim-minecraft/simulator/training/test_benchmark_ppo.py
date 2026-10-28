@@ -11,6 +11,8 @@ import torch
 from backend.fast_rl_model import ActorCritic
 from simulator.training.contract import from_legacy
 from simulator.training.environment import SCHEMA
+from simulator.training.ppo import optimize
+from simulator.training.timing import OptimizationTimer
 from simulator.training.benchmark_ppo import (
     BENCHMARK_EPOCHS,
     build_parser,
@@ -83,6 +85,66 @@ class BenchmarkChecks(unittest.TestCase):
         self.assertEqual(result["optimizer_steps"], optimizer_steps(15, 4, BENCHMARK_EPOCHS))
         self.assertGreaterEqual(result["seconds"], 0)
         self.assertEqual(set(result["statistics"]), {"loss", "policy_loss", "value_loss", "entropy"})
+
+    def test_optimization_profile_preserves_results_and_rng(self):
+        models = [clone_model(self.model, "cpu"), clone_model(self.model, "cpu")]
+        results = []
+        states = []
+        optimizer_states = []
+        timer = OptimizationTimer("cpu", enabled=True)
+        for model, active_timer in zip(models, (None, timer)):
+            optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
+            torch.manual_seed(99)
+            results.append(optimize(model, optimizer, self.rollout, 2, 4, timer=active_timer))
+            states.append(torch.get_rng_state())
+            optimizer_states.append(optimizer.state_dict())
+        self.assertEqual(results[0], results[1])
+        self.assertTrue(torch.equal(states[0], states[1]))
+        for name, value in models[0].state_dict().items():
+            self.assertTrue(torch.equal(value, models[1].state_dict()[name]), name)
+        torch.testing.assert_close(optimizer_states[0], optimizer_states[1], rtol=0, atol=0)
+        profile = timer.finish()
+        self.assertEqual(profile["counts"]["samples"], 15)
+        self.assertEqual(profile["counts"]["epochs"], 2)
+        self.assertEqual(profile["counts"]["minibatches"], 8)
+        self.assertEqual(set(profile["seconds"]), {"setup", "shuffle", "policy_evaluation", "loss",
+            "finite_check", "backward", "gradient_clip", "optimizer_step", "statistics", "results"})
+
+    def test_optimization_cuda_event_sampling_is_bounded(self):
+        timer = OptimizationTimer("cpu", enabled=True)
+        timer.device = torch.device("cuda")
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=3e-4, eps=1e-5)
+        with patch("torch.cuda.Event") as event, patch("torch.cuda.current_stream"), \
+                patch("torch.cuda.synchronize"):
+            event.return_value.elapsed_time.return_value = 1.0
+            optimize(self.model, optimizer, self.rollout, 2, 1, timer=timer)
+            profile = timer.finish()
+        self.assertEqual(profile["counts"]["minibatches"], 30)
+        self.assertEqual(profile["counts"]["cuda_profiled_minibatches"], 16)
+        self.assertEqual(event.call_count, 16 * 7 * 2)
+        self.assertEqual(set(profile["cuda_stream_seconds"]), {"policy_evaluation", "loss", "finite_check",
+            "backward", "gradient_clip", "optimizer_step", "statistics"})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for GPU profiling checks")
+    def test_optimization_profile_cuda_preserves_training_state(self):
+        models = [clone_model(self.model, "cuda"), clone_model(self.model, "cuda")]
+        rollout = {name: value.to("cuda") if isinstance(value, torch.Tensor) else value
+                   for name, value in self.rollout.items()}
+        timer = OptimizationTimer("cuda", enabled=True)
+        results, states, optimizer_states = [], [], []
+        for model, active_timer in zip(models, (None, timer)):
+            optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
+            torch.manual_seed(99)
+            results.append(optimize(model, optimizer, rollout, 2, 4, timer=active_timer))
+            states.append(torch.cuda.get_rng_state())
+            optimizer_states.append(optimizer.state_dict())
+        profile = timer.finish()
+        torch.testing.assert_close(results[0], results[1])
+        self.assertTrue(torch.equal(states[0], states[1]))
+        torch.testing.assert_close(models[0].state_dict(), models[1].state_dict())
+        torch.testing.assert_close(optimizer_states[0], optimizer_states[1])
+        self.assertEqual(profile["counts"]["cuda_profiled_minibatches"], 8)
+        self.assertIn("optimizer_step", profile["cuda_stream_seconds"])
 
     def test_synchronized_timer_orders_cuda_waits_around_measurement(self):
         events = []

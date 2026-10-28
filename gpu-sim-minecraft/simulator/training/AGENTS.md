@@ -154,10 +154,28 @@ does not draw RNG or alter the order of sampling, policy actions or updates.
 
 Research runs expose a dashboard one-shot profile request. The dashboard writes
 an atomic request record in the run directory; the trainer consumes it at an
-update boundary, profiles that rollout, and stores the result in both the
-request record and that update's metrics row. This intentionally slows one
-update. A request remains pending until training reaches another update; runs
-started without the request-support marker cannot service it.
+update boundary, profiles collection and PPO optimization, and stores both in
+the request record and that update's metrics row. `profile` in the request and
+`collection_profile` in metrics remain the collection data; the optional
+`optimization_profile` is present in both for newer trainers. Older trainers
+can return only collection data, and already-running trainers must be restarted
+to pick up the new instrumentation. Periodic `--profile-every` remains
+collection-only.
+
+The optimization profile reports cumulative host wall timings for setup,
+shuffling, policy evaluation (including fixed-action checks and minibatch
+indexing), loss calculation, finite-loss check, backward, gradient clipping,
+Adam, statistics and results. Its counts include samples, epochs and
+minibatches. On CUDA, event spans cover only the first 16 minibatches, or all
+if fewer, with the actual sample count recorded as `cuda_profiled_minibatches`.
+They are stream elapsed spans, not pure kernel time, and can include host
+submission gaps. Host phase timings can include waits on earlier GPU work;
+neither timing type independently attributes exact GPU compute time. Setup,
+shuffle and results have host timings but no CUDA spans. The final profiler
+synchronization is separate, and instrumentation intentionally slows the
+sampled update; compare unprofiled updates for throughput. A request remains
+pending until training reaches another update; runs started without the
+request-support marker cannot service it.
 
 ## Standalone Baseline Diagnostics
 
@@ -971,6 +989,9 @@ Launcher `./scripts/serve-dashboard.ps1`; direct
 `http://127.0.0.1:8767`, Python 3.10+ only, no torch/native imports/legacy backend.
 Bundled Chart.js 4.5.1/MIT supports offline use.
 
+- The header theme button switches light and dark mode. The browser's system
+  preference is used initially; a manual choice persists in localStorage for
+  this origin, without changing training artifacts.
 - The top run picker searches directory/display/experiment names, notes,
   environment/policy identity, seed, width and learning rate (including scientific
   notation). Entries show recorded experiment names, distinguishing settings,
@@ -1041,6 +1062,8 @@ Bundled Chart.js 4.5.1/MIT supports offline use.
   Right-clicking a different entry switches the solo. This also covers stacked
   rewards and milestone value/threshold legends; context menus outside legend
   hitboxes and single-series charts are unchanged. Visibility survives refresh.
+  Isolated line samples remain visible as points, including across missing data
+  and stage boundaries; a single x value gets a padded axis range.
   Window/EMA/pause controls are local. Counts use all updates, not chart window.
   Connected means readable, not training.
 - Time estimates use the last 20 timed updates' mean `iteration_seconds`, falling

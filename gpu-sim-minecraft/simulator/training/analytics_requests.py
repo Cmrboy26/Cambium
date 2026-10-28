@@ -1,4 +1,4 @@
-"""Shared filesystem protocol for dashboard-requested collection profiles."""
+"""Shared filesystem protocol for dashboard-requested update profiles."""
 
 from datetime import datetime, timezone
 import json
@@ -57,6 +57,8 @@ def read_request(run_directory):
         raise ValueError("Analytics request is not valid")
     if "profile" in request:
         _validate_profile(request["profile"])
+    if "optimization_profile" in request:
+        _validate_profile(request["optimization_profile"])
     if "update" in request and (type(request["update"]) is not int or request["update"] < 1):
         raise ValueError("Analytics request update is invalid")
     if "stage" in request and (not isinstance(request["stage"], str) or not request["stage"]):
@@ -109,6 +111,8 @@ def finish_request(run_directory, request_id, status, **details):
         return False
     if status == "completed":
         _validate_profile(details.get("profile"))
+        if "optimization_profile" in details:
+            _validate_profile(details["optimization_profile"])
     request.update(details, status=status, finished_at=datetime.now(timezone.utc).isoformat())
     write_request(run_directory, request)
     return True

@@ -22,7 +22,7 @@ from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEM
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.ppo import compute_gae, metadata, optimize
-from simulator.training.timing import CollectionTimer
+from simulator.training.timing import CollectionTimer, OptimizationTimer
 
 
 def scene_key(scenario):
@@ -729,8 +729,12 @@ def run(options, checkpoint=None):
             if trace:
                 print(f"TRACE update={update} phase=optimization_begin", flush=True)
             optimization_start = time.perf_counter()
+            optimization_timer = OptimizationTimer(device, enabled=True) if analytics_request is not None else None
             statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs,
-                                                         options.minibatch_size, learner=plan["learner"]))
+                                                         options.minibatch_size, learner=plan["learner"],
+                                                         timer=optimization_timer))
+            if optimization_timer is not None:
+                statistics["optimization_profile"] = optimization_timer.finish()
             optimization_seconds = time.perf_counter() - optimization_start
             if trace:
                 print(f"TRACE update={update} phase=optimization_done", flush=True)
@@ -869,8 +873,9 @@ def run(options, checkpoint=None):
             if analytics_request is not None:
                 try:
                     finish_analytics_request(output, analytics_request["request_id"], "completed",
-                                             update=update, stage=stage["name"],
-                                             profile=rollout["collection_profile"])
+                                             update=update, stage=statistics["stage"],
+                                             profile=rollout["collection_profile"],
+                                             optimization_profile=statistics["optimization_profile"])
                 except (OSError, ValueError) as error:
                     print(f"Dashboard analytics request could not be completed: {error}")
             if update % options.save_every == 0 or update == base_update + options.updates or completed:
