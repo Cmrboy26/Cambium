@@ -47,9 +47,12 @@ final class PlayerControl {
 	private static boolean useAction;
 	private static String status = "Stopped";
 
+	static KeyMapping stopBinding() {
+		return new KeyMapping("key.cambiumfabric.stop_control", InputConstants.Type.KEYBOARD, InputConstants.KEY_F10, CambiumFabric.INTERFACE_CATEGORY);
+	}
+
 	static void initialize() {
-		KeyMapping stop = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.cambiumfabric.stop_control", InputConstants.Type.KEYBOARD,
-				InputConstants.KEY_F10, KeyMapping.Category.register(CambiumFabric.id("interface"))));
+		KeyMapping stop = KeyMappingHelper.registerKeyMapping(stopBinding());
 		ClientTickEvents.START_CLIENT_TICK.register(client -> {
 			while (stop.consumeClick()) if (active()) stop(client, "Stopped by F10");
 			if (active()) tick(client);

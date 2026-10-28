@@ -79,9 +79,12 @@ final class ControlPanel extends Screen {
 		} catch (IOException | RuntimeException error) { status = "Could not restore selections: " + error.getMessage(); }
 	}
 
+	static KeyMapping menuBinding() {
+		return new KeyMapping("key.cambiumfabric.panel", InputConstants.Type.KEYBOARD, InputConstants.KEY_F8, CambiumFabric.INTERFACE_CATEGORY);
+	}
+
 	static void initialize() {
-		KeyMapping menu = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.cambiumfabric.panel", InputConstants.Type.KEYBOARD,
-				InputConstants.KEY_F8, KeyMapping.Category.register(CambiumFabric.id("interface"))));
+		KeyMapping menu = KeyMappingHelper.registerKeyMapping(menuBinding());
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			while (menu.consumeClick()) open(client);
 			Object world = requestedWorld;

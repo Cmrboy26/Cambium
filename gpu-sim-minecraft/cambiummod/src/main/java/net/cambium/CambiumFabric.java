@@ -17,6 +17,7 @@ public class CambiumFabric implements ClientModInitializer {
 	public static final String MOD_ID = "cambiumfabric";
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 	static final String BUILD_ID = readBuildIdentity();
+	static final KeyMapping.Category INTERFACE_CATEGORY = KeyMapping.Category.register(id("interface"));
 
 	private static String readBuildIdentity() {
 		try (var stream = CambiumFabric.class.getResourceAsStream("/cambium-build.properties")) {

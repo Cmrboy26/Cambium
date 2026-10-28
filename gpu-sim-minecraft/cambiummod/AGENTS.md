@@ -70,6 +70,16 @@ not real world raycasts or full live behavior.
 `ClientObservation` selects the shared features available to player control and
 rejects other contract primitives. Client target velocity is the per-tick change
 in interpolated position; arrow ownership, motion and type are client estimates.
+Combat observations include own shield use/cooldown, attack charge, selected
+slot and nine hotbar entries, plus both players' held items, offhand shields,
+shield use, armor, toughness and attack speed. Remote equipment and synchronized
+attributes may lag; held-item damage is computed from visible main-hand item
+modifiers and excludes unsynchronized base or server-side modifiers. Shield
+cooldown mirrors the server adapter's rounded fraction of its original duration,
+which equals remaining ticks / 100 only for a 100-tick cooldown. The opponent's
+selected slot and observed shield-disable event are rejected: equipment packets
+do not expose the slot, and disable sounds do not identify a reliable event or
+attacker. Attack, weapon selection and shield actions remain unsupported.
 `PlayerControl` owns a separate offline checkpoint process and one outstanding
 `/act-one` request, validates session/tick/hash, and stops after five ticks or
 250 ms. Its explicit target must stay visible and alive. F10, screens, focus

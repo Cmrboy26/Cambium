@@ -19,6 +19,7 @@ import net.minecraft.world.item.BowItem;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.arrow.Arrow;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.phys.AABB;
@@ -177,7 +178,7 @@ final class LivePolicy implements AutoCloseable {
 
 	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, getUseItem (3589-3590);
 	// item-use identity, rather than the generic using flag, controls shield observations.
-	static boolean usingShield(ServerPlayer player) {
+	static boolean usingShield(Player player) {
 		return player.isUsingItem() && player.getUseItem().is(Items.SHIELD);
 	}
 
@@ -221,7 +222,7 @@ final class LivePolicy implements AutoCloseable {
 		return player.isUsingItem() && player.getUseItem().is(Items.BOW);
 	}
 
-	private static Weapon[] weaponSlots(ServerPlayer player) {
+	static Weapon[] weaponSlots(Player player) {
 		Weapon[] slots = new Weapon[9];
 		for (int slot = 0; slot < slots.length; slot++) slots[slot] = weapon(player.getInventory().getItem(slot));
 		return slots;
@@ -244,11 +245,11 @@ final class LivePolicy implements AutoCloseable {
 				modifiers.compute(Attributes.ATTACK_SPEED, 4.0, EquipmentSlot.MAINHAND));
 	}
 
-	private static boolean weaponIsAxe(ServerPlayer player) {
+	static boolean weaponIsAxe(Player player) {
 		return BuiltInRegistries.ITEM.getKey(player.getMainHandItem().getItem()).toString().endsWith("_axe");
 	}
 
-	static int shieldCooldown(ServerPlayer player) {
+	static int shieldCooldown(Player player) {
 		return Math.round(player.getCooldowns().getCooldownPercent(new ItemStack(Items.SHIELD), 0) * 100);
 	}
 

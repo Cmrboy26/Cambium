@@ -26,6 +26,17 @@ public final class ReplayAnalysisChecks {
 				require(trace.frames.getFirst().actors().size() == 2, "Policy environment must produce two initial actors");
 				JsonObject response = policy.act("java-python-check", 42, new float[2][policy.observationCount()]).get(5, java.util.concurrent.TimeUnit.SECONDS);
 				require(policy.mapActions(response, "java-python-check", 42).length == 2, "Python must return two valid mapped controls");
+				if ("1".equals(System.getenv("CAMBIUM_PLAYER_BRIDGE"))) {
+					policy.requirePlayerSupport(ClientObservation.FEATURES, ClientObservation.ACTIONS);
+					float[] catalogue = new float[SimulationContract.FEATURES.size()];
+					ClientObservation.combat(catalogue, true, false, true, false, 50, 0.75F, 3, 8);
+					ObservationEncoder.equipment(catalogue, new ObservationEncoder.Equipment(true, 9, 1, 15, 2),
+							new ObservationEncoder.Equipment(false, 4, 1.6, 8, 0), new ObservationEncoder.Weapon[]{
+									new ObservationEncoder.Weapon(true, true, 9, 1)});
+					JsonObject single = policy.actOne("java-player-check", 43, policy.project(catalogue)).get(5, java.util.concurrent.TimeUnit.SECONDS);
+					policy.mapOneAction(single, "java-player-check", 43);
+					System.out.println("PASS: Java player contract, equipment projection and single-actor Python inference");
+				}
 				response.addProperty("contract_hash", "0".repeat(64));
 				boolean rejected = false;
 				try { policy.mapActions(response, "java-python-check", 42); } catch (IllegalArgumentException expected) { rejected = true; }
@@ -35,6 +46,10 @@ public final class ReplayAnalysisChecks {
 			if (args.length == 3) checkReplay(Path.of(args[2]));
 			return;
 		}
+		var stopBinding = PlayerControl.stopBinding();
+		var menuBinding = ControlPanel.menuBinding();
+		require(stopBinding.getCategory() == menuBinding.getCategory(), "Interface keybindings must share one registered category");
+		System.out.println("PASS: client interface keybindings share one registered category");
 		checkSprintInput();
 		checkMinorCollision();
 		checkRosieLauncher();

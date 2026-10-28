@@ -52,8 +52,11 @@ this has not yet been verified in a multiplayer game and may change your slot or
 release a shot. Test with consent in a disposable environment first.
 
 Only movement, jump, sprint, sneak, aim and main-hand bow-use actions are
-supported. Other required observations or actions are rejected. The target's
-movement and visible arrows are estimates, and unknown arrow owners or unloaded
+supported; attack, weapon selection and shield actions are not. Player control
+observes your combat state and hotbar, and the target's visible equipment and
+shield use. Damage is estimated from held items, and networked values may lag.
+The target's selected slot and observed shield disable remain unsupported.
+Movement and visible arrows are estimates, and unknown arrow owners or unloaded
 required areas stop control. Client information, latency and arbitrary terrain
 can differ from training; no multiplayer performance or fidelity is guaranteed.
 The server remains authoritative and server rules still apply. The private duel,

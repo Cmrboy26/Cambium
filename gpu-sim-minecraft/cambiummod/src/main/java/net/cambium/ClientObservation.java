@@ -3,11 +3,16 @@ package net.cambium;
 import java.util.HashSet;
 import java.util.Set;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.arrow.Arrow;
 import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -20,6 +25,9 @@ final class ClientObservation {
 
 	private static Set<String> supportedFeatures() {
 		var result = new HashSet<String>(SimulationContract.FEATURES.subList(0, 22));
+		result.addAll(SimulationContract.FEATURES.subList(22, 79));
+		result.remove("opponent.shield_disabled_observed");
+		result.remove("opponent.weapon_slot");
 		result.addAll(SimulationContract.FEATURES.subList(79, 102));
 		return Set.copyOf(result);
 	}
@@ -58,8 +66,42 @@ final class ClientObservation {
 				arrow = new ObservationEncoder.ArrowState(nearest.getX(), nearest.getY(), nearest.getZ(), velocity.x, velocity.y, velocity.z);
 			}
 		}
-		return policy.project(ObservationEncoder.catalogue(own, other, rays, source.onGround(), target.onGround(),
-				source.isSprinting(), target.isSprinting(), arrow));
+		float[] catalogue = ObservationEncoder.catalogue(own, other, rays, source.onGround(), target.onGround(),
+				source.isSprinting(), target.isSprinting(), arrow);
+		equipment(catalogue, source, target);
+		return policy.project(catalogue);
+	}
+
+	static void equipment(float[] catalogue, Player source, Player target) {
+		boolean ownShield = LivePolicy.usingShield(source);
+		combat(catalogue, LivePolicy.weaponIsAxe(source), LivePolicy.weaponIsAxe(target), ownShield,
+				LivePolicy.usingShield(target), LivePolicy.shieldCooldown(source), source.getAttackStrengthScale(0.5F),
+				source.getTicksUsingItem(), source.getInventory().getSelectedSlot());
+		ObservationEncoder.equipment(catalogue, visibleEquipment(source), visibleEquipment(target), LivePolicy.weaponSlots(source));
+	}
+
+	static void combat(float[] catalogue, boolean ownAxe, boolean opponentAxe, boolean ownShield, boolean opponentShield,
+			int cooldown, float charge, int shieldTicks, int slot) {
+		catalogue[22] = ownAxe ? 1 : 0;
+		catalogue[23] = opponentAxe ? 1 : 0;
+		catalogue[24] = ownShield ? 1 : 0;
+		catalogue[25] = opponentShield ? 1 : 0;
+		catalogue[26] = cooldown > 0 ? 1 : 0;
+		catalogue[28] = Math.min(cooldown / 100.0F, 1);
+		catalogue[29] = charge;
+		catalogue[30] = ownShield ? Math.min(shieldTicks / 5.0F, 1) : 0;
+		catalogue[31] = slot;
+	}
+
+	private static ObservationEncoder.Equipment visibleEquipment(Player player) {
+		return new ObservationEncoder.Equipment(player.getOffhandItem().is(Items.SHIELD), visibleDamage(player.getMainHandItem()),
+				player.getAttributeValue(Attributes.ATTACK_SPEED), player.getAttributeValue(Attributes.ARMOR),
+				player.getAttributeValue(Attributes.ARMOR_TOUGHNESS));
+	}
+
+	static double visibleDamage(ItemStack stack) {
+		var modifiers = stack.getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS, ItemAttributeModifiers.EMPTY);
+		return modifiers.compute(Attributes.ATTACK_DAMAGE, 1.0, EquipmentSlot.MAINHAND);
 	}
 
 	private static ObservationEncoder.State state(Player player, Vec3 velocity, int arrows) {
