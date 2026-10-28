@@ -86,19 +86,17 @@ std::size_t cellCount(BlockWorldView blocks) {
     return count;
 }
 
-__global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* arrow_summaries, int ticks) {
+__global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* arrow_summaries) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(batch.environment_count)) {
         return;
     }
     auto world = batch.world(static_cast<int>(index));
-    for (int tick = 0; tick < ticks; ++tick) {
-        if (batch.projectile_states) {
-            const auto blocks = batch.block_worlds ? batch.block_worlds[index] : BlockWorldView{};
-            processWorldTick(world, blocks, batch.projectile_states[index]);
-        } else {
-            world.processTick();
-        }
+    if (batch.projectile_states) {
+        const auto blocks = batch.block_worlds ? batch.block_worlds[index] : BlockWorldView{};
+        processWorldTick(world, blocks, batch.projectile_states[index]);
+    } else {
+        world.processTick();
     }
     if (arrow_summaries && batch.projectile_states) {
         for (int player = 0; player < projectile_player_count; ++player) {
@@ -318,9 +316,12 @@ void CudaBatch::step(int ticks) {
         throw std::invalid_argument("Tick count must be positive");
     }
     const auto count = static_cast<unsigned int>(storage_->view.environment_count);
-    advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block>>>(
-        storage_->view, storage_->arrow_summaries.data, ticks);
-    checkCuda(cudaGetLastError());
+    for (int tick = 0; tick < ticks; ++tick) {
+        auto* summaries = tick == ticks - 1 ? storage_->arrow_summaries.data : nullptr;
+        advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block>>>(
+            storage_->view, summaries);
+        checkCuda(cudaGetLastError());
+    }
 }
 
 void CudaBatch::synchronize() const {

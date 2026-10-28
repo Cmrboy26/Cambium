@@ -332,6 +332,7 @@ def collect(model, worlds, pool, observations, steps, device, fixed, profile=Fal
 
 
 def _collect(model, worlds, pool, observations, steps, device, fixed, timer, learner):
+    trace = os.environ.get("MCSIM_TRACE_PROGRESS") == "1"
     with timer.phase("setup"):
         worlds.episode_metrics.begin_rollout()
         shape = (steps, worlds.count)
@@ -347,6 +348,8 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
         endings = timeouts = 0
         ids = np.arange(worlds.count)
     for step in range(steps):
+        if trace:
+            print(f"TRACE rollout step={step + 1}/{steps} phase=begin", flush=True)
         slots = pool.learner_slots.copy()
         with timer.phase("observation_transfer", cuda=True):
             current = torch.as_tensor(observations[ids, slots], device=device)
@@ -357,7 +360,11 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
         with timer.phase("opponent_actions", cuda=True):
             combined_actions = pool.act(observations, learner_actions)
         with timer.phase("environment_step"):
+            if trace:
+                print(f"TRACE rollout step={step + 1}/{steps} phase=environment_step_begin", flush=True)
             final, rewards, terminated, truncated = worlds.step(combined_actions)
+            if trace:
+                print(f"TRACE rollout step={step + 1}/{steps} phase=environment_step_done", flush=True)
         with timer.phase("reward_breakdown"):
             if reward_types is not None:
                 contributions = worlds.step_reward_totals(slots)
@@ -385,6 +392,8 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
             opponents = [pool.names[int(pool.assignments[world])] for world in selected]
             worlds.episode_metrics.step(rewards[ids, slots], done, outcomes, opponents)
         if done.any():
+            if trace:
+                print(f"TRACE rollout step={step + 1}/{steps} phase=reset_begin", flush=True)
             if timer.enabled:
                 timer.count("reset_calls")
                 timer.count("reset_worlds", done.sum())
@@ -392,8 +401,12 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
                 observations = worlds.reset(done, timer=timer)
             with timer.phase("opponent_reset"):
                 pool.reset(done)
+            if trace:
+                print(f"TRACE rollout step={step + 1}/{steps} phase=reset_done", flush=True)
         else:
             observations = final
+    if trace:
+        print("TRACE rollout phase=gae_begin", flush=True)
     with timer.phase("gae", cuda=True):
         rollout["advantages"], rollout["returns"] = compute_gae(
             rollout["rewards"], rollout["values"], rollout["next_values"], rollout["terminated"],
@@ -402,6 +415,8 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
         rollout["reward_types"] = reward_types
     rollout["episode_metrics"] = {**worlds.episode_metrics.snapshot(),
                                   "training_rollout": worlds.episode_metrics.rollout_snapshot()}
+    if trace:
+        print("TRACE rollout phase=done", flush=True)
     return rollout, observations, endings, timeouts
 
 
@@ -679,6 +694,9 @@ def run(options, checkpoint=None):
         if checkpoint is not None:
             print("Resumed schedule, samplers and weights; starting fresh episodes (not mid-episode continuation).")
         for update in range(base_update + 1, base_update + options.updates + 1):
+            trace = os.environ.get("MCSIM_TRACE_PROGRESS") == "1"
+            if trace:
+                print(f"TRACE update={update} phase=collection_begin", flush=True)
             start = time.perf_counter()
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
@@ -708,10 +726,14 @@ def run(options, checkpoint=None):
                     model, worlds, pool, observations, options.rollout_steps, device, fixed,
                     profile=False, learner=plan["learner"])
             collection_seconds = time.perf_counter() - start
+            if trace:
+                print(f"TRACE update={update} phase=optimization_begin", flush=True)
             optimization_start = time.perf_counter()
             statistics: dict[str, object] = dict(optimize(model, optimizer, rollout, options.epochs,
                                                          options.minibatch_size, learner=plan["learner"]))
             optimization_seconds = time.perf_counter() - optimization_start
+            if trace:
+                print(f"TRACE update={update} phase=optimization_done", flush=True)
             if "reward_types" in rollout:
                 statistics["reward_types"] = rollout["reward_types"]
             statistics.update(rollout["episode_metrics"])

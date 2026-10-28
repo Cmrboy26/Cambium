@@ -424,6 +424,34 @@ class InferenceChecks(unittest.TestCase):
 
 
 class TrainingChecks(unittest.TestCase):
+    def test_native_capture_records_selected_pre_step_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.bin"
+            with mock.patch.dict(os.environ, {"MCSIM_CAPTURE_STEP": "", "MCSIM_CAPTURE_PATH": str(path)}):
+                with Environment(2, max_ticks=10) as environment:
+                    environment.step(neutral(2))
+                self.assertFalse(path.exists())
+            with mock.patch.dict(os.environ, {"MCSIM_CAPTURE_STEP": "2", "MCSIM_CAPTURE_PATH": str(path)}):
+                with Environment(2, max_ticks=10) as environment:
+                    environment.step(neutral(2))
+                    self.assertFalse(path.exists())
+                    environment.step(neutral(2))
+                    environment.step(neutral(2))
+            with path.open("rb") as capture:
+                header_size = int.from_bytes(capture.read(8), byteorder=sys.byteorder)
+                metadata = json.loads(capture.read(header_size))
+                payload = capture.read()
+            self.assertEqual((metadata["format"], metadata["version"], metadata["step"]),
+                             ("mcsim_native_capture", 1, 2))
+            self.assertEqual(metadata["worlds"], 2)
+            per_world = (2 * metadata["player_size"] + 4 * metadata["controls_size"]
+                         + metadata["world_size"] + metadata["projectile_world_size"]
+                         + metadata["arrow_capacity"] * metadata["arrow_size"]
+                         + metadata["wind_capacity"] * metadata["wind_size"]
+                         + metadata["thrown_capacity"] * metadata["thrown_size"])
+            self.assertEqual(len(payload), 2 * per_world + metadata["cell_count"] * metadata["block_size"]
+                             + metadata["sine_count"] * 4)
+
     def test_self_launch_reward_matches_owner_impulse_and_reset(self):
         with tempfile.TemporaryDirectory() as directory:
             definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())

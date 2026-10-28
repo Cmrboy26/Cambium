@@ -72,6 +72,46 @@ python -B -m simulator.training.analyze_metrics simulator/training/runs/<run-nam
 python -B -m simulator.training.analyze_metrics simulator/training/runs/<run-name> --timings --stage <stage-name> --json
 ```
 
+For diagnosing an update that does not finish, set `MCSIM_TRACE_PROGRESS=1` in
+the trainer environment. Flushed `TRACE` lines identify update, rollout-step,
+environment-step, reset, GAE and optimization boundaries. Unlike completed-update
+profiles, these lines remain visible if the trainer stops mid-update. Tracing
+adds output and may change timings; leave it unset for normal training.
+Set `MCSIM_TRACE_NATIVE=1` as well to print flushed native upload, kernel,
+synchronization and download boundaries. Use it with `--profile-every 1` so
+CUDA physics synchronizes explicitly; without profiling, the download is the
+next synchronization boundary. Native tracing also reports CPU physics.
+
+For a one-batch diagnostic, set `MCSIM_CAPTURE_STEP` to a positive 1-based
+native step and `MCSIM_CAPTURE_PATH` to a new persistent file. For GPU steps
+after the first, the trainer downloads the complete state after the preceding
+step, incorporates any intervening resets and target controls on the host,
+and writes the preserved pre-step buffers after launching the target kernel
+but before synchronizing. Step 1 downloads immediately before its launch. The
+header records source identity, terrain and buffer sizes; the remaining bytes
+are native struct buffers, including projectile pools and RNG state. This is
+an ABI-specific diagnostic, not a portable checkpoint. Capturing synchronizes
+the device, writes a potentially large file and can change timing. The counter
+is per native batch, and multi-arena runs are not supported by this single-path
+diagnostic.
+
+Build `minecraft_sim_capture_replay` in a matching native build to replay one
+captured tick for a contiguous world range. For example, on Linux:
+
+```sh
+cmake --build simulator/build-research --target minecraft_sim_capture_replay
+timeout --kill-after=2s 10s simulator/build-research/minecraft_sim_capture_replay <capture.bin> cpu <first-world> <world-count>
+```
+
+The `cuda` mode requires a CUDA-enabled build and a GPU allocation; always bound
+diagnostic runs because the replay can hang. The reader checks recorded struct
+sizes but cannot prove ABI compatibility: preserve the captured source hash,
+compiler and platform. CPU and CUDA replays, different batch sizes and added
+instrumentation can produce different timing or code generation.
+The `cuda-observe` mode additionally samples world and player tick counters on
+a nonblocking CUDA stream. These samples race the kernel and can be stale,
+inconsistent or unavailable; a matching tick does not prove a world finished.
+
 Zero (the default) disables profiling. Positive intervals select global update
 multiples, including after resume; profiling settings are invocation options,
 not inherited checkpoint constraints. Direct batch jobs use `SIM_PROFILE_EVERY`.

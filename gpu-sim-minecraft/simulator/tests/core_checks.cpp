@@ -1613,7 +1613,7 @@ void checkReplay() {
 #if defined(MCSIM_HAS_CUDA)
 void checkCudaWindStorage() {
     using namespace minecraft_sim;
-    constexpr int environments = 2;
+    constexpr int environments = 16;
     std::array<PlayerState, environments * 2> players{};
     std::array<Controls, environments * 2> queued{};
     std::array<Controls, environments * 2> held{};
@@ -1636,9 +1636,15 @@ void checkCudaWindStorage() {
         thrown[environment][0].velocity = {1.0, 0.03, 0.0};
         thrown[environment][0].active = true;
     }
+    charges[8][1] = charges[8][0];
+    arrows[1][0].position = {12.0, 30.0, 0.0};
+    arrows[1][0].velocity = {1.0, 0.0, 0.0};
+    arrows[1][0].owner = 1;
+    arrows[1][0].active = true;
+    arrows[1][0].left_owner = true;
     BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
                    nullptr, {testTable().data()}, projectiles.data()};
-    CudaBatch device(host);
+    CudaBatch device(host, true);
     device.step();
     device.download(host);
     near(charges[0][0].position.x, 1.0, 0.0, "CUDA wind charge advances after host upload");
@@ -1654,6 +1660,19 @@ void checkCudaWindStorage() {
     device.step();
     device.download(host);
     near(charges[1][0].position.x, 2.0, 0.0, "CUDA untouched wind charge continues after reset");
+    device.step(3);
+    device.download(host);
+    std::array<ArrowObservationSummary, environments * 2> summaries{};
+    device.downloadForTraining(host, summaries.data());
+    for (int environment = 0; environment < environments; ++environment) {
+        require(worlds[environment].tick == (environment == 0 ? 4 : 5),
+                "CUDA multi-tick request advances each world exactly once per tick");
+    }
+    require(players[2].tick == 5, "CUDA multi-tick request advances player state");
+    near(charges[1][0].position.x, 5.0, 0.0, "CUDA multi-tick request advances wind charges");
+    require(summaries[2].found && !summaries[3].found, "CUDA final arrow summaries retain ownership");
+    near(summaries[2].relative_position.x, arrows[1][0].position.x - players[2].position.x, 1.0E-12,
+         "CUDA multi-tick request summarizes the final arrow state");
     projectiles[0].wind_charge_capacity = 1;
     bool rejected = false;
     try {
