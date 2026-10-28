@@ -70,7 +70,7 @@ class ArenaViewer {
     constructor() {
         this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
         this.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
-        this.renderer.setClearColor(0xedf2f0);
+        this.renderer.setClearColor(document.documentElement.dataset.theme === "dark" ? 0x25332c : 0xedf2f0);
         this.renderer.domElement.setAttribute("aria-label", "Voxel arena and player positions");
         this.renderer.domElement.setAttribute("role", "img");
         host.prepend(this.renderer.domElement);
@@ -101,6 +101,11 @@ class ArenaViewer {
     }
 
     draw() { this.renderer.render(this.scene, this.camera); }
+
+    setTheme(theme) {
+        this.renderer.setClearColor(theme === "dark" ? 0x25332c : 0xedf2f0);
+        this.draw();
+    }
 
     resize() {
         const width = host.clientWidth;
@@ -328,6 +333,7 @@ class ArenaViewer {
 }
 
 let viewer;
+document.addEventListener("dashboard-theme", event => viewer?.setTheme(event.detail.theme));
 let signature;
 function renderArena(scenario = {}, preserveCamera = false) {
     const nextSignature = JSON.stringify(scenario);

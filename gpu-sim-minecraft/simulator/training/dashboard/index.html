@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cambium | Training</title>
     <link rel="icon" href="data:,">
+    <script>
+        (() => {
+            let theme;
+            try { theme = localStorage.getItem("cambium.theme.v1"); } catch (error) {}
+            document.documentElement.dataset.theme = theme === "light" || theme === "dark" ? theme
+                : window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        })();
+    </script>
     <link rel="stylesheet" href="/dashboard.css">
     <script defer src="/chart.umd.min.js"></script>
     <script defer src="/lucide.min.js"></script>
@@ -14,7 +22,7 @@
 <body>
     <header class="masthead">
         <div class="brand"><span class="brand-mark" aria-hidden="true">C</span><h1>Cambium <span>/ Training</span></h1></div>
-        <div class="connection"><span id="connection" role="status">Connecting</span><time id="checked"></time></div>
+        <div class="connection"><span id="connection" role="status">Connecting</span><time id="checked"></time><button id="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode"><i data-lucide="moon" aria-hidden="true"></i></button></div>
     </header>
     <main>
         <section class="toolbar" aria-label="Run selection">
@@ -173,11 +181,11 @@
                 <h3 id="runtime-title">Runtime &amp; throughput</h3>
                 <dl class="runtime-summary"><div><dt>Latest transitions / second</dt><dd id="stat-throughput">--</dd></div><div><dt>Completed rounds</dt><dd id="stat-rounds">--</dd></div><div><dt>Recorded timeouts</dt><dd id="stat-timeouts">--</dd></div></dl>
                 <div class="analytics-controls">
-                    <button type="button" id="analytics-request" class="analytics-request-button" aria-label="Profile the next training rollout" title="Profile the next training rollout" disabled><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i><span>Profile next rollout</span></button>
+                    <button type="button" id="analytics-request" class="analytics-request-button" aria-label="Profile the next training update" title="Profile the next training update" disabled><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i><span>Profile next update</span></button>
                     <p id="analytics-request-status" role="status">Select a supported research run to request a profile.</p>
                 </div>
                 <details id="analytics-profile" class="analytics-profile" hidden>
-                    <summary>Collection profile</summary>
+                    <summary>Update profile</summary>
                     <p id="analytics-profile-meta"></p>
                     <div id="analytics-profile-details" class="analytics-profile-details"></div>
                 </details>

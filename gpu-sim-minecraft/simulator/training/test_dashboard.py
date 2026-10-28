@@ -127,12 +127,20 @@ vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);
 context.profile={version:1,seconds:{physics:1.25,'reset.apply':0.2},native_seconds:{download:0.4},
     cuda_stream_seconds:{transfer:0.3},counts:{worlds:4},total_seconds:1.8,synchronize_seconds:0.1,
     unaccounted_seconds:0.15};
+context.optimization={version:1,seconds:{optimizer_step:0.7},native_seconds:{},
+    cuda_stream_seconds:{optimizer_step:0.02},counts:{minibatches:8,cuda_profiled_minibatches:8},
+    total_seconds:1.2,synchronize_seconds:0.01,unaccounted_seconds:0.1};
 vm.runInContext(`renderAnalyticsRequest({supported:true,request:{status:'completed',update:7,
-    stage:'<img src=x>',profile}});`,context);
+    stage:'<img src=x>',profile,optimization_profile:optimization}});`,context);
 assert.match(document.getElementById('analytics-request-status').textContent,/<img src=x>/);
 assert.equal(document.getElementById('analytics-profile').hidden,false);
 assert.match(document.getElementById('analytics-profile-meta').textContent,/1.8s/);
 assert.match(document.getElementById('analytics-profile-details').textContent,/physics.*1.25s.*reset.apply.*0.2s.*download.*0.4s.*transfer.*0.3s.*worlds.*4/);
+assert.match(document.getElementById('analytics-profile-details').textContent,/Optimization wall phases.*optimizer step.*0.7s/);
+assert.match(document.getElementById('analytics-profile-details').textContent,/Optimization CUDA stream spans.*optimizer step.*0.02s/);
+assert.match(document.getElementById('analytics-profile-meta').textContent,/Optimization 1.2s/);
+vm.runInContext(`renderAnalyticsRequest({supported:true,request:{status:'completed',update:6,stage:'old',profile}});`,context);
+assert.doesNotMatch(document.getElementById('analytics-profile-details').textContent,/Optimization wall phases/);
 """, str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -730,6 +738,53 @@ assert.equal(chart.canvas.listeners.contextmenu,undefined,'Single-series charts 
 """, str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard theme checks")
+    def test_theme_preference_and_chart_colors(self):
+        script = Path(__file__).with_name("dashboard") / "dashboard.js"
+        result = subprocess.run(["node", "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const toggle = {setAttribute(name,value){this[name]=value;},addEventListener(name,handler){this[name]=handler;}};
+const swatch = {dataset:{color:'#18764f'},style:{}};
+const events = [];
+const document = {documentElement:{dataset:{}},getElementById:()=>toggle,querySelectorAll:()=>[swatch],
+    dispatchEvent:event=>events.push(event.detail.theme)};
+let saved = null;
+const localStorage = {getItem:()=>saved,setItem:(key,value)=>{saved=value;}};
+const context = vm.createContext({document,localStorage,window:{matchMedia:()=>({matches:true})},Chart:{defaults:{}},Intl,
+    CustomEvent:class {constructor(type,options){this.detail=options.detail;}}});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('\ntry {\n    initTheme();')[0],context);
+vm.runInContext(`const options=()=>({scales:{x:{ticks:{},title:{}},y:{ticks:{},title:{},grid:{}}},plugins:{legend:{labels:{}}}});
+    charts.set('benchmark-win-chart',{data:{datasets:[{}]},options:options(),
+    update(){this.updates=(this.updates??0)+1;}});
+    milestoneCharts.set('condition',{chart:{data:{datasets:[{},{}]},options:options(),
+    update(){this.updates=(this.updates??0)+1;}}}); initTheme();`,context);
+assert.equal(document.documentElement.dataset.theme,'dark');
+assert.equal(toggle['aria-label'],'Switch to light mode');
+assert.equal(vm.runInContext('charts.get("benchmark-win-chart").options.scales.y.grid.color',context),'#36443d');
+assert.equal(vm.runInContext('milestoneCharts.get("condition").chart.updates',context),1);
+assert.notEqual(swatch.style.backgroundColor,'#18764f');
+toggle.click();
+assert.equal(saved,'light');
+assert.deepEqual(events,['dark','light']);
+assert.equal(document.documentElement.dataset.theme,'light');
+assert.equal(toggle['aria-label'],'Switch to dark mode');
+assert.equal(vm.runInContext('charts.get("benchmark-win-chart").data.datasets[0].borderColor',context),'#18764f');
+assert.equal(vm.runInContext('charts.get("benchmark-win-chart").options.scales.y.ticks.color',context),'#65716b');
+assert.equal(vm.runInContext('milestoneCharts.get("condition").chart.options.plugins.legend.labels.color',context),'#65716b');
+assert.equal(swatch.style.backgroundColor,'#18764f');
+vm.runInContext('initTheme()',context);
+assert.equal(document.documentElement.dataset.theme,'light');
+localStorage.getItem=()=>{throw new Error('blocked');};
+localStorage.setItem=()=>{throw new Error('blocked');};
+vm.runInContext('initTheme()',context);
+assert.equal(document.documentElement.dataset.theme,'dark');
+toggle.click();
+assert.equal(document.documentElement.dataset.theme,'light');
+""", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard chart checks")
     def test_chart_math_and_training_estimates(self):
         script = Path(__file__).with_name("dashboard") / "dashboard.js"
@@ -758,6 +813,17 @@ assert.deepEqual(evaluate(`smoothSeries(row=>row.reward_types?.death)`),
 assert.equal(evaluate(`definitions.find(([id])=>id==='loss-chart')[1].some(([key])=>key==='policy_loss')`),false);
 assert.equal(evaluate(`definitions.find(([id])=>id==='policy-loss-chart')[1][0][0]`),'policy_loss');
 assert.equal(evaluate(`definitions.find(([id])=>id==='duration-chart')[1].some(([key])=>key==='evaluation_seconds')`),true);
+assert.equal(evaluate(`isolatedPointRadius({dataset:{data:[{x:1,y:5}]},dataIndex:0})`),3);
+assert.equal(evaluate(`isolatedPointRadius({dataset:{data:[{x:1,y:5},{x:2,y:6}]},dataIndex:0})`),0);
+assert.equal(evaluate(`isolatedPointRadius({dataset:{data:[{x:1,y:null},{x:2,y:6},{x:3,y:null}]},dataIndex:1})`),3);
+assert.equal(evaluate(`isolatedPointRadius({dataset:{data:[{x:1,y:5,stage:'a'},{x:2,y:6,stage:'b'}]},dataIndex:0})`),3);
+assert.equal(evaluate(`isolatedPointRadius({dataset:{data:[{x:1,y:5,stage:'a'},{x:2,y:6,stage:'b'}]},dataIndex:0},true)`),0);
+assert.equal(evaluate(`isolatedPointRadius({dataset:{data:[{x:1,y:5},{x:1,y:5}]},dataIndex:0})`),3);
+assert.equal(evaluate(`isolatedPointRadius({dataset:{data:[{x:1,y:null}]},dataIndex:0})`),0);
+assert.deepEqual(evaluate(`chartBounds([])`),[null,null]);
+assert.deepEqual(evaluate(`chartBounds([10])`),[9,11]);
+assert.deepEqual(evaluate(`chartBounds([1000,1000])`),[990,1010]);
+assert.deepEqual(evaluate(`chartBounds([10,20])`),[10,20]);
 assert.deepEqual(evaluate(`trainingTime([{update:99,collection_seconds:900,update_seconds:100},
     {update:101,collection_seconds:6,update_seconds:4},{update:102,collection_seconds:8,update_seconds:2}],
     {training:{start_update:100,target_update:110}})`),
@@ -851,9 +917,12 @@ assert.equal(evaluate("[...charts.values()].every(chart=>chart.plugins.some(plug
 assert.equal(evaluate("charts.get('training-outcomes-chart').data.datasets[0].data.at(-1).y"),70);
 assert.equal(evaluate("charts.get('training-outcomes-chart').options.scales.y.max"),100);
 assert.equal(evaluate("charts.get('training-outcomes-chart').options.scales.x.title.text"),'Learner transitions');
-vm.runInContext('windowSize=1;',context);
+vm.runInContext('windowSize=1; redrawCharts();',context);
 assert.deepEqual(evaluate("metricPoints('win_rate')"),[],'Cached evaluations must not move into the latest update window');
-vm.runInContext('windowSize=0;',context);
+assert.deepEqual(evaluate("[charts.get('training-outcomes-chart').options.scales.x.min,charts.get('training-outcomes-chart').options.scales.x.max]"),[29,31]);
+assert.equal(evaluate(`(() => {const dataset=charts.get('training-outcomes-chart').data.datasets[0];
+    return dataset.pointRadius({dataset,dataIndex:0});})()`),3,'The only visible value must have a marker');
+vm.runInContext('windowSize=0; redrawCharts();',context);
 vm.runInContext(`records=[{update:1,reward_mean:.5,training_return:99,training_win_rate:1,
     training_opponents:{past:{training_return:50,training_win_rate:.9}}}]; renderPerformance();`,context);
 assert.equal(document.getElementById('stat-training-return').textContent,'--');
@@ -1318,11 +1387,16 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
         profile = {"version": 1, "seconds": {"physics": 0.2}, "native_seconds": {},
                    "cuda_stream_seconds": {}, "counts": {"worlds": 4}, "total_seconds": 0.3,
                    "synchronize_seconds": 0.01, "unaccounted_seconds": 0.09}
+        with self.assertRaises(ValueError):
+            finish_analytics_request(self.run_dir, request["request_id"], "completed", profile=profile,
+                                     optimization_profile={**profile, "seconds": {"loss": float("nan")}})
         self.assertTrue(finish_analytics_request(self.run_dir, request["request_id"], "completed",
-                                                 update=8, stage="combat", profile=profile))
+                                                 update=8, stage="combat", profile=profile,
+                                                 optimization_profile=profile))
         status = self.store.analytics_request(identity)
         self.assertEqual(status["request"]["status"], "completed")
         self.assertEqual(status["request"]["profile"], profile)
+        self.assertEqual(status["request"]["optimization_profile"], profile)
         self.assertEqual(status["request"]["update"], 8)
         self.assertNotEqual(self.store.request_analytics(identity)["request_id"], request["request_id"])
 

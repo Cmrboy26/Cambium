@@ -8,23 +8,36 @@
     "target": {"type": "scripted", "controller": "stationary_target"},
     "walker": {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 30, "wall_margin": 2}},
     "fighter": {"type": "scripted", "controller": "basic_melee", "options": {"attack_interval": 20, "strafe": true}},
+    "recent_self": {"type": "frozen_self_play", "every_updates": 10},
+    "older_self": {"type": "frozen_self_play", "every_updates": 30},
     "heldout_fighter": {"type": "scripted", "controller": "tactical_melee", "options": {"style": "aggressive", "attack_interval": 15, "sprint": true}}
   },
   "mixtures": {
     "stationary": [{"id": "target", "weight": 1}],
     "moving": [{"id": "walker", "weight": 1}],
-    "combat": [{"id": "fighter", "weight": 1}],
+    "combat": [{"id": "fighter", "weight": 2}, {"id": "recent_self", "weight": 1}, {"id": "older_self", "weight": 1}],
     "heldout": [{"id": "heldout_fighter", "weight": 1}]
   },
   "stages": [
     {
+      "name": "grounded_mace", "opponents": "stationary",
+      "equipment": {"sample": "episode", "players": "independent",
+        "loadout": {"armor": {"helmet": "minecraft:air", "boots": "minecraft:air"}}},
+      "controls": {"fixed": {"weapon": 0, "use_item": false}},
+      "task_override": {"max_ticks": 300, "rewards": {"doing_damage": 25, "won_duel": 30,
+        "episode_timeout": -5, "no_damage_penalty": -5, "good_aim": 3, "proximity": 3}},
+      "evaluations": {"grounded_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 3100}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "grounded_check", "metric": "win_rate", "at_least": 0.9}}]},
+      "snapshots": [{"name": "grounded-complete", "on_completion": true}]
+    },
+    {
       "name": "self_launch", "opponents": "stationary",
       "spawns": {"sample": "episode", "region": {"min": [-3, 1, -3], "max": [3, 1, 3]},
         "minimum_separation": 3, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [0, 30]}},
-      "controls": {"fixed": {"movement": "neutral", "jump": false, "sprint": false, "attack": false, "weapon": 1}},
+      "controls": {"fixed": {"movement": "neutral", "sprint": false, "attack": false, "weapon": 1}},
       "task_override": {"max_ticks": 100, "rewards": {"wind_self_launch": 3}},
       "evaluations": {"launch_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 3101}},
-      "advance": {"evaluation": {"suite": "launch_check", "metric": "self_launch_rate", "at_least": 0.7}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "launch_check", "metric": "self_launch_rate", "at_least": 0.9}}]},
       "snapshots": [{"name": "launch-complete", "on_completion": true}]
     },
     {
@@ -33,9 +46,9 @@
         "minimum_separation": 3, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [-10, 10]}},
       "controls": {"fixed": {}},
       "task_override": {"max_ticks": 300, "rewards": {"doing_damage": 25, "won_duel": 30,
-        "episode_timeout": -5, "no_damage_penalty": -5, "wind_self_launch": 2, "missed_attack_ready_time": -0.3}},
+        "episode_timeout": -5, "no_damage_penalty": -5, "good_aim": 3, "proximity": 3}},
       "evaluations": {"stationary_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 3102}},
-      "advance": {"evaluation": {"suite": "stationary_check", "metric": "launch_smash_rate", "at_least": 0.25}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "stationary_check", "metric": "launch_smash_rate", "at_least": 0.5}}]},
       "snapshots": [{"name": "stationary-complete", "on_completion": true}]
     },
     {
@@ -44,9 +57,9 @@
         "minimum_separation": 4, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [-10, 10]}},
       "controls": {"fixed": {}},
       "task_override": {"max_ticks": 400, "rewards": {"doing_damage": 25, "won_duel": 30,
-        "episode_timeout": -5, "no_damage_penalty": -5, "wind_self_launch": 1.5, "missed_attack_ready_time": -0.3}},
+        "episode_timeout": -5, "no_damage_penalty": -5, "missed_attack_ready_time": -0.3}},
       "evaluations": {"moving_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 3103}},
-      "advance": {"evaluation": {"suite": "moving_check", "metric": "launch_smash_rate", "at_least": 0.2}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "moving_check", "metric": "launch_smash_rate", "at_least": 0.45}}]},
       "snapshots": [{"name": "moving-complete", "on_completion": true}]
     },
     {
@@ -56,13 +69,10 @@
       "controls": {"fixed": {}},
       "task_override": {"max_ticks": 500, "rewards": {"doing_damage": 25, "taking_damage": -5,
         "won_duel": 40, "death": -20, "episode_timeout": -5, "no_damage_penalty": -5,
-        "wind_self_launch": 1, "missed_attack_ready_time": -0.3}},
+        "missed_attack_ready_time": -0.3}},
       "evaluations": {"duel_check": {"every_updates": 20, "worlds": 32, "episodes": 64, "seed": 3104,
         "overrides": {"opponents": "heldout"}}},
-      "advance": {"all": [
-        {"evaluation": {"suite": "duel_check", "metric": "launch_smash_rate", "at_least": 0.15}},
-        {"evaluation": {"suite": "duel_check", "metric": "win_rate", "at_least": 0.5}}
-      ]},
+      "advance": {"updates": 1000000},
       "snapshots": [{"name": "duel-complete", "on_completion": true}]
     }
   ]

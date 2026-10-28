@@ -68,6 +68,74 @@ let selectedOpponent = "";
 let performanceMode = "benchmark";
 const axisLabels = {elapsed_seconds: "Elapsed training time (seconds)", samples: "Learner transitions", update: "PPO update"};
 
+function themeColor(color) {
+    if (document.documentElement?.dataset.theme !== "dark") return color;
+    const components = color.match(/[\da-f]{2}/gi).map(value => parseInt(value, 16));
+    return `rgb(${components.map(value => Math.round(value + (255 - value) * 0.35)).join(", ")})`;
+}
+
+function chartGridColor() {
+    return document.documentElement?.dataset.theme === "dark" ? "#36443d" : "#edf1ee";
+}
+
+function chartTextColor() {
+    return document.documentElement?.dataset.theme === "dark" ? "#a4b2aa" : "#65716b";
+}
+
+function updateChartTheme(chart) {
+    for (const axis of Object.values(chart.options.scales)) {
+        axis.ticks.color = chartTextColor();
+        axis.title.color = chartTextColor();
+    }
+    chart.options.plugins.legend.labels.color = chartTextColor();
+    chart.options.scales.y.grid.color = chartGridColor();
+    chart.update("none");
+}
+
+function setTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    const toggle = element("theme-toggle");
+    const label = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
+    toggle.innerHTML = `<i data-lucide="${theme === "dark" ? "sun" : "moon"}" aria-hidden="true"></i>`;
+    if (window.lucide) window.lucide.createIcons();
+    document.dispatchEvent(new CustomEvent("dashboard-theme", {detail: {theme}}));
+    if (typeof Chart !== "undefined") {
+        Chart.defaults.color = chartTextColor();
+        for (const [id, series] of definitions) {
+            const chart = charts.get(id);
+            if (!chart) continue;
+            series.forEach(([, , color], index) => {
+                chart.data.datasets[index].borderColor = chart.data.datasets[index].backgroundColor = themeColor(color);
+            });
+            updateChartTheme(chart);
+        }
+        for (const entry of milestoneCharts.values()) {
+            if (!entry.chart) continue;
+            [colors.green, colors.amber].forEach((color, index) => {
+                entry.chart.data.datasets[index].borderColor = entry.chart.data.datasets[index].backgroundColor = themeColor(color);
+            });
+            updateChartTheme(entry.chart);
+        }
+    }
+    document.querySelectorAll(".reward-swatch[data-color]").forEach(swatch => {
+        swatch.style.backgroundColor = themeColor(swatch.dataset.color);
+    });
+}
+
+function initTheme() {
+    let theme;
+    try { theme = localStorage.getItem("cambium.theme.v1"); } catch (error) {}
+    if (theme !== "light" && theme !== "dark") theme = window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    setTheme(theme);
+    element("theme-toggle").addEventListener("click", () => {
+        theme = theme === "dark" ? "light" : "dark";
+        setTheme(theme);
+        try { localStorage.setItem("cambium.theme.v1", theme); } catch (error) {}
+    });
+}
+
 function trainingSummary(row, opponent = selectedOpponent) {
     const source = row.training_rollout ?? {};
     return opponent ? source.training_opponents?.[opponent] ?? {} : source;
@@ -242,8 +310,8 @@ const stageMarkers = {
         if (!chartArea || !scales.x) return;
         let previous;
         ctx.save();
-        ctx.strokeStyle = "#b4bdb7";
-        ctx.fillStyle = colors.gray;
+        ctx.strokeStyle = themeColor("#b4bdb7");
+        ctx.fillStyle = themeColor(colors.gray);
         ctx.font = '10px "Segoe UI", sans-serif';
         ctx.setLineDash([3, 4]);
         for (const row of windowRows(chartRows())) {
@@ -595,10 +663,34 @@ function format(value, digits = 0) {
     return Number.isFinite(value) ? new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(value) : "--";
 }
 
+function connectsStages(id) {
+    return ["benchmark-win-chart", "benchmark-return-chart"].includes(id)
+        || (id === "metric-chart" && metricCatalog[definitions.find(([name]) => name === id)[1][0][0]]?.scope === "evaluation");
+}
+
+function isolatedPointRadius(context, connectAcrossStages = false) {
+    const points = context.dataset?.data;
+    const index = context.dataIndex;
+    const point = points?.[index];
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return 0;
+    const connected = neighbor => neighbor && Number.isFinite(neighbor.x) && Number.isFinite(neighbor.y)
+        && (connectAcrossStages || point.stage === neighbor.stage)
+        && (point.x !== neighbor.x || point.y !== neighbor.y);
+    return connected(points[index - 1]) || connected(points[index + 1]) ? 0 : 3;
+}
+
+function chartBounds(domain) {
+    const minimum = domain[0];
+    const maximum = domain.at(-1);
+    if (minimum === undefined || minimum !== maximum) return [minimum, maximum];
+    const padding = Math.max(1, Math.abs(minimum) * 0.01);
+    return [minimum - padding, maximum + padding];
+}
+
 function initCharts() {
     if (typeof Chart === "undefined") throw new Error("Chart library could not be loaded.");
     Chart.defaults.font.family = '"Bahnschrift", "Segoe UI", sans-serif';
-    Chart.defaults.color = "#65716b";
+    Chart.defaults.color = chartTextColor();
     for (const [id, series] of definitions) {
         const stacked = id === "reward-types-chart";
         const canvas = element(id);
@@ -624,12 +716,12 @@ function initCharts() {
             type: stacked ? "bar" : "line",
             plugins: [stageMarkers, legendSolo],
             data: { datasets: series.map(([, label, color]) => ({
-                label, data: [], borderColor: color, backgroundColor: color,
-                borderWidth: 1.8, pointRadius: 0, pointHitRadius: 8, pointHoverRadius: 3,
+                label, data: [], borderColor: themeColor(color), backgroundColor: themeColor(color),
+                borderWidth: 1.8, pointRadius: stacked ? 0 : context => isolatedPointRadius(context, connectsStages(id)),
+                pointHitRadius: 8, pointHoverRadius: 3,
                 tension: 0, spanGaps: false,
                 segment: {borderColor: context => context.p0.raw.stage !== context.p1.raw.stage
-                    && !["benchmark-win-chart", "benchmark-return-chart"].includes(id)
-                    && !(id === "metric-chart" && metricCatalog[definitions.find(([name]) => name === id)[1][0][0]]?.scope === "evaluation")
+                    && !connectsStages(id)
                     ? "transparent" : undefined},
             })) },
             options: {
@@ -642,7 +734,7 @@ function initCharts() {
                 },
                 scales: {
                     x: { type: "linear", stacked, grid: { display: false }, ticks: { maxTicksLimit: 7, precision: 0, font: { size: 10 } } },
-                    y: { stacked, grid: { color: "#edf1ee" }, border: { display: false }, ticks: { maxTicksLimit: 5, font: { size: 10 } } },
+                    y: { stacked, grid: { color: chartGridColor() }, border: { display: false }, ticks: { maxTicksLimit: 5, font: { size: 10 } } },
                 },
             },
         }));
@@ -684,6 +776,7 @@ function redrawCharts() {
     renderWindowControls();
     const visible = windowRows(chartRows());
     const domain = visible.map(row => row[chartAxis]).filter(Number.isFinite);
+    const [minimum, maximum] = chartBounds(domain);
     for (const [id, series] of definitions) {
         const chart = charts.get(id);
         if (!chart) continue;
@@ -694,10 +787,10 @@ function redrawCharts() {
             if (entry && series.length === 1) chart.data.datasets[index].label = `${entry.label} (${entry.unit})`;
         });
         const entry = metricCatalog[series[0][0]];
-        chart.options.scales.x.min = domain[0];
-        chart.options.scales.x.max = domain.at(-1);
-        chart.options.scales.x.title = {display: true, text: axisLabels[chartAxis]};
-        chart.options.scales.y.title = { display: true, text: derivative ? `Change / ${axisLabels[chartAxis]}` : entry?.unit ?? "Weighted reward" };
+        chart.options.scales.x.min = minimum;
+        chart.options.scales.x.max = maximum;
+        chart.options.scales.x.title = {display: true, text: axisLabels[chartAxis], color: chartTextColor()};
+        chart.options.scales.y.title = { display: true, text: derivative ? `Change / ${axisLabels[chartAxis]}` : entry?.unit ?? "Weighted reward", color: chartTextColor() };
         chart.options.scales.y.min = entry?.unit === "%" && !derivative ? 0 : undefined;
         chart.options.scales.y.max = entry?.unit === "%" && !derivative ? 100 : undefined;
         chart.update("none");
@@ -933,11 +1026,11 @@ function renderMilestoneMetricCharts(stage, experiment) {
                 type: "line",
                 plugins: [legendSolo],
                 data: {datasets: [
-                    {label: entry.label, data: [], borderColor: colors.green, backgroundColor: colors.green,
-                        borderWidth: 2, pointRadius: history.suite ? 3 : 0, pointHoverRadius: 5,
+                    {label: entry.label, data: [], borderColor: themeColor(colors.green), backgroundColor: themeColor(colors.green),
+                        borderWidth: 2, pointRadius: history.suite ? 3 : isolatedPointRadius, pointHoverRadius: 5,
                         pointHitRadius: 8, tension: 0, spanGaps: false},
-                    {label: `Threshold ≥ ${entry.metricFormat(history.threshold)}`, data: [], borderColor: colors.amber,
-                        backgroundColor: colors.amber, borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0},
+                    {label: `Threshold ≥ ${entry.metricFormat(history.threshold)}`, data: [], borderColor: themeColor(colors.amber),
+                        backgroundColor: themeColor(colors.amber), borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0},
                 ]},
                 options: {
                     responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
@@ -951,7 +1044,7 @@ function renderMilestoneMetricCharts(stage, experiment) {
                             ticks: {maxTicksLimit: 7, precision: 0, font: {size: 10}}},
                         y: {suggestedMin: history.metric.endsWith("_rate") ? 0 : undefined,
                             suggestedMax: history.metric.endsWith("_rate") ? 1 : undefined,
-                            grid: {color: "#e3e9e5"}, border: {display: false},
+                            grid: {color: chartGridColor()}, border: {display: false},
                             ticks: {maxTicksLimit: 5, font: {size: 10}, callback: entry.metricFormat}},
                     },
                 },
@@ -1015,7 +1108,8 @@ function renderMilestoneRewards(stage) {
                 label.title = name;
                 const swatch = document.createElement("span");
                 swatch.className = "reward-swatch";
-                swatch.style.backgroundColor = definition?.[2] ?? colors.gray;
+                swatch.dataset.color = definition?.[2] ?? colors.gray;
+                swatch.style.backgroundColor = themeColor(swatch.dataset.color);
                 swatch.setAttribute("aria-hidden", "true");
                 const text = document.createElement("span");
                 text.textContent = definition?.[1] ?? name.replaceAll("_", " ");
@@ -1348,7 +1442,7 @@ function renderAnalyticsRequest(data) {
     button.disabled = !supported || request?.status === "pending" || request?.status === "running";
     const status = element("analytics-request-status");
     if (!supported) status.textContent = "This run does not support dashboard analytics requests.";
-    else if (!request) status.textContent = "Profile the next rollout at an update boundary.";
+    else if (!request) status.textContent = "Profile the next update at an update boundary.";
     else if (request.status === "pending") status.textContent = "Queued; profiling will start at the next update boundary.";
     else if (request.status === "running") status.textContent = `Profiling update ${format(request.update)} (${request.stage}).`;
     else if (request.status === "failed") status.textContent = `Profile failed: ${request.error ?? "The trainer could not collect timings."}`;
@@ -1369,6 +1463,14 @@ function renderAnalyticsRequest(data) {
     appendProfileGroup(details, "Native calls (seconds)", profile.native_seconds, "s");
     appendProfileGroup(details, "CUDA stream spans (seconds)", profile.cuda_stream_seconds, "s");
     appendProfileGroup(details, "Collection counts", profile.counts, "", 0);
+    const optimization = request.optimization_profile;
+    if (optimization) {
+        element("analytics-profile-meta").textContent +=
+            ` Optimization ${format(optimization.total_seconds, 3)}s; final synchronization ${format(optimization.synchronize_seconds, 3)}s.`;
+        appendProfileGroup(details, "Optimization wall phases (seconds)", optimization.seconds, "s");
+        appendProfileGroup(details, "Optimization CUDA stream spans (first minibatches, seconds)", optimization.cuda_stream_seconds, "s");
+        appendProfileGroup(details, "Optimization counts", optimization.counts, "", 0);
+    }
 }
 
 async function requestAnalytics() {
@@ -1451,6 +1553,7 @@ async function refresh() {
 }
 
 try {
+    initTheme();
     chartAxis = element("chart-axis").value in axisLabels ? element("chart-axis").value : "update";
     initCharts();
     updateSmoothing();

@@ -451,14 +451,48 @@ class SnapshotChecks(unittest.TestCase):
         self.assertEqual(profile_modes, [False, True, False])
         self.assertEqual(request["status"], "completed")
         self.assertEqual(request["update"], 2)
-        self.assertEqual(request["stage"], "combat")
+        self.assertEqual(request["stage"], "aim")
         self.assertEqual(request["profile"]["version"], 1)
+        self.assertEqual(request["optimization_profile"]["version"], 1)
+        self.assertGreater(request["optimization_profile"]["counts"]["minibatches"], 0)
+        self.assertIn("optimizer_step", request["optimization_profile"]["seconds"])
         rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+        self.assertEqual(request["stage"], rows[1]["stage"])
         self.assertNotIn("collection_profile", rows[0])
         self.assertEqual(rows[1]["collection_profile"], request["profile"])
+        self.assertNotIn("optimization_profile", rows[0])
+        self.assertEqual(rows[1]["optimization_profile"], request["optimization_profile"])
+        self.assertNotIn("optimization_profile", rows[2])
         self.assertNotIn("collection_profile", rows[2])
         config = json.loads((output / "config.json").read_text())
         self.assertTrue(config["options"]["dashboard_analytics_requests"])
+
+    def test_progress_trace_is_opt_in_and_reports_step_and_optimization_boundaries(self):
+        for enabled in (False, True):
+            output = self.directory / f"trace-{enabled}"
+            messages = io.StringIO()
+            with patch.dict("os.environ", {"MCSIM_TRACE_PROGRESS": "1" if enabled else "0"}), \
+                    contextlib.redirect_stdout(messages):
+                main([*self.flags, "--updates", "1", "--output", str(output)])
+            trace = [line for line in messages.getvalue().splitlines() if line.startswith("TRACE ")]
+            if not enabled:
+                self.assertEqual(trace, [])
+                continue
+            self.assertIn("TRACE update=1 phase=collection_begin", trace)
+            self.assertIn("TRACE rollout step=1/3 phase=environment_step_begin", trace)
+            self.assertIn("TRACE rollout step=1/3 phase=environment_step_done", trace)
+            self.assertIn("TRACE rollout phase=gae_begin", trace)
+            self.assertIn("TRACE update=1 phase=optimization_begin", trace)
+            self.assertIn("TRACE update=1 phase=optimization_done", trace)
+
+    def test_progress_trace_keeps_step_start_when_native_step_fails(self):
+        messages = io.StringIO()
+        with patch.dict("os.environ", {"MCSIM_TRACE_PROGRESS": "1"}), \
+                patch("simulator.training.research.SampledWorlds.step", side_effect=RuntimeError("step failed")), \
+                contextlib.redirect_stdout(messages), self.assertRaisesRegex(RuntimeError, "step failed"):
+            main([*self.flags, "--updates", "1", "--output", str(self.directory / "trace-failure")])
+        trace = [line for line in messages.getvalue().splitlines() if line.startswith("TRACE ")]
+        self.assertEqual(trace[-1], "TRACE rollout step=1/3 phase=environment_step_begin")
 
     def test_named_saves_rolling_opponent_resume_evaluation_and_replay(self):
         self.raw["snapshots"] = [{"name": "final", "on_completion": True}]

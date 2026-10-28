@@ -52,6 +52,9 @@ foreach(target IN ITEMS minecraft_sim_runner minecraft_sim_compare minecraft_sim
 endforeach()
 
 set(simulator_targets minecraft_sim minecraft_sim_runner minecraft_sim_compare minecraft_sim_benchmark)
+add_executable(minecraft_sim_capture_replay EXCLUDE_FROM_ALL tools/native_capture_replay.cpp)
+target_link_libraries(minecraft_sim_capture_replay PRIVATE minecraft_sim::minecraft_sim nlohmann_json::nlohmann_json)
+list(APPEND simulator_targets minecraft_sim_capture_replay)
 add_library(minecraft_sim_training SHARED apps/training.cpp)
 target_link_libraries(minecraft_sim_training PRIVATE minecraft_sim::minecraft_sim nlohmann_json::nlohmann_json)
 file(GLOB_RECURSE native_identity_files CONFIGURE_DEPENDS
@@ -127,7 +130,7 @@ if(MCSIM_ENABLE_CUDA)
     target_compile_options(minecraft_sim_cuda PRIVATE
         "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;--ftz=false;--prec-div=true;--prec-sqrt=true>"
     )
-    foreach(target IN ITEMS minecraft_sim_runner minecraft_sim_checks minecraft_sim_benchmark minecraft_sim_training)
+    foreach(target IN ITEMS minecraft_sim_runner minecraft_sim_checks minecraft_sim_benchmark minecraft_sim_training minecraft_sim_capture_replay)
         if(TARGET ${target})
             target_link_libraries(${target} PRIVATE minecraft_sim_cuda)
             target_compile_definitions(${target} PRIVATE MCSIM_HAS_CUDA=1)

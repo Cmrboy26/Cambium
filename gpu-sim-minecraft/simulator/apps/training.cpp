@@ -7,6 +7,9 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,6 +28,13 @@ constexpr std::array<float, 9> yaw_bins{-20, -10, -5, -2, 0, 2, 5, 10, 20};
 constexpr std::array<float, 5> pitch_bins{-5, -2, 0, 2, 5};
 constexpr std::array<int, 9> forward{0, 1, 1, 0, -1, -1, -1, 0, 1};
 constexpr std::array<int, 9> strafe{0, 0, -1, -1, -1, 0, 1, 1, 1};
+
+void traceNative(bool enabled, const char* phase) {
+    if (enabled) {
+        std::printf("NATIVE_TRACE %s\n", phase);
+        std::fflush(stdout);
+    }
+}
 
 enum ProfilePhase : std::size_t {
     StepDecode, ControlsUpload, Physics, StateDownload, Rewards, StepObserve,
@@ -73,6 +83,7 @@ struct TrainingBatch {
     int features;
     int heads;
     bool profiling = false;
+    std::uint64_t capture_step_counter = 0;
     std::array<double, ProfilePhaseCount> profiling_seconds{};
 #if defined(MCSIM_HAS_CUDA)
     std::unique_ptr<CudaBatch> gpu;
@@ -166,6 +177,61 @@ struct TrainingBatch {
     BatchView view() {
         return {players.data(), queued.data(), held.data(), worlds.data(),
                 static_cast<int>(worlds.size()), 2, blocks.data(), {terrain.sine.data()}, projectile_states.data()};
+    }
+
+    std::uint64_t captureTarget() const {
+        const char* target = std::getenv("MCSIM_CAPTURE_STEP");
+        if (!target || !*target) return 0;
+        char* end = nullptr;
+        const auto requested = std::strtoull(target, &end, 10);
+        if (*end || requested == 0) throw std::invalid_argument("MCSIM_CAPTURE_STEP must be a positive integer");
+        return requested;
+    }
+
+    void writeCapture(const char* path, std::uint64_t requested) {
+        std::ofstream output(path, std::ios::binary);
+        if (!output) throw std::runtime_error("Cannot open capture path");
+        const nlohmann::json metadata{
+            {"format", "mcsim_native_capture"}, {"version", 1}, {"step", requested},
+            {"source_hash", MCSIM_SOURCE_HASH}, {"worlds", worlds.size()},
+            {"players_per_world", 2}, {"terrain", terrain.definition},
+            {"player_size", sizeof(PlayerState)}, {"controls_size", sizeof(Controls)},
+            {"world_size", sizeof(WorldState)}, {"projectile_world_size", sizeof(ProjectileWorldState)},
+            {"arrow_size", sizeof(ArrowState)}, {"wind_size", sizeof(WindChargeState)},
+            {"thrown_size", sizeof(ThrownProjectileState)}, {"block_size", sizeof(Block)},
+            {"arrow_capacity", projectile_states[0].arrow_capacity},
+            {"wind_capacity", projectile_states[0].wind_charge_capacity},
+            {"thrown_capacity", projectile_states[0].thrown_item_capacity},
+            {"cell_count", terrain.cells.size()}, {"sine_count", terrain.sine.size()}
+        };
+        const auto header = metadata.dump();
+        const auto header_size = std::uint64_t(header.size());
+        const auto write = [&output](const auto* data, std::size_t count) {
+            if (count) output.write(reinterpret_cast<const char*>(data), count * sizeof(*data));
+        };
+        write(&header_size, 1);
+        output.write(header.data(), static_cast<std::streamsize>(header.size()));
+        write(players.data(), players.size());
+        write(queued.data(), queued.size());
+        write(held.data(), held.size());
+        write(worlds.data(), worlds.size());
+        auto states = projectile_states;
+        for (auto& state : states) {
+            state.arrows = nullptr;
+            state.wind_charges = nullptr;
+            state.thrown_items = nullptr;
+        }
+        write(states.data(), states.size());
+        write(projectile_arrows.data(), projectile_arrows.size());
+        write(projectile_wind.data(), projectile_wind.size());
+        write(projectile_thrown.data(), projectile_thrown.size());
+        write(terrain.cells.data(), terrain.cells.size());
+        write(terrain.sine.data(), terrain.sine.size());
+        output.close();
+        if (!output) throw std::runtime_error("Failed to write native capture");
+        std::printf("NATIVE_CAPTURE step=%llu path=%s worlds=%zu\n",
+                    static_cast<unsigned long long>(requested), path, worlds.size());
+        std::fflush(stdout);
     }
 
     const ArrowObservationSummary* currentArrowSummaries() const {
@@ -401,6 +467,8 @@ struct TrainingBatch {
 
     void step(const std::int32_t* actions, float* observations, float* rewards,
               std::uint8_t* terminated, std::uint8_t* truncated) {
+        const char* trace_value = std::getenv("MCSIM_TRACE_NATIVE");
+        const bool trace = trace_value && trace_value[0] == '1' && trace_value[1] == '\0';
         const auto decode_start = profileStart();
         if (std::any_of(finished.begin(), finished.end(), [](auto value) { return value != 0; })) {
             throw std::invalid_argument("Reset finished environments before the next step");
@@ -448,28 +516,56 @@ struct TrainingBatch {
             queued[index] = controls;
         }
             profileEnd(StepDecode, decode_start);
+        const auto capture_target = captureTarget();
+        const bool capture_now = capture_target && ++capture_step_counter == capture_target;
+        const char* capture_path = capture_now ? std::getenv("MCSIM_CAPTURE_PATH") : nullptr;
+        if (capture_now && (!capture_path || !*capture_path)) {
+            throw std::invalid_argument("MCSIM_CAPTURE_PATH is required");
+        }
+        if (capture_now && std::filesystem::exists(capture_path)) {
+            throw std::runtime_error("Capture path already exists");
+        }
 #if defined(MCSIM_HAS_CUDA)
         if (gpu) {
                 const auto upload_start = profileStart();
+            traceNative(trace, "controls_upload_begin");
             gpu->uploadControls(queued.data(), queued.size());
+            traceNative(trace, "controls_upload_done");
                 profileEnd(ControlsUpload, upload_start);
+            if (capture_now && capture_target == 1) gpu->download(view());
                 const auto physics_start = profileStart();
+            traceNative(trace, "kernel_launch_begin");
             gpu->step();
-                if (profiling) gpu->synchronize();
+            traceNative(trace, "kernel_launch_done");
+            if (capture_now) writeCapture(capture_path, capture_target);
+            if (profiling) {
+                traceNative(trace, "cuda_synchronize_begin");
+                gpu->synchronize();
+                traceNative(trace, "cuda_synchronize_done");
+            }
                 profileEnd(Physics, physics_start);
                 const auto download_start = profileStart();
+            traceNative(trace, "state_download_begin");
             gpu->downloadForTraining(view(), layout ? arrow_summaries.data() : nullptr);
+            traceNative(trace, "state_download_done");
+            if (capture_target > 1 && capture_step_counter == capture_target - 1) {
+                gpu->download(view());
+                traceNative(trace, "capture_prefetch_done");
+            }
                 profileEnd(StateDownload, download_start);
         } else
 #endif
         {
+            if (capture_now) writeCapture(capture_path, capture_target);
                 const auto physics_start = profileStart();
+            traceNative(trace, "cpu_physics_begin");
 #if defined(_OPENMP)
 #pragma omp parallel for
 #endif
             for (int environment = 0; environment < static_cast<int>(worlds.size()); ++environment) {
                 processWorldTick(view().world(environment), blocks[environment], projectile_states[environment]);
             }
+            traceNative(trace, "cpu_physics_done");
             profileEnd(Physics, physics_start);
         }
         const auto rewards_start = profileStart();

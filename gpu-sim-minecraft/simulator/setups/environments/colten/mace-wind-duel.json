@@ -6,7 +6,9 @@
     "shared": {
       "health": 20,
       "loadout": {"weapons": ["minecraft:mace", "minecraft:wind_charge"], "selected": 0,
-        "wind_charges": 8, "offhand": "minecraft:air", "armor": {}}
+        "wind_charges": 8, "offhand": "minecraft:air", "armor": {
+          "helmet": "minecraft:diamond_helmet", "chestplate": "minecraft:diamond_chestplate",
+          "leggings": "minecraft:diamond_leggings", "boots": "minecraft:diamond_boots"}}
     },
     "overrides": [
       {"position": [-2, 1, 0], "yaw": -90, "pitch": 0},

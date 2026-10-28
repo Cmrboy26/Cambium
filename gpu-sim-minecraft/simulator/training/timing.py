@@ -52,3 +52,9 @@ class CollectionTimer:
             "native_seconds": self.native_seconds,
                 "cuda_stream_seconds": stream_seconds, "synchronize_seconds": synchronization,
                 "total_seconds": total, "unaccounted_seconds": max(0.0, total - accounted - synchronization)}
+
+
+class OptimizationTimer(CollectionTimer):
+    def __init__(self, device, enabled=False):
+        super().__init__(device, enabled)
+        self.counts = {}

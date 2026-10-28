@@ -45,6 +45,11 @@ benchmarks physics. It needs an NVIDIA GPU, a C++20 CUDA Toolkit and supported
 host compiler. [Manual CUDA/Linux setup](AGENTS.md#cuda-build).
 Physics benchmark rates are not end-to-end PPO training rates.
 
+`CudaBatch::step(k)` launches one kernel per tick and computes arrow summaries
+on the final tick. A device-side tick loop produced a corrupted loop counter
+with CUDA 12.0.140 on H100 when threads diverged into summary work; retain this
+ordering unless that toolchain and workload are verified with an alternative.
+
 ## Use It
 
 - [Train a policy](training/README.md) with the Python adapter and PPO trainer.
