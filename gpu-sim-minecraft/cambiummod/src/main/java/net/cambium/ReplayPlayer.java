@@ -136,9 +136,21 @@ final class ReplayPlayer extends ServerPlayer {
 		observedOpponentDisable = 0;
 		stopUsingItem();
 		if (loadout != null) {
+			JsonArray weapons = loadout.getAsJsonArray("weapons");
+			for (int slot = 0; slot < weapons.size(); slot++) {
+				String item = weapons.get(slot).getAsString();
+				int count = item.equals("minecraft:snowball") ? actor.snowball_count() : item.equals("minecraft:egg") ? actor.egg_count()
+						: item.equals("minecraft:ender_pearl") ? actor.ender_pearl_count()
+						: item.equals("minecraft:wind_charge") ? actor.wind_charge_count() : -1;
+				if (count < 0) continue;
+				getInventory().setItem(slot, count == 0 ? ItemStack.EMPTY
+						: new ItemStack(BuiltInRegistries.ITEM.getValue(Identifier.parse(item)), count));
+			}
 			String previous = BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString();
 			int requested = actor.weapon_slot() >= 0 ? actor.weapon_slot() : actor.controls().select_slot();
-			getInventory().setSelectedSlot(SimulationContract.selectedSlot(loadout, actor.weapon(), requested, getInventory().getSelectedSlot()));
+			if (requested >= 0 && actor.weapon().equals("minecraft:air") && getInventory().getItem(requested).isEmpty()) {
+				getInventory().setSelectedSlot(requested);
+			} else getInventory().setSelectedSlot(SimulationContract.selectedSlot(loadout, actor.weapon(), requested, getInventory().getSelectedSlot()));
 			if (!previous.equals(actor.weapon())) refreshMainHand();
 		}
 		equip(EquipmentSlot.MAINHAND, actor.weapon());
@@ -150,6 +162,12 @@ final class ReplayPlayer extends ServerPlayer {
 		ItemStack shield = new ItemStack(Items.SHIELD);
 		getCooldowns().removeCooldown(getCooldowns().getCooldownGroup(shield));
 		if (actor.shield_cooldown() > 0) getCooldowns().addCooldown(shield, actor.shield_cooldown());
+		ItemStack pearl = new ItemStack(Items.ENDER_PEARL);
+		getCooldowns().removeCooldown(getCooldowns().getCooldownGroup(pearl));
+		if (actor.ender_pearl_cooldown() > 0) getCooldowns().addCooldown(pearl, actor.ender_pearl_cooldown());
+		ItemStack wind = new ItemStack(Items.WIND_CHARGE);
+		getCooldowns().removeCooldown(getCooldowns().getCooldownGroup(wind));
+		if (actor.wind_charge_cooldown() > 0) getCooldowns().addCooldown(wind, actor.wind_charge_cooldown());
 		if (actor.using_shield()) {
 			startUsingItem(InteractionHand.OFF_HAND);
 			useItemRemaining = Math.max(0, getUseItem().getUseDuration(this) - actor.shield_use_ticks());
@@ -190,7 +208,8 @@ final class ReplayPlayer extends ServerPlayer {
 				if (requested != getInventory().getSelectedSlot() && LivePolicy.usingBow(this)) stopUsingItem();
 				String previous = BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString();
 				getInventory().setSelectedSlot(requested);
-				if (!previous.equals(input.weapon())) {
+				String selected = BuiltInRegistries.ITEM.getKey(getMainHandItem().getItem()).toString();
+				if (!previous.equals(selected)) {
 					refreshMainHand();
 					resetAttackStrengthTicker();
 				}
@@ -250,8 +269,17 @@ final class ReplayPlayer extends ServerPlayer {
 					&& canPlayerFitWithinBlocksAndEntitiesWhen(Pose.CROUCHING),
 					!isSleeping() && !canPlayerFitWithinBlocksAndEntitiesWhen(Pose.STANDING));
 			if (controls.use_item() && !isUsingItem() && itemUseDelay == 0) {
+				boolean pearl = getMainHandItem().is(Items.ENDER_PEARL);
+				boolean wind = getMainHandItem().is(Items.WIND_CHARGE);
+				boolean thrown = (getMainHandItem().is(Items.SNOWBALL) || getMainHandItem().is(Items.EGG) || pearl || wind)
+						&& !getCooldowns().isOnCooldown(getMainHandItem());
+				if (pearl || wind) itemUseDelay = 4;
+				if (thrown) {
+					itemUseDelay = 4;
+					getMainHandItem().use(level(), this, InteractionHand.MAIN_HAND);
+				}
 				if (getMainHandItem().getItem() instanceof BowItem bow) bow.use(level(), this, InteractionHand.MAIN_HAND);
-				if (!isUsingItem() && getOffhandItem().is(Items.SHIELD) && !getCooldowns().isOnCooldown(getOffhandItem())) {
+				if (!thrown && !isUsingItem() && getOffhandItem().is(Items.SHIELD) && !getCooldowns().isOnCooldown(getOffhandItem())) {
 					getOffhandItem().getItem().use(level(), this, InteractionHand.OFF_HAND);
 					if (isUsingItem()) itemUseDelay = 4;
 				}
@@ -365,8 +393,9 @@ final class ReplayPlayer extends ServerPlayer {
 		this.loadout = loadout.deepCopy();
 		JsonArray weapons = loadout.getAsJsonArray("weapons");
 		for (int slot = 0; slot < PolicyCatalogue.MAX_WEAPON_SLOTS; slot++) {
-			ItemStack stack = slot >= weapons.size() || weapons.get(slot).getAsString().equals("minecraft:air") ? ItemStack.EMPTY
-					: new ItemStack(BuiltInRegistries.ITEM.getValue(Identifier.parse(weapons.get(slot).getAsString())));
+			String item = slot >= weapons.size() ? "minecraft:air" : weapons.get(slot).getAsString();
+			ItemStack stack = item.equals("minecraft:air") ? ItemStack.EMPTY
+					: new ItemStack(BuiltInRegistries.ITEM.getValue(Identifier.parse(item)), SimulationContract.stackCount(loadout, item));
 			if (!stack.isEmpty()) stack.set(DataComponents.UNBREAKABLE, Unit.INSTANCE);
 			getInventory().setItem(slot, stack);
 		}

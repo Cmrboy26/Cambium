@@ -10,6 +10,8 @@ const rewardTypes = [
     ["shield_disabled", "Shield disabled", "#467b9d"], ["win_speed", "Win speed", "#458541"],
     ["arrow_progress", "Arrow progress", "#53878a"],
     ["blocked_with_shield", "Shield block", "#29898c"],
+    ["wind_self_launch", "Wind self-launch", "#417b7a"],
+    ["missed_attack_ready_time", "Missed attack readiness", "#a35742"],
     ["good_aim", "Good aim", "#746ca8"], ["proximity", "Proximity", "#7b8542"],
     ["pitch_control", "Pitch control", "#4f6170"], ["aim_hold", "Aim hold", "#ab7256"],
     ["extreme_pitch_penalty", "Extreme pitch", "#bc596c"],
@@ -888,10 +890,11 @@ function renderMilestoneMetricCharts(stage, experiment) {
         milestoneChartSignature = signature;
         const fragment = document.createDocumentFragment();
         for (const [index, history] of histories.entries()) {
-            const labels = {reward_mean: "Mean episode return", win_rate: "Win rate", updates: "Completed updates",
+            const labels = {reward_mean: "Mean episode return", win_rate: "Win rate", self_launch_rate: "Self-launch rate",
+                mace_smash_rate: "Mace smash rate", launch_smash_rate: "Launch-to-smash rate", updates: "Completed updates",
                 episodes: "Completed episodes", transitions: "Learner transitions"};
             const label = labels[history.metric] ?? history.metric;
-            const metricFormat = (value) => history.metric === "win_rate" ? `${format(value * 100, 2)}%` : format(value, 4);
+            const metricFormat = (value) => history.metric.endsWith("_rate") ? `${format(value * 100, 2)}%` : format(value, 4);
             const section = document.createElement("section");
             section.className = "milestone-condition";
             const heading = document.createElement("div");
@@ -946,8 +949,8 @@ function renderMilestoneMetricCharts(stage, experiment) {
                     scales: {
                         x: {type: "linear", grid: {display: false}, title: {display: true, text: history.xLabel},
                             ticks: {maxTicksLimit: 7, precision: 0, font: {size: 10}}},
-                        y: {suggestedMin: history.metric === "win_rate" ? 0 : undefined,
-                            suggestedMax: history.metric === "win_rate" ? 1 : undefined,
+                        y: {suggestedMin: history.metric.endsWith("_rate") ? 0 : undefined,
+                            suggestedMax: history.metric.endsWith("_rate") ? 1 : undefined,
                             grid: {color: "#e3e9e5"}, border: {display: false},
                             ticks: {maxTicksLimit: 5, font: {size: 10}, callback: entry.metricFormat}},
                     },

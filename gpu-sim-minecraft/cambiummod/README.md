@@ -19,13 +19,18 @@ The helper does not install Fabric/API. Remove differently named older Cambium
 JARs to avoid duplicates, then reopen Minecraft. No particular launcher or instance
 name is required. [Game-folder selection](../scripts/README.md#minecraft-folder).
 
+A distribution JAR with a bundled runtime needs no Python installation for local
+policy duels. Developers must [build the runtime](AGENTS.md#bundled-inference)
+before building that JAR. Runtime bundles are specific to their OS and architecture.
+
 ## In-Game Panel
 
 Press **F8** or use `/simmenu` in a private singleplayer world. After the
 [one-time local Rosie setup](../rosie/README.md#local-replays-and-duels), the
 **Rosie** tab lists runs and syncs policies only, policies plus the latest replay,
 or all outputs, with transfer progress. **Library** groups policies by run, with
-a version selector and local-only run/policy display names.
+a version selector and local-only run/policy display names. **Import** adds a
+trusted compatible `.pt` checkpoint and its embedded environment without Rosie.
 In **Duel**, choose an environment and independently select a policy or scripted
 controller for each fighter, set the round duration, then start. Synced setups
 run locally while offline. **Stop match** keeps Python/PyTorch warm for the next

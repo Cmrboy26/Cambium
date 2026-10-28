@@ -117,7 +117,9 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
         return;
     }
     const int destination = ids[index];
+    const bool simulate_fall_damage = batch.worlds[destination].simulate_fall_damage;
     batch.worlds[destination] = {};
+    batch.worlds[destination].simulate_fall_damage = simulate_fall_damage;
     for (int player = 0; player < batch.players_per_environment; ++player) {
         const int offset = destination * batch.players_per_environment + player;
         batch.players[offset] = players[index * batch.players_per_environment + player];
@@ -133,6 +135,12 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
         destination_state.random = source_state.random;
         for (int slot = 0; slot < destination_state.arrow_capacity; ++slot) {
             destination_state.arrows[slot] = {};
+        }
+        for (int slot = 0; slot < destination_state.wind_charge_capacity; ++slot) {
+            destination_state.wind_charges[slot] = {};
+        }
+        for (int slot = 0; slot < destination_state.thrown_item_capacity; ++slot) {
+            destination_state.thrown_items[slot] = {};
         }
         if (arrow_summaries) {
             for (int player = 0; player < projectile_player_count; ++player) {
@@ -154,6 +162,10 @@ struct CudaBatch::Storage {
     DeviceBuffer<ProjectileWorldState> projectile_states;
     DeviceBuffer<ProjectileWorldState> reset_projectile_states;
     DeviceBuffer<ArrowState> projectile_arrows;
+    DeviceBuffer<WindChargeState> wind_charges;
+    int wind_charge_capacity = 0;
+    DeviceBuffer<ThrownProjectileState> thrown_items;
+    int thrown_item_capacity = 0;
     DeviceBuffer<ArrowObservationSummary> arrow_summaries;
     DeviceBuffer<int> reset_ids;
     DeviceBuffer<PlayerState> reset_players;
@@ -195,23 +207,61 @@ CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows) : storage_(std::m
         storage.projectile_states.allocate(initial.environment_count);
         storage.reset_projectile_states.allocate(initial.environment_count);
         storage.projectile_arrows.allocate(arrow_count);
+        storage.wind_charge_capacity = initial.projectile_states[0].wind_charge_capacity;
+        if (storage.wind_charge_capacity < 0) {
+            throw std::invalid_argument("Invalid wind charge pool capacity");
+        }
+        const auto wind_count = checkedProduct(std::size_t(initial.environment_count),
+                                               std::size_t(storage.wind_charge_capacity));
+        if (wind_count != 0) storage.wind_charges.allocate(wind_count);
+        storage.thrown_item_capacity = initial.projectile_states[0].thrown_item_capacity;
+        if (storage.thrown_item_capacity < 0) {
+            throw std::invalid_argument("Invalid thrown item pool capacity");
+        }
+        const auto thrown_count = checkedProduct(std::size_t(initial.environment_count),
+                                                 std::size_t(storage.thrown_item_capacity));
+        if (thrown_count != 0) storage.thrown_items.allocate(thrown_count);
         if (summarize_arrows) {
             storage.arrow_summaries.allocate(player_count);
         }
         std::vector<ProjectileWorldState> projectile_states(initial.environment_count);
         std::vector<ArrowState> arrows(arrow_count);
+        std::vector<WindChargeState> wind_charges(wind_count);
+        std::vector<ThrownProjectileState> thrown_items(thrown_count);
         for (int index = 0; index < initial.environment_count; ++index) {
             const auto& source = initial.projectile_states[index];
             if (!source.arrows || source.arrow_capacity != projectile_arrow_capacity) {
                 throw std::invalid_argument("CUDA bow worlds require a fixed 128-arrow pool");
             }
+            if (source.wind_charge_capacity != storage.wind_charge_capacity
+                || (storage.wind_charge_capacity > 0 && !source.wind_charges)) {
+                throw std::invalid_argument("CUDA wind charge pool shape mismatch");
+            }
+            if (source.thrown_item_capacity != storage.thrown_item_capacity
+                || (storage.thrown_item_capacity > 0 && !source.thrown_items)) {
+                throw std::invalid_argument("CUDA thrown item pool shape mismatch");
+            }
             projectile_states[index] = source;
             projectile_states[index].arrows = storage.projectile_arrows.data
                 + std::size_t(index) * projectile_arrow_capacity;
+            projectile_states[index].wind_charges = wind_count == 0 ? nullptr : storage.wind_charges.data
+                + std::size_t(index) * storage.wind_charge_capacity;
+            projectile_states[index].thrown_items = thrown_count == 0 ? nullptr : storage.thrown_items.data
+                + std::size_t(index) * storage.thrown_item_capacity;
             std::copy_n(source.arrows, projectile_arrow_capacity,
                         arrows.data() + std::size_t(index) * projectile_arrow_capacity);
+            if (wind_count != 0) {
+                std::copy_n(source.wind_charges, storage.wind_charge_capacity,
+                            wind_charges.data() + std::size_t(index) * storage.wind_charge_capacity);
+            }
+            if (thrown_count != 0) {
+                std::copy_n(source.thrown_items, storage.thrown_item_capacity,
+                            thrown_items.data() + std::size_t(index) * storage.thrown_item_capacity);
+            }
         }
         storage.projectile_arrows.upload(arrows.data());
+        if (wind_count != 0) storage.wind_charges.upload(wind_charges.data());
+        if (thrown_count != 0) storage.thrown_items.upload(thrown_items.data());
         storage.projectile_states.upload(projectile_states.data());
         if (summarize_arrows) {
             std::vector<ArrowObservationSummary> summaries(player_count);
@@ -324,12 +374,24 @@ void CudaBatch::download(BatchView destination) const {
         }
         std::vector<ProjectileWorldState> projectile_states(storage_->projectile_states.count);
         std::vector<ArrowState> arrows(storage_->projectile_arrows.count);
+        std::vector<WindChargeState> wind_charges(storage_->wind_charges.count);
+        std::vector<ThrownProjectileState> thrown_items(storage_->thrown_items.count);
         storage_->projectile_states.download(projectile_states.data());
         storage_->projectile_arrows.download(arrows.data());
+        if (!wind_charges.empty()) storage_->wind_charges.download(wind_charges.data());
+        if (!thrown_items.empty()) storage_->thrown_items.download(thrown_items.data());
         for (std::size_t index = 0; index < projectile_states.size(); ++index) {
             auto& destination_state = destination.projectile_states[index];
             if (!destination_state.arrows || destination_state.arrow_capacity != projectile_arrow_capacity) {
                 throw std::invalid_argument("Snapshot projectile pool shape mismatch");
+            }
+            if (destination_state.wind_charge_capacity != storage_->wind_charge_capacity
+                || (storage_->wind_charge_capacity > 0 && !destination_state.wind_charges)) {
+                throw std::invalid_argument("Snapshot wind charge pool shape mismatch");
+            }
+            if (destination_state.thrown_item_capacity != storage_->thrown_item_capacity
+                || (storage_->thrown_item_capacity > 0 && !destination_state.thrown_items)) {
+                throw std::invalid_argument("Snapshot thrown item pool shape mismatch");
             }
             for (int player = 0; player < projectile_player_count; ++player) {
                 destination_state.bows[player] = projectile_states[index].bows[player];
@@ -337,6 +399,14 @@ void CudaBatch::download(BatchView destination) const {
             destination_state.random = projectile_states[index].random;
             std::copy_n(arrows.data() + index * projectile_arrow_capacity, projectile_arrow_capacity,
                         destination_state.arrows);
+            if (!wind_charges.empty()) {
+                std::copy_n(wind_charges.data() + index * storage_->wind_charge_capacity,
+                            storage_->wind_charge_capacity, destination_state.wind_charges);
+            }
+            if (!thrown_items.empty()) {
+                std::copy_n(thrown_items.data() + index * storage_->thrown_item_capacity,
+                            storage_->thrown_item_capacity, destination_state.thrown_items);
+            }
         }
     }
 }

@@ -393,6 +393,13 @@ vm.runInContext(`monitored.experiment.stages[0].advance.evaluation.metric='win_r
     monitored.experiment.stages[0].advance.evaluation.at_least=0.75; renderCurriculum();`,context);
 assert.match(text('milestone-metric-charts'),/Win rate.*80% \/ 75%/);
 assert.equal(conditionCharts.at(-1).options.scales.y.suggestedMax,1);
+vm.runInContext(`monitored.experiment.stages[0].advance.evaluation.metric='launch_smash_rate';
+    monitored.experiment.stages[0].advance.evaluation.at_least=0.25;
+    records.at(-1).evaluations.aim_accuracy.launch_smash_rate=0.375; renderCurriculum();`,context);
+assert.match(text('milestone-metric-charts'),/Launch-to-smash rate.*37.5% \/ 25%/);
+assert.equal(conditionCharts.at(-1).options.scales.y.suggestedMax,1);
+vm.runInContext(`monitored.experiment.stages[0].advance.evaluation.metric='win_rate';
+    monitored.experiment.stages[0].advance.evaluation.at_least=0.75; renderCurriculum();`,context);
 vm.runInContext('records=[]; renderCurriculum();',context);
 assert.match(text('milestone-metric-charts'),/Awaiting evaluation/);
 assert.equal(conditionCharts.at(-1).data.datasets[0].data.length,0);
@@ -1167,7 +1174,8 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
         self.assertEqual(data["warnings"], [])
         row.update(evaluation_seconds=0.125, evaluation_episodes=4, replay_seconds=0.25,
                iteration_seconds=1.0, cuda_peak_allocated_bytes=1024, cuda_peak_reserved_bytes=2048)
-        row["evaluations"]["held"].update(worlds=4, seconds=0.125, snapshot_update=2, stage="aim", stage_index=0)
+        row["evaluations"]["held"].update(worlds=4, seconds=0.125, snapshot_update=2, stage="aim", stage_index=0,
+                           self_launch_rate=0.5, mace_smash_rate=0.25, launch_smash_rate=0.125)
         row.update(update=3, next_stage_index=None, completed_curriculum=True)
         row["curriculum_boundary"]["next_stage"] = None
         with self.metrics.open("a", encoding="utf-8") as output:
@@ -1188,6 +1196,7 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
             *({"evaluations": {"held": {"win_rate": value, "reward_mean": 0, "episodes": 2}}}
               for value in (float("nan"), float("inf"), -0.1, 1.1, True, None)),
             {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": float("inf"), "episodes": 2}}},
+            {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 0, "episodes": 2, "launch_smash_rate": 1.1}}},
             {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 1, "episodes": 2.5}}},
                         *({"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 1, "episodes": 2, **extra}}}
                             for extra in ({"worlds": True}, {"seconds": -1}, {"seconds": float("inf")},

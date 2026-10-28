@@ -46,6 +46,7 @@ def buildIdentity = tasks.register('buildIdentity') {
 
 processResources {
 	from(buildIdentity)
+	from(layout.buildDirectory.dir('runtime-bundle'))
 	def version = project.version
 	inputs.property "version", version
 

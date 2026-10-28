@@ -164,24 +164,41 @@ Each player's optional `loadout` resolves to an explicit shape:
 - `weapons`: 1..9 IDs; non-air IDs must be distinct, air may repeat.
   `selected`: zero-based initial slot. Air is empty
   hand. Sword/axe materials: wooden, stone, copper, golden, iron, diamond,
-  netherite. `minecraft:bow` is also supported. Slots are a control mapping, not a general inventory.
+  netherite. Also supported: `minecraft:bow`, `minecraft:mace`, `minecraft:snowball`,
+  `minecraft:egg`, `minecraft:ender_pearl` and `minecraft:wind_charge`. Slots are a control mapping, not a general inventory.
 - `arrows`: optional integer 0..64 (default 0), one finite ordinary-arrow stack;
   positive ammunition requires a bow in the loadout.
+- `snowballs`, `eggs`, `ender_pearls`: optional integer stack counts 1..16 when
+  their matching item is in `weapons`, defaulting to 1. Without the matching
+  item the count must be zero or omitted. These are consumed on use and the
+  selected slot becomes air when depleted. Pearl use has a 20-tick cooldown.
+  The current policy catalogue does not expose throwable counts or cooldowns.
+  A training batch must initially contain a throwable loadout to allow
+  throwable loadouts in later player resets.
+- `wind_charges`: optional integer stack count 1..64 when wind charges are in
+  `weapons`, defaulting to 1; zero or omitted otherwise. Use consumes one and
+  imposes a 10-tick cooldown; the selected slot becomes air when depleted.
+  The policy catalogue does not expose its count or cooldown. A training batch
+  must initially contain a wind-charge loadout to allow it in later resets.
 - `offhand`: air or shield. Equipment is unenchanted and unbreakable.
 - Armor slots: boots, leggings, chestplate, helmet. Materials: leather, copper,
   chainmail, golden, iron, diamond, netherite; turtle helmet also works. Omitted
   slots resolve to air. Armor is fixed for the episode.
 - Initial `health`, `absorption`, `attack_strength_ticks` default to 20, 0, 0.
   Health must be in (0,20]. Existing position/velocity/look fields are unchanged.
-- Bridge `rules`: `simulate_food: false`, `natural_regeneration: false`, both
-  defaulting to false. True or unknown rules fail. Additional native food/regen
-  APIs are not yet part of the portable training/replay/live contract.
+- Bridge `rules`: `simulate_food: false` and `natural_regeneration: false`, both
+  defaulting to false; `simulate_fall_damage` defaults to false and may be true.
+  Other true food/regen settings or unknown rules fail.
 - `requires` supports `movement`, `melee`, `equipment`, `shield`, `armor`, `bow`.
   Resolved artifacts list the currently supported catalogue.
 
 Both live and replay actors freeze food and natural regeneration, including
 Peaceful healing, without changing world rules. PvP must be enabled. Other
 entities, terrain and world side effects can still affect real-game behavior.
+The represented projectile slice excludes fluids, mobs and special blocks;
+the mod's participant-egg hatch suppression, wind-charge interaction and
+projectile cleanup still need in-game verification. Vanilla endermites are not
+suppressed in live play.
 
 ## Policy Layout
 
@@ -305,7 +322,7 @@ descriptor values do not bump them.
 
 This is two-player air/stone full-cube melee with supported equipment, not a
 generic Minecraft executor. No arbitrary blocks/items, fluids, durability,
-enchantments, effects, inventory operations, projectiles or arbitrary rule changes.
+enchantments, effects, inventory operations, general projectiles or arbitrary rule changes.
 World mode can expose bots to unsupported terrain; that is out-of-distribution
 evaluation, not newly simulated support.
 

@@ -61,6 +61,44 @@ final class SimulationReplay {
 				|| current.live != null && current.live.ownsProjectile(owner)) current.ownedArrows.add(arrow);
 	}
 
+	static void trackEgg(net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg egg) {
+		Session current = active;
+		if (current == null || current.level != egg.level()) return;
+		Entity owner = egg.getOwner();
+		if (current.actors.stream().anyMatch(actor -> actor == owner)
+				|| current.live != null && current.live.ownsProjectile(owner)) current.ownedEggs.add(egg);
+	}
+
+	static boolean ownsEgg(net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg egg) {
+		return active != null && active.ownedEggs.contains(egg);
+	}
+
+	static void trackSnowball(net.minecraft.world.entity.projectile.throwableitemprojectile.Snowball snowball) {
+		Session current = active;
+		if (current == null || current.level != snowball.level()) return;
+		Entity owner = snowball.getOwner();
+		if (current.actors.stream().anyMatch(actor -> actor == owner)
+				|| current.live != null && current.live.ownsProjectile(owner)) current.ownedSnowballs.add(snowball);
+	}
+
+	static void trackPearl(net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl) {
+		Session current = active;
+		if (current == null || current.level != pearl.level()) return;
+		Entity owner = pearl.getOwner();
+		if (current.actors.contains(owner) || current.live != null && current.live.ownsProjectile(owner)) current.ownedPearls.add(pearl);
+	}
+
+	static boolean ownsPearl(net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl) {
+		return active != null && active.ownedPearls.contains(pearl);
+	}
+
+	static void trackWind(net.minecraft.world.entity.projectile.hurtingprojectile.windcharge.WindCharge wind) {
+		Session current = active;
+		if (current == null || current.level != wind.level()) return;
+		Entity owner = wind.getOwner();
+		if (current.actors.contains(owner) || current.live != null && current.live.ownsProjectile(owner)) current.ownedWind.add(wind);
+	}
+
 	static void initialize() {
 		LiveDuel.initialize();
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
@@ -165,6 +203,7 @@ final class SimulationReplay {
 					active.paused = !play;
 					active.tell("Loaded " + trace.path.getFileName() + " (" + trace.backend
 							+ ", absolute), arena rebuilt; " + (play ? "playing" : "paused at tick 0") + ", speed 1x.");
+					active.warnFallDamageMismatch();
 				} catch (RuntimeException error) {
 					active.tell("Could not spawn replay: " + error.getMessage());
 					active.close();
@@ -216,6 +255,10 @@ final class SimulationReplay {
 		boolean absolute = true;
 		final List<ReplayPlayer> actors = new ArrayList<>();
 		final Set<Arrow> ownedArrows = new HashSet<>();
+		final Set<net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg> ownedEggs = new HashSet<>();
+		final Set<net.minecraft.world.entity.projectile.throwableitemprojectile.Snowball> ownedSnowballs = new HashSet<>();
+		final Set<net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl> ownedPearls = new HashSet<>();
+		final Set<net.minecraft.world.entity.projectile.hurtingprojectile.windcharge.WindCharge> ownedWind = new HashSet<>();
 		final List<RenderedProjectile> renderedProjectiles = new ArrayList<>();
 		BlockState[] originalBlocks;
 		int frame;
@@ -229,6 +272,12 @@ final class SimulationReplay {
 		List<ReplayTrace.Actor> initialActors;
 		LiveDuel live;
 		private record RenderedProjectile(ReplayTrace.Projectile sample, ItemDisplay entity) {}
+
+		void warnFallDamageMismatch() {
+			if (trace.environment.simulateFallDamage != level.getGameRules().get(GameRules.FALL_DAMAGE)) {
+				tell("World fall-damage rule differs from the simulator scenario; replay and duel behavior may diverge. World rules were not changed.");
+			}
+		}
 
 		Session(MinecraftServer server, ServerLevel level, UUID owner, ReplayTrace trace, Vec3 origin, Path analysisDirectory) {
 			this.server = server;
@@ -300,6 +349,14 @@ final class SimulationReplay {
 		void clearProjectiles() {
 			for (Arrow arrow : ownedArrows) if (!arrow.isRemoved()) arrow.discard();
 			ownedArrows.clear();
+			for (var egg : ownedEggs) if (!egg.isRemoved()) egg.discard();
+			ownedEggs.clear();
+			for (var snowball : ownedSnowballs) if (!snowball.isRemoved()) snowball.discard();
+			ownedSnowballs.clear();
+			for (var pearl : ownedPearls) if (!pearl.isRemoved()) pearl.discard();
+			ownedPearls.clear();
+			for (var wind : ownedWind) if (!wind.isRemoved()) wind.discard();
+			ownedWind.clear();
 			for (RenderedProjectile rendered : renderedProjectiles) if (!rendered.entity().isRemoved()) rendered.entity().discard();
 			renderedProjectiles.clear();
 		}
@@ -312,7 +369,13 @@ final class SimulationReplay {
 			for (ReplayTrace.Projectile sample : projectiles) {
 				ItemDisplay display = new ItemDisplay(EntityTypes.ITEM_DISPLAY, level);
 				ItemDisplayAccess itemAccess = (ItemDisplayAccess) (Object) display;
-				itemAccess.cambium$setItemStack(new ItemStack(Items.ARROW));
+				itemAccess.cambium$setItemStack(new ItemStack(switch (sample.type()) {
+					case "snowball" -> Items.SNOWBALL;
+					case "egg" -> Items.EGG;
+					case "ender_pearl" -> Items.ENDER_PEARL;
+					case "wind_charge" -> Items.WIND_CHARGE;
+					default -> Items.ARROW;
+				}));
 				itemAccess.cambium$setItemTransform(sample.in_ground() ? ItemDisplayContext.GROUND : ItemDisplayContext.FIXED);
 				display.setPos(origin.x + sample.position()[0], origin.y + sample.position()[1], origin.z + sample.position()[2]);
 				Vec3 velocity = new Vec3(sample.velocity()[0], sample.velocity()[1], sample.velocity()[2]);
@@ -323,7 +386,7 @@ final class SimulationReplay {
 				display.setGlowingTag(true);
 				int ownerColor = sample.owner() == 0 ? sample.critical() ? 0x99F0D4 : 0x38A98A : sample.critical() ? 0xFFD28A : 0xC98221;
 				((DisplayAccess) (Object) display).cambium$setGlowColorOverride(ownerColor);
-				display.setCustomName(Component.literal("Replay arrow owner " + sample.owner() + ", age " + sample.age()
+				display.setCustomName(Component.literal("Replay " + sample.type() + " owner " + sample.owner() + ", age " + sample.age()
 						+ (sample.left_owner() ? ", left owner" : "") + (sample.in_ground() ? ", in ground " + sample.in_ground_ticks() : "")));
 				display.setCustomNameVisible(false);
 				if (level.addFreshEntity(display)) renderedProjectiles.add(new RenderedProjectile(sample, display));

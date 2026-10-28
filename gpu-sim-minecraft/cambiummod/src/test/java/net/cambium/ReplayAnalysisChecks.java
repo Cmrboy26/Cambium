@@ -38,6 +38,7 @@ public final class ReplayAnalysisChecks {
 		checkSprintInput();
 		checkMinorCollision();
 		checkRosieLauncher();
+		checkBundledInference();
 		checkWarmInference();
 		checkDuelLibrary();
 		for (int width : new int[]{320, 426, 640, 960, 1280}) {
@@ -132,7 +133,45 @@ public final class ReplayAnalysisChecks {
 			int argument = local.command().indexOf("--duel");
 			require(argument >= 0 && local.command().get(argument + 1).equals(root.resolve("sim-rosie-cache/duel.json").toString()), "Offline duel path must remain one literal argument");
 		}
+		String checkpoint = root.resolve("my policy;test.pt").toString();
+		var imported = RosieLauncher.helper(config, root, "import", "latest", checkpoint).command();
+		require(imported.contains("--offline") && !imported.contains("--connect"), "Import must not connect to Rosie");
+		require(imported.get(imported.indexOf("--checkpoint") + 1).equals(checkpoint), "Import path must remain a literal argument");
+		var bundled = BundledInference.helper(root.resolve("runtime.exe"), root, "import", checkpoint).command();
+		require(bundled.getFirst().equals(root.resolve("runtime.exe").toString()) && bundled.contains("--offline"), "Bundled import must run offline without Python");
+		require(bundled.get(bundled.indexOf("--checkpoint") + 1).equals(checkpoint), "Bundled import must preserve the checkpoint path");
+		var bundledDuel = BundledInference.helper(root.resolve("runtime.exe"), root, "local-world", "").command();
+		require(bundledDuel.get(1).equals("local") && bundledDuel.contains("--duel"), "Bundled world duels must use local inference");
 		System.out.println("PASS: Rosie helper uses literal arguments, configured repository and separate JSON output");
+	}
+
+	private static void checkBundledInference() throws Exception {
+		String checkpoint = System.getenv("CAMBIUM_BUNDLED_CHECKPOINT");
+		if (checkpoint == null || checkpoint.isBlank()) return;
+		require(BundledInference.available(), "Bundled runtime must be available on this platform");
+		Path game = Files.createTempDirectory("cambium-bundled-checks-");
+		try {
+			Files.createDirectories(game.resolve("logs"));
+			Path executable = BundledInference.prepare(game);
+			Files.writeString(executable, "corrupted runtime");
+			require(BundledInference.prepare(game).equals(executable), "Corrupted extracted runtime must be restored");
+			Process process = BundledInference.helper(executable, game, "import", checkpoint).start();
+			if (!process.waitFor(120, java.util.concurrent.TimeUnit.SECONDS)) {
+				process.descendants().forEach(ProcessHandle::destroyForcibly);
+				process.destroyForcibly();
+				throw new AssertionError("Bundled import must finish");
+			}
+			String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+			require(process.exitValue() == 0 && output.contains("\"event\": \"imported\""), "Bundled import failed: " + output);
+			JsonObject library = JsonParser.parseString(Files.readString(game.resolve("sim-rosie-cache/library.json"))).getAsJsonObject();
+			require(library.getAsJsonArray("policies").size() == 1 && library.getAsJsonArray("environments").size() == 1,
+					"Bundled import must index both policy and environment");
+			System.out.println("PASS: bundled runtime extraction, integrity repair and checkpoint import");
+		} finally {
+			try (var files = Files.walk(game)) {
+				for (Path path : files.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
+			}
+		}
 	}
 
 	private static void checkWarmInference() throws Exception {
@@ -756,6 +795,17 @@ public final class ReplayAnalysisChecks {
 				   "loadout":{"weapons":["minecraft:bow"],"arrows":64}}]}
 				""").getAsJsonObject();
 			JsonObject header = new JsonObject();
+			JsonObject rules = new JsonObject();
+			rules.addProperty("simulate_fall_damage", true);
+			environment.add("rules", rules);
+			require(ReplayTrace.forLive(environment).environment.simulateFallDamage, "Live scenario preserves opt-in fall damage");
+			rules.addProperty("simulate_fall_damage", false);
+			require(!ReplayTrace.forLive(environment).environment.simulateFallDamage, "Live scenario preserves disabled fall damage");
+			rules.addProperty("simulate_fall_damage", "true");
+			boolean invalidRule = false;
+			try { ReplayTrace.forLive(environment); } catch (java.io.IOException expected) { invalidRule = true; }
+			require(invalidRule, "Live scenario rejects nonboolean fall-damage rules");
+			environment.remove("rules");
 			header.addProperty("format", "minecraft_sim_replay");
 			header.addProperty("version", 3);
 			header.addProperty("minecraft", "26.3");
@@ -778,6 +828,53 @@ public final class ReplayAnalysisChecks {
 					&& trace.frames.get(1).actors().getFirst().bow_using()
 					&& trace.frames.get(1).actors().getFirst().bow_draw_ticks() == 5,
 				"Envelope-3 reader must preserve projectile ownership and actual bow draw state");
+			JsonObject thrownHeader = header.deepCopy();
+			thrownHeader.getAsJsonObject("environment").getAsJsonArray("players").get(0).getAsJsonObject().add("loadout",
+					JsonParser.parseString("{\"weapons\":[\"minecraft:snowball\",\"minecraft:egg\"],\"snowballs\":1,\"eggs\":2}"));
+			JsonObject thrownFirst = bowReplayFrame(0, false, false, new JsonArray());
+			JsonObject thrownSecond = bowReplayFrame(1, false, true, new JsonArray());
+			for (JsonObject sample : java.util.List.of(thrownFirst, thrownSecond)) {
+				JsonObject actor = sample.getAsJsonArray("actors").get(0).getAsJsonObject();
+				actor.addProperty("weapon", sample == thrownFirst ? "minecraft:snowball" : "minecraft:air");
+				actor.getAsJsonObject("controls").addProperty("weapon", "minecraft:snowball");
+				actor.addProperty("arrow_count", 0);
+				actor.addProperty("snowball_count", sample == thrownFirst ? 1 : 0);
+				actor.addProperty("egg_count", 2);
+			}
+			JsonObject snowball = ReplayAnalysis.JSON.toJsonTree(new ReplayTrace.Projectile(0,
+					new double[]{3, 2, 3}, new double[]{0.1, 0.2, 1.5}, 0, false, false, 0, false, "snowball")).getAsJsonObject();
+			thrownSecond.getAsJsonArray("projectiles").add(snowball);
+			Path thrownReplay = folder.resolve("thrown.jsonl");
+			Files.writeString(thrownReplay, ReplayAnalysis.JSON.toJson(thrownHeader) + "\n" + ReplayAnalysis.JSON.toJson(thrownFirst)
+					+ "\n" + ReplayAnalysis.JSON.toJson(thrownSecond) + "\n");
+			ReplayTrace thrownTrace = ReplayTrace.read(thrownReplay);
+			require(thrownTrace.frames.get(1).actors().getFirst().snowball_count() == 0
+					&& thrownTrace.frames.get(1).actors().getFirst().egg_count() == 2
+					&& thrownTrace.frames.get(1).projectiles().getFirst().type().equals("snowball"),
+					"Replay preserves depleted throwable slots and typed projectiles");
+			JsonObject pearlHeader = thrownHeader.deepCopy();
+			pearlHeader.getAsJsonObject("environment").getAsJsonArray("players").get(0).getAsJsonObject().add("loadout",
+					JsonParser.parseString("{\"weapons\":[\"minecraft:ender_pearl\"],\"ender_pearls\":1}"));
+			JsonObject pearlFirst = thrownFirst.deepCopy();
+			JsonObject pearlSecond = thrownSecond.deepCopy();
+			for (JsonObject sample : java.util.List.of(pearlFirst, pearlSecond)) {
+				JsonObject actor = sample.getAsJsonArray("actors").get(0).getAsJsonObject();
+				actor.addProperty("weapon", sample == pearlFirst ? "minecraft:ender_pearl" : "minecraft:air");
+				actor.getAsJsonObject("controls").addProperty("weapon", "minecraft:ender_pearl");
+				actor.addProperty("snowball_count", 0);
+				actor.addProperty("egg_count", 0);
+				actor.addProperty("ender_pearl_count", sample == pearlFirst ? 1 : 0);
+				actor.addProperty("ender_pearl_cooldown", sample == pearlFirst ? 0 : 19);
+			}
+			pearlSecond.getAsJsonArray("projectiles").get(0).getAsJsonObject().addProperty("type", "ender_pearl");
+			Path pearlReplay = folder.resolve("pearl.jsonl");
+			Files.writeString(pearlReplay, ReplayAnalysis.JSON.toJson(pearlHeader) + "\n" + ReplayAnalysis.JSON.toJson(pearlFirst)
+					+ "\n" + ReplayAnalysis.JSON.toJson(pearlSecond) + "\n");
+			ReplayTrace pearlTrace = ReplayTrace.read(pearlReplay);
+			require(pearlTrace.frames.get(1).actors().getFirst().ender_pearl_count() == 0
+					&& pearlTrace.frames.get(1).actors().getFirst().ender_pearl_cooldown() == 19
+					&& pearlTrace.frames.get(1).projectiles().getFirst().type().equals("ender_pearl"),
+					"Replay preserves depleted pearls, cooldown, and typed projectiles");
 			JsonObject badOwner = second.deepCopy();
 			badOwner.getAsJsonArray("projectiles").get(0).getAsJsonObject().addProperty("owner", 2);
 			Path invalidOwner = folder.resolve("invalid-owner.jsonl");

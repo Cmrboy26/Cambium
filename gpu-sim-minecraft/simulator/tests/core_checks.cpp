@@ -1,5 +1,6 @@
 #include "minecraft_sim/core.hpp"
 #include "minecraft_sim/comparison.hpp"
+#include "minecraft_sim/constants_mace.hpp"
 #include "../apps/observation.hpp"
 #include "../apps/replay.hpp"
 #include <fstream>
@@ -128,6 +129,9 @@ void checkPolicyFixtures() {
 
 void checkEquipmentObservation() {
     using namespace minecraft_sim;
+    require(app::parseWeapon("minecraft:mace") == WeaponItem::mace
+        && std::string_view(app::weaponName(WeaponItem::mace)) == "minecraft:mace",
+        "mace loadouts round-trip through the native item names");
     PlayerState source, target;
     const std::vector<WeaponItem> own{WeaponItem::wooden_sword, WeaponItem::netherite_axe, WeaponItem::unarmed};
     app::applyLoadout(source, {{"weapons", {"minecraft:wooden_sword", "minecraft:netherite_axe", "minecraft:air"}},
@@ -261,6 +265,212 @@ void checkMeleeTargeting() {
     near(players[0].eyePosition().y, 1.0 + double(1.27F), 0.0, "crouching changes targeting origin");
 }
 
+void checkWindExplosion() {
+    using namespace minecraft_sim;
+    PlayerState shooter;
+    shooter.position = {2.0, 3.0, 4.0};
+    shooter.velocity = {0.25, 0.5, -0.75};
+    shooter.on_ground = false;
+    LegacyRandom wind_random, arrow_random;
+    wind_random.setSeed(42);
+    arrow_random.setSeed(42);
+    const auto charge = launchWindCharge(shooter, 1, {testTable().data()}, wind_random);
+    const auto arrow = launchArrow(shooter, 1, 0.5F, {testTable().data()}, arrow_random);
+    require(charge.active && charge.owner == 1 && charge.position.x == 2.0 && charge.position.z == 4.0
+        && charge.position.y == shooter.eyePosition().y && charge.no_deflect_ticks == 5,
+        "wind launch uses the eye position and five no-deflection ticks");
+    require(charge.velocity.x == arrow.velocity.x && charge.velocity.y == arrow.velocity.y
+        && charge.velocity.z == arrow.velocity.z,
+        "equal-speed launches use the same seeded spread and inherited movement");
+    near(charge.velocity.x, 0.25 + 1.5 * 0.0172275 * (0.7275636800328681 - 0.6832234717598454),
+        1.0E-14, "wind launch seeded horizontal spread");
+    near(charge.velocity.y, 0.5 + 1.5 * 0.0172275 * (0.30871945533265976 - 0.27707849007413665),
+        1.0E-14, "wind launch inherits airborne vertical velocity");
+    near(charge.velocity.z, -0.75 + 1.5 * (1.0 + 0.0172275 * (0.6655489517945736 - 0.9033722646721782)),
+        1.0E-14, "wind launch speed and forward spread");
+    shooter.on_ground = true;
+    wind_random.setSeed(42);
+    const auto grounded_charge = launchWindCharge(shooter, 1, {testTable().data()}, wind_random);
+    near(grounded_charge.velocity.y, charge.velocity.y - 0.5, 1.0E-14,
+        "grounded wind launch does not inherit vertical velocity");
+
+    std::array<PlayerState, 2> players{};
+    std::array<Controls, 2> queued{}, held{};
+    WorldState world_state;
+    WorldView world(players.data(), queued.data(), held.data(), &world_state, 2, {}, {testTable().data()});
+    players[0].position = {0.0, 0.0, 1.0};
+    players[1].position = {0.0, 0.0, 3.0};
+    const double eye_height = double(1.62F);
+    const double strength = (1.0 - 1.0 / double(1.2F * 2.0F)) * double(1.22F);
+    const double length = std::sqrt(1.0 + eye_height * eye_height);
+    applyWindExplosion(world, {}, {});
+    near(players[0].velocity.y, strength * eye_height / length, 1.0E-12, "wind blast vertical impulse");
+    near(players[0].velocity.z, strength / length, 1.0E-12, "wind blast horizontal impulse");
+    require(players[0].health == 20.0F && players[1].velocity.lengthSquared() == 0.0,
+        "wind blast does not damage players and respects its radius");
+
+    std::array<Block, 125> cells{};
+    for (int x = -2; x <= 2; ++x) {
+        for (int y = -1; y <= 3; ++y) {
+            cells[3 * 25 + (y + 1) * 5 + x + 2] = Block::solid;
+        }
+    }
+    BlockWorldView blocks{cells.data(), 5, 5, 5, -2, -1, -2};
+    players[0].position = {0.0, 0.0, 2.0};
+    players[0].velocity = {};
+    applyWindExplosion(world, blocks, {0.0, 1.0, 0.0});
+    require(players[0].velocity.lengthSquared() == 0.0, "solid wall fully occludes a wind blast");
+}
+
+void checkMaceDamage() {
+    Fixture falling;
+    falling.players[0].position.y = 5.0;
+    falling.players[0].on_ground = false;
+    falling.players[0].velocity.y = -0.1;
+    falling.world().processTick();
+    require(falling.players[0].fall_distance == -double(float(-0.1)),
+        "fall distance accumulates float-rounded downward displacement");
+
+    Fixture landing;
+    landing.worlds[0].simulate_fall_damage = true;
+    landing.players[0].position.y = 1.1;
+    landing.players[0].velocity.y = -0.2;
+    landing.players[0].fall_distance = 4.0;
+    landing.players[0].armor = 20.0F;
+    landing.players[0].on_ground = false;
+    landing.world().processTick();
+    require(landing.players[0].health == 19.0F && landing.players[0].fall_distance == 0.0,
+        "ordinary fall damage bypasses armor and resets fall distance");
+
+    Fixture protected_landing;
+    protected_landing.worlds[0].simulate_fall_damage = true;
+    protected_landing.players[0].position.y = 1.1;
+    protected_landing.players[0].velocity.y = -0.2;
+    protected_landing.players[0].fall_distance = 4.0;
+    protected_landing.players[0].has_impulse_impact = true;
+    protected_landing.players[0].impulse_impact_y = 2.0;
+    protected_landing.players[0].impulse_grace_ticks = 1;
+    protected_landing.players[0].on_ground = false;
+    protected_landing.world().processTick();
+    require(protected_landing.players[0].health == 20.0F && protected_landing.players[0].has_impulse_impact
+        && protected_landing.players[0].impulse_grace_ticks == 0,
+        "impulse protection limits fall damage to distance below the impact height");
+
+    const std::array<double, 6> distances{1.5, 2.0, 3.0, 5.0, 8.0, 9.0};
+    const std::array<float, 6> expected{6.0F, 14.0F, 18.0F, 22.0F, 28.0F, 29.0F};
+    const minecraft_sim::MathView math{testTable().data()};
+    for (std::size_t index = 0; index < distances.size(); ++index) {
+        Fixture attacker;
+        Fixture victim;
+        auto source = attacker.world().player(0);
+        auto target = victim.world().player(0);
+        source.equipWeapon(minecraft_sim::WeaponItem::mace);
+        source.state().fall_distance = distances[index];
+        source.state().on_ground = false;
+        source.state().sprinting = true;
+        source.state().attack_strength_ticks = 40;
+        source.resolveMelee(target, math);
+        require(source.state().last_attack.incoming_damage == expected[index],
+            "charged noncritical mace damage follows the fall-distance thresholds");
+    }
+    Fixture attacker;
+    Fixture victim;
+    auto source = attacker.world().player(0);
+    auto target = victim.world().player(0);
+    source.equipWeapon(minecraft_sim::WeaponItem::mace);
+    source.state().fall_distance = 2.0;
+    source.state().on_ground = false;
+    source.state().attack_strength_ticks = 40;
+    source.resolveMelee(target, math);
+    require(source.state().last_attack.critical && source.state().last_attack.incoming_damage == 21.0F,
+        "critical multiplier applies after adding the mace fall bonus");
+    require(source.state().last_attack.mace_smash && !target.state().alive() && source.state().velocity.y == double(0.01F)
+        && source.state().fall_distance == 0.0 && source.state().has_impulse_impact
+        && source.state().impulse_impact_y == source.state().position.y && source.state().impulse_grace_ticks == 40,
+        "accepted lethal smash bounces the attacker and resets fall distance");
+    target.state() = {};
+    source.state().position.y = 5.0;
+    source.state().fall_distance = 2.0;
+    source.state().attack_strength_ticks = 40;
+    source.state().impulse_grace_ticks = 60;
+    source.resolveMelee(target, math);
+    require(source.state().impulse_impact_y == 1.0 && source.state().impulse_grace_ticks == 60,
+        "a higher repeated smash retains the lower impact height and longer grace period");
+    target.state() = {};
+    source.state().position.y = -2.0;
+    source.state().fall_distance = 2.0;
+    source.state().attack_strength_ticks = 40;
+    source.resolveMelee(target, math);
+    require(source.state().impulse_impact_y == -2.0 && source.state().impulse_grace_ticks == 60,
+        "a lower repeated smash replaces the impact height without shortening grace");
+    source.state().position.y = 1.0;
+    target.state() = {};
+    target.state().invulnerable = true;
+    source.state().fall_distance = 2.0;
+    source.state().velocity.y = -0.5;
+    source.state().attack_strength_ticks = 40;
+    source.resolveMelee(target, math);
+    require(!source.state().last_attack.accepted && !source.state().last_attack.mace_smash && source.state().velocity.y == -0.5
+        && source.state().fall_distance == 2.0,
+        "rejected smash does not bounce or reset fall distance");
+
+    target.state() = {};
+    target.state().position = {0.0, 0.0, -1.0};
+    target.state().shield_equipped = true;
+    target.state().using_shield = true;
+    target.state().shield_use_ticks = 5;
+    source.state().fall_distance = 2.0;
+    source.state().velocity.y = -0.5;
+    source.state().attack_strength_ticks = 40;
+    source.resolveMelee(target, math);
+    require(!source.state().last_attack.accepted && !source.state().last_attack.mace_smash && source.state().last_attack.blocked_damage > 0.0F
+        && source.state().velocity.y == -0.5 && source.state().fall_distance == 2.0,
+        "shield-blocked smash does not bounce or reset fall distance");
+
+    target.state() = {};
+    target.state().absorption = 30.0F;
+    source.state().fall_distance = 2.0;
+    source.state().attack_strength_ticks = 40;
+    source.resolveMelee(target, math);
+    require(source.state().last_attack.accepted && target.state().health == 20.0F
+        && target.state().absorption == 9.0F && source.state().fall_distance == 0.0
+        && source.state().velocity.y == double(0.01F),
+        "absorption-only smash still runs accepted-hit effects");
+
+    target.state() = {};
+    source.state().fall_distance = 2.0;
+    source.state().sprinting = true;
+    source.state().attack_strength_ticks = 0;
+    source.resolveMelee(target, math);
+    const float charge = 0.5F / static_cast<float>(20.0 / (4.0 + double(-3.4F)));
+    const float expected_partial = 6.0F * (0.2F + charge * charge * 0.8F) + 8.0F;
+    require(source.state().last_attack.incoming_damage == expected_partial,
+        "partial charge scales base damage before adding the mace bonus");
+
+    for (double fall : {5.0, 5.01}) {
+        std::array<minecraft_sim::PlayerState, 5> players{};
+        std::array<minecraft_sim::Controls, 5> queued{}, held{};
+        minecraft_sim::WorldState world_state;
+        minecraft_sim::WorldView world(players.data(), queued.data(), held.data(), &world_state,
+            static_cast<int>(players.size()), {}, math);
+        auto attacker_view = world.player(0);
+        attacker_view.equipWeapon(minecraft_sim::WeaponItem::mace);
+        players[0].fall_distance = fall;
+        players[0].attack_strength_ticks = 40;
+        players[1].position = {0.0, 0.0, 1.0};
+        players[2].position = {1.0, 0.0, 1.0};
+        players[3].position = {3.5, 0.0, 1.0};
+        players[4].position = {-1.0, 0.0, 1.0};
+        players[4].knockback_resistance = 1.0;
+        attacker_view.resolveMelee(world.player(1), math, 1, players.data(), static_cast<int>(players.size()));
+        near(players[2].velocity.x, 2.5 * double(0.7F) * (fall > 5.0 ? 2.0 : 1.0), 1.0E-12,
+            "smash splash uses victim distance and strict heavy-fall threshold");
+        require(players[2].velocity.y == double(0.7F) && players[3].velocity.lengthSquared() == 0.0
+            && players[4].velocity.lengthSquared() == 0.0,
+            "smash splash respects radius and knockback resistance");
+    }
+}
+
 void checkMeleeDamage() {
     Fixture attacker;
     Fixture victim;
@@ -269,6 +479,22 @@ void checkMeleeDamage() {
     auto target = victim.world().player(0);
     auto& attack_state = source.state();
     auto& hurt_state = target.state();
+    source.equipWeapon(minecraft_sim::WeaponItem::mace);
+    require(attack_state.attack_damage == 6.0
+        && attack_state.attack_speed == 4.0 + double(-3.4F)
+        && attack_state.attack_strength_ticks == 0
+        && !minecraft_sim::weaponAttributes(minecraft_sim::WeaponItem::mace).sweep,
+        "equipping a mace applies vanilla base attributes without sweeping");
+    attack_state.attack_strength_ticks = 32;
+    near(attack_state.attackCharge(), 0.975, 1.0E-6, "mace is not fully charged at 32 ticks");
+    attack_state.attack_strength_ticks = 33;
+    require(attack_state.attackCharge() == 1.0F, "mace reaches full charge at 33 ticks");
+    require(minecraft_sim::MACE_DAMAGE_MODIFIER == 5.0
+        && minecraft_sim::MACE_SPEED_MODIFIER == double(-3.4F)
+        && minecraft_sim::MACE_KNOCKBACK_POWER == double(0.7F)
+        && minecraft_sim::WIND_CHARGE_EXPLOSION_POWER == 1.2F
+        && minecraft_sim::WIND_CHARGE_COOLDOWN_TICKS == 10,
+        "mace and wind charge constants preserve vanilla modifiers and cooldown");
     source.equipWeapon(minecraft_sim::WeaponItem::diamond_axe);
     require(attack_state.attack_damage == 9.0 && attack_state.attack_speed == 1.0
         && attack_state.attack_strength_ticks == 0, "equipping an axe updates damage, speed and attack charge");
@@ -1385,11 +1611,65 @@ void checkReplay() {
     }
 
 #if defined(MCSIM_HAS_CUDA)
+void checkCudaWindStorage() {
+    using namespace minecraft_sim;
+    constexpr int environments = 2;
+    std::array<PlayerState, environments * 2> players{};
+    std::array<Controls, environments * 2> queued{};
+    std::array<Controls, environments * 2> held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<ProjectileWorldState, environments> projectiles{};
+    std::array<std::array<ArrowState, projectile_arrow_capacity>, environments> arrows{};
+    std::array<std::array<WindChargeState, 2>, environments> charges{};
+    std::array<std::array<ThrownProjectileState, 2>, environments> thrown{};
+    for (int environment = 0; environment < environments; ++environment) {
+        projectiles[environment].arrows = arrows[environment].data();
+        projectiles[environment].arrow_capacity = projectile_arrow_capacity;
+        projectiles[environment].wind_charges = charges[environment].data();
+        projectiles[environment].wind_charge_capacity = 2;
+        projectiles[environment].thrown_items = thrown[environment].data();
+        projectiles[environment].thrown_item_capacity = 2;
+        charges[environment][0].position = {0.0, 20.0, 0.0};
+        charges[environment][0].velocity = {1.0, 0.0, 0.0};
+        charges[environment][0].active = true;
+        thrown[environment][0].position = {0.0, 30.0, 0.0};
+        thrown[environment][0].velocity = {1.0, 0.03, 0.0};
+        thrown[environment][0].active = true;
+    }
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                   nullptr, {testTable().data()}, projectiles.data()};
+    CudaBatch device(host);
+    device.step();
+    device.download(host);
+    near(charges[0][0].position.x, 1.0, 0.0, "CUDA wind charge advances after host upload");
+    near(charges[1][0].position.x, 1.0, 0.0, "CUDA wind charge advances in second world");
+    near(thrown[1][0].position.x, double(0.99F), 0.0, "CUDA thrown item advances after host upload");
+    const int reset_id = 0;
+    device.resetEnvironments(&reset_id, 1, players.data(), projectiles.data());
+    device.download(host);
+    require(!charges[0][0].active && charges[1][0].active,
+            "CUDA selective reset clears only the chosen wind pool");
+        require(!thrown[0][0].active && thrown[1][0].active,
+            "CUDA selective reset clears only the chosen thrown item pool");
+    device.step();
+    device.download(host);
+    near(charges[1][0].position.x, 2.0, 0.0, "CUDA untouched wind charge continues after reset");
+    projectiles[0].wind_charge_capacity = 1;
+    bool rejected = false;
+    try {
+        device.download(host);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    require(rejected, "CUDA rejects mismatched wind snapshot storage");
+}
+
 int checkCudaReplay() {
     if (!minecraft_sim::CudaBatch::available()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
+    checkCudaWindStorage();
     constexpr int environments = 137;
     constexpr int players_per_world = 2;
     Fixture terrain;
@@ -1577,6 +1857,8 @@ int main(int argc, char** argv) {
         checkEquipmentObservation();
         checkComparisonStatistics();
         checkMeleeTargeting();
+        checkWindExplosion();
+        checkMaceDamage();
         checkMeleeDamage();
         checkFoodRegeneration();
         checkEquipmentRules();

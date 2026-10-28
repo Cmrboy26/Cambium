@@ -253,7 +253,7 @@ final class SimulationContract {
 
 	static JsonObject loadout(JsonObject spawn, String profile) {
 		JsonObject result = spawn.has("loadout") ? spawn.getAsJsonObject("loadout").deepCopy() : new JsonObject();
-		for (String key : result.keySet()) if (!Set.of("weapons", "selected", "offhand", "armor", "arrows").contains(key)) {
+		for (String key : result.keySet()) if (!Set.of("weapons", "selected", "offhand", "armor", "arrows", "snowballs", "eggs", "ender_pearls", "wind_charges").contains(key)) {
 			throw new IllegalArgumentException("Unsupported loadout field: " + key);
 		}
 		boolean equippedDefault = !spawn.has("loadout") && profile.equals("unarmored_sword_axe_shield");
@@ -269,6 +269,17 @@ final class SimulationContract {
 		int arrows = result.has("arrows") ? integer(result.get("arrows")) : 0;
 		if (arrows < 0 || arrows > 64) throw new IllegalArgumentException("Loadout arrows must be in 0..64");
 		result.addProperty("arrows", arrows);
+		for (String field : List.of("snowballs", "eggs", "ender_pearls", "wind_charges")) {
+			String item = field.equals("snowballs") ? "minecraft:snowball" : field.equals("eggs") ? "minecraft:egg"
+					: field.equals("ender_pearls") ? "minecraft:ender_pearl" : "minecraft:wind_charge";
+			boolean present = seen.contains(item);
+			int count = result.has(field) ? integer(result.get(field)) : present ? 1 : 0;
+			int maximum = field.equals("wind_charges") ? 64 : 16;
+			if (present && (count < 1 || count > maximum) || !present && count != 0) {
+				throw new IllegalArgumentException(field + " requires a matching stack of 1.." + maximum + " items");
+			}
+			if (present) result.addProperty(field, count); else result.remove(field);
+		}
 		int selected = result.has("selected") ? integer(result.get("selected")) : 0;
 		if (selected < 0 || selected >= weapons.size()) throw new IllegalArgumentException("Selected weapon outside loadout");
 		result.addProperty("selected", selected);
@@ -296,11 +307,17 @@ final class SimulationContract {
 
 	static boolean weaponItem(String item) { return WEAPONS.contains(item); }
 
+	static int stackCount(JsonObject loadout, String item) {
+		String field = item.equals("minecraft:snowball") ? "snowballs" : item.equals("minecraft:egg") ? "eggs"
+				: item.equals("minecraft:ender_pearl") ? "ender_pearls" : item.equals("minecraft:wind_charge") ? "wind_charges" : null;
+		return field == null ? 1 : loadout.get(field).getAsInt();
+	}
+
 	static List<String> weaponChoices() {
 		List<String> items = new ArrayList<>(List.of("minecraft:air", "minecraft:wooden_sword", "minecraft:wooden_axe",
 				"minecraft:stone_sword", "minecraft:stone_axe", "minecraft:copper_sword", "minecraft:copper_axe",
 				"minecraft:golden_sword", "minecraft:golden_axe", "minecraft:iron_sword", "minecraft:iron_axe",
-				"minecraft:diamond_sword", "minecraft:diamond_axe", "minecraft:netherite_sword", "minecraft:netherite_axe", "minecraft:bow"));
+				"minecraft:diamond_sword", "minecraft:diamond_axe", "minecraft:netherite_sword", "minecraft:netherite_axe", "minecraft:bow", "minecraft:mace", "minecraft:snowball", "minecraft:egg", "minecraft:ender_pearl", "minecraft:wind_charge"));
 		return items.stream().filter(WEAPONS::contains).toList();
 	}
 
@@ -315,6 +332,11 @@ final class SimulationContract {
 	private static Set<String> weaponItems() {
 		Set<String> result = new HashSet<>(Set.of("minecraft:air"));
 		result.add("minecraft:bow");
+		result.add("minecraft:mace");
+		result.add("minecraft:snowball");
+		result.add("minecraft:egg");
+		result.add("minecraft:ender_pearl");
+		result.add("minecraft:wind_charge");
 		for (String material : List.of("wooden", "stone", "copper", "golden", "iron", "diamond", "netherite")) {
 			for (String kind : List.of("sword", "axe")) result.add("minecraft:" + material + "_" + kind);
 		}

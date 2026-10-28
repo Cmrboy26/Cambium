@@ -238,6 +238,7 @@ final class LiveDuel implements AutoCloseable {
 					tell(current, "Live duel started: " + (arena ? "checkpoint arena" : "existing world; no arena edits")
 							+ ". Policy: " + info.get("checkpoint").getAsString());
 					tell(current, candidate.live.deploymentSummary);
+					candidate.warnFallDamageMismatch();
 					if (!arena) tell(current, "World mode is experimental: terrain, fluids and hazards may be outside this policy's training distribution.");
 					tell(current, "Use /simduel join [1|2] to fight, or hit either bot while they duel. Spectator mode gives an undisturbed match.");
 					if (!level.isPvpAllowed()) {
@@ -369,7 +370,12 @@ final class LiveDuel implements AutoCloseable {
 		player.getInventory().clearContent();
 		JsonObject loadout = session.trace.environment.loadouts.get(humanSlot);
 		var weapons = loadout.getAsJsonArray("weapons");
-		for (int index = 0; index < weapons.size(); index++) player.getInventory().setItem(index, item(weapons.get(index).getAsString()));
+		for (int index = 0; index < weapons.size(); index++) {
+			String name = weapons.get(index).getAsString();
+			ItemStack stack = item(name);
+			if (!stack.isEmpty()) stack.setCount(SimulationContract.stackCount(loadout, name));
+			player.getInventory().setItem(index, stack);
+		}
 		int arrows = loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0;
 		player.getInventory().setItem(9, arrows == 0 ? ItemStack.EMPTY : new ItemStack(Items.ARROW, arrows));
 		player.getInventory().setSelectedSlot(loadout.get("selected").getAsInt());

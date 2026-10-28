@@ -108,6 +108,12 @@ def metric_metadata(record):
                 raise ValueError("Expected win rate between zero and one")
             evaluations[label] = {"win_rate": win_rate, "reward_mean": finite(evaluation.get("reward_mean")),
                                   "episodes": count(evaluation.get("episodes"))}
+            for name in ("self_launch_rate", "mace_smash_rate", "launch_smash_rate"):
+                if name in evaluation:
+                    value = finite(evaluation[name])
+                    if not 0 <= value <= 1:
+                        raise ValueError("Expected behavior rate between zero and one")
+                    evaluations[label][name] = value
             for name in ("worlds", "snapshot_update", "stage_index"):
                 if name in evaluation:
                     evaluations[label][name] = count(evaluation[name])

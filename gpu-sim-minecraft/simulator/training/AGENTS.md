@@ -482,7 +482,18 @@ Evaluations remain synchronous: after scheduled PPO updates, run separate seeded
 worlds in model eval mode and isolated RNG. They never contribute training
 transitions. Each suite requires `every_updates`, `episodes` and `seed`;
 optional `worlds` selects parallel worlds, capped at its episode count. Omission
-preserves the historical maximum of 16 worlds. No native rebuild is needed.
+preserves the historical maximum of 16 worlds. Behavior evaluations require a
+native library advertising `behavior_events_version: 1`.
+
+Each episode contributes at most one success to each behavior rate.
+`self_launch_rate` requires one own wind explosion adding at least 0.2 blocks/tick
+upward velocity. `mace_smash_rate` requires an accepted mace hit with the native
+smash fall-distance condition. `launch_smash_rate` requires both for the same
+learner, with the smash during the resulting uninterrupted airborne period and
+within 80 ticks of the launch. Landing after becoming airborne, expiry or reset
+breaks the link; another player's impulse does not qualify. A launch in the same
+tick as a smash is not retroactively credited. These are behavioral proxies, not
+proof of intent or vanilla parity; another force may also affect the flight.
 
 Stage-local `evaluations` run only while their stage is active. Intervals count
 completed updates within that stage, including updates restored on resume.
@@ -754,10 +765,11 @@ The low-level concrete fixture adapter still reads historical
 supplied; this is not the authoring contract. Record resolved settings and
 `reward_semantics` in checkpoint metadata.
 Changed weights or semantics require a new run, not incompatible resume.
-Rebuild older native libraries for reward ABI 4; ABI 1/2/3 are rejected explicitly.
+Rebuild older native libraries for reward ABI 5; ABI 1 through 4 are rejected explicitly.
 The optional combat-event, win-speed and arrow-progress weights default to zero.
-The expanded layout has ten base inputs, eleven base totals (including shield
-blocks), five shaping inputs/totals and sixteen per-player step contributions.
+The expanded layout has ten base inputs, two event inputs, thirteen base totals
+(including shield blocks), five shaping inputs/totals and eighteen per-player
+step contributions.
 
 - Damage rewards are `doing_damage * health_removed / 20` for attackers and
   `taking_damage * health_removed / 20` for targets. Weights specify points per
@@ -776,6 +788,13 @@ blocks), five shaping inputs/totals and sixteen per-player step contributions.
   contact rejected by immunity, absorption-only hits and shield blocks are not
   misses. Suppressed inputs (miss cooldown, using a shield, dead actors) do not
   count as attempted swings. There is no per-episode cap.
+- `missed_attack_ready_time` uses the same miss predicate, but pays its signed
+  weight multiplied by `1 / attack_speed` seconds. It is separate from the
+  flat miss term and is normally negative.
+- `wind_self_launch` pays its weight times the positive vertical velocity
+  increment in blocks/tick from the player's own wind-charge explosion. Other
+  players' explosions, downward impulses and later movement are not credited.
+  Contributions are per explosion, not per tick or an episode budget.
 - `shield_disabled` pays its weight to the attacker once per actual disable of
   an active shield. It is not paid for weapon selection, ordinary axe hits,
   hitting an already-disabled shield or ticks of remaining shield cooldown.

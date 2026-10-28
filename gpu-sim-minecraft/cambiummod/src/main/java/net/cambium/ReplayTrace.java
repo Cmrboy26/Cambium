@@ -45,7 +45,8 @@ final class ReplayTrace {
 			int damage_cooldown, int hurt_time, int attack_strength_ticks, Controls controls, Outcome outcome,
 			String weapon, boolean shield_equipped, boolean using_shield, int shield_use_ticks, int shield_cooldown,
 			int item_use_delay, boolean attack_suppressed, JsonObject armor, Integer weapon_slot,
-			int arrow_count, boolean bow_using, int bow_draw_ticks, float bow_power) {
+			int arrow_count, boolean bow_using, int bow_draw_ticks, float bow_power, int snowball_count, int egg_count,
+			int ender_pearl_count, int ender_pearl_cooldown, int wind_charge_count, int wind_charge_cooldown) {
 		Actor {
 			if (weapon == null) weapon = "minecraft:diamond_sword";
 			if (armor == null) armor = new JsonObject();
@@ -56,7 +57,7 @@ final class ReplayTrace {
 				int pose, float health, float absorption, int cooldown, int hurt, int charge, Controls controls, Outcome outcome) {
 			this(id, position, velocity, yaw, pitch, ground, sprint, pose, health, absorption, cooldown, hurt, charge,
 					controls, outcome, "minecraft:diamond_sword", false, false, 0, 0, 0, false, new JsonObject(), -1,
-					0, false, 0, 0);
+					0, false, 0, 0, 0, 0, 0, 0, 0, 0);
 		}
 		Actor withLoadout(JsonObject loadout) {
 			return new Actor(id, position, velocity, yaw, pitch, on_ground, sprinting, pose, health, absorption,
@@ -64,16 +65,27 @@ final class ReplayTrace {
 					loadout.getAsJsonArray("weapons").get(loadout.get("selected").getAsInt()).getAsString(),
 					loadout.get("offhand").getAsString().equals("minecraft:shield"), false, 0, 0, 0, false,
 					loadout.getAsJsonObject("armor").deepCopy(), loadout.get("selected").getAsInt(),
-					loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0, false, 0, 0);
+					loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0, false, 0, 0,
+					loadout.has("snowballs") ? loadout.get("snowballs").getAsInt() : 0,
+					loadout.has("eggs") ? loadout.get("eggs").getAsInt() : 0,
+					loadout.has("ender_pearls") ? loadout.get("ender_pearls").getAsInt() : 0, 0,
+					loadout.has("wind_charges") ? loadout.get("wind_charges").getAsInt() : 0, 0);
 		}
 		Actor at(double[] position, float yaw, float pitch) {
 			return new Actor(id, position, new double[]{0, 0, 0}, yaw, pitch, false, false, 0, health, absorption,
 					0, 0, attack_strength_ticks, controls, outcome, weapon, shield_equipped, false, 0, 0, 0, false, armor.deepCopy(), weapon_slot,
-					arrow_count, bow_using, bow_draw_ticks, bow_power);
+					arrow_count, bow_using, bow_draw_ticks, bow_power, snowball_count, egg_count, ender_pearl_count, ender_pearl_cooldown,
+					wind_charge_count, wind_charge_cooldown);
 		}
 	}
 	record Projectile(int owner, double[] position, double[] velocity, int age, boolean left_owner,
-			boolean in_ground, int in_ground_ticks, boolean critical) {}
+			boolean in_ground, int in_ground_ticks, boolean critical, String type) {
+		Projectile { if (type == null) type = "arrow"; }
+		Projectile(int owner, double[] position, double[] velocity, int age, boolean leftOwner,
+				boolean inGround, int inGroundTicks, boolean critical) {
+			this(owner, position, velocity, age, leftOwner, inGround, inGroundTicks, critical, "arrow");
+		}
+	}
 	record Frame(int tick, List<Actor> actors, List<Projectile> projectiles) {
 		Frame(int tick, List<Actor> actors) { this(tick, actors, List.of()); }
 	}
@@ -83,6 +95,7 @@ final class ReplayTrace {
 		final int[] min;
 		final int[] size;
 		final byte[] cells;
+		final boolean simulateFallDamage;
 		final List<JsonObject> loadouts = new ArrayList<>();
 
 		Environment(JsonObject definition) throws IOException {
@@ -98,12 +111,17 @@ final class ReplayTrace {
 			if (definition.has("rules")) {
 				JsonObject rules = definition.getAsJsonObject("rules");
 				for (String rule : rules.keySet()) {
+					if (rule.equals("simulate_fall_damage") && rules.get(rule).isJsonPrimitive()
+							&& rules.get(rule).getAsJsonPrimitive().isBoolean()) continue;
 					if ((!rule.equals("simulate_food") && !rule.equals("natural_regeneration"))
 							|| !rules.get(rule).equals(ReplayAnalysis.JSON.toJsonTree(false))) {
 						throw new IOException("Scenario bridge requires frozen food and no natural regeneration");
 					}
 				}
 			}
+			simulateFallDamage = definition.has("rules")
+					&& definition.getAsJsonObject("rules").has("simulate_fall_damage")
+					&& definition.getAsJsonObject("rules").get("simulate_fall_damage").getAsBoolean();
 			min = integerVector(definition.getAsJsonObject("bounds").get("min"));
 			size = integerVector(definition.getAsJsonObject("bounds").get("size"));
 			int volume = 1;
@@ -157,6 +175,12 @@ final class ReplayTrace {
 				JsonObject loadout = loadouts.get(index);
 				if (!actor.weapon().equals(loadout.getAsJsonArray("weapons").get(loadout.get("selected").getAsInt()).getAsString())
 						|| actor.arrow_count() != (loadout.has("arrows") ? loadout.get("arrows").getAsInt() : 0)
+						|| actor.snowball_count() != (loadout.has("snowballs") ? loadout.get("snowballs").getAsInt() : 0)
+						|| actor.egg_count() != (loadout.has("eggs") ? loadout.get("eggs").getAsInt() : 0)
+						|| actor.ender_pearl_count() != (loadout.has("ender_pearls") ? loadout.get("ender_pearls").getAsInt() : 0)
+						|| actor.ender_pearl_cooldown() != 0
+						|| actor.wind_charge_count() != (loadout.has("wind_charges") ? loadout.get("wind_charges").getAsInt() : 0)
+						|| actor.wind_charge_cooldown() != 0
 						|| actor.bow_using() || actor.bow_draw_ticks() != 0 || actor.bow_power() != 0
 						|| actor.weapon_slot() >= 0 && actor.weapon_slot() != loadout.get("selected").getAsInt()
 						|| actor.shield_equipped() != loadout.get("offhand").getAsString().equals("minecraft:shield")
@@ -255,6 +279,7 @@ final class ReplayTrace {
 						int inGroundTicks = SimulationContract.integer(projectileJson.get("in_ground_ticks"));
 						Projectile projectile = gson.fromJson(projectileJson, Projectile.class);
 						if (projectile == null || owner < 0 || owner > 1 || age < 0 || age > 1000000
+								|| !List.of("arrow", "snowball", "egg", "ender_pearl", "wind_charge").contains(projectile.type())
 								|| inGroundTicks < 0 || inGroundTicks > 1000000
 								|| !vector(projectile.position(), 29999984) || !vector(projectile.velocity(), 1000)) {
 							throw new IOException("Invalid projectile state at tick " + frames.size());
@@ -313,14 +338,32 @@ final class ReplayTrace {
 							if (!actorJson.getAsJsonObject("controls").has(field)) throw new IOException("Missing semantic control: " + field);
 						}
 						JsonObject loadout = environment.loadouts.get(index);
-						if (actor.weapon_slot() >= 0) SimulationContract.selectedSlot(loadout, actor.weapon(), actor.weapon_slot(), -1);
+						for (String field : List.of("snowball_count", "egg_count", "ender_pearl_count", "ender_pearl_cooldown", "wind_charge_count", "wind_charge_cooldown")) {
+							if (actorJson.has(field)) SimulationContract.integer(actorJson.get(field));
+						}
+						if (actor.snowball_count() < 0 || actor.snowball_count() > (loadout.has("snowballs") ? loadout.get("snowballs").getAsInt() : 0)
+								|| actor.egg_count() < 0 || actor.egg_count() > (loadout.has("eggs") ? loadout.get("eggs").getAsInt() : 0)
+								|| actor.ender_pearl_count() < 0 || actor.ender_pearl_count() > (loadout.has("ender_pearls") ? loadout.get("ender_pearls").getAsInt() : 0)
+								|| actor.ender_pearl_cooldown() < 0 || actor.ender_pearl_cooldown() > 20
+								|| actor.wind_charge_count() < 0 || actor.wind_charge_count() > (loadout.has("wind_charges") ? loadout.get("wind_charges").getAsInt() : 0)
+								|| actor.wind_charge_cooldown() < 0 || actor.wind_charge_cooldown() > 10
+								|| loadout.has("snowballs") && !actorJson.has("snowball_count")
+								|| loadout.has("eggs") && !actorJson.has("egg_count")
+								|| loadout.has("ender_pearls") && (!actorJson.has("ender_pearl_count") || !actorJson.has("ender_pearl_cooldown"))
+								|| loadout.has("wind_charges") && (!actorJson.has("wind_charge_count") || !actorJson.has("wind_charge_cooldown"))) throw new IOException("Invalid throwable inventory");
+						boolean emptyThrowable = actor.weapon_slot() >= 0 && actor.weapon_slot() < loadout.getAsJsonArray("weapons").size()
+								&& actor.weapon().equals("minecraft:air") && (loadout.getAsJsonArray("weapons").get(actor.weapon_slot()).getAsString().equals("minecraft:snowball") && actor.snowball_count() == 0
+								|| loadout.getAsJsonArray("weapons").get(actor.weapon_slot()).getAsString().equals("minecraft:egg") && actor.egg_count() == 0
+								|| loadout.getAsJsonArray("weapons").get(actor.weapon_slot()).getAsString().equals("minecraft:ender_pearl") && actor.ender_pearl_count() == 0
+								|| loadout.getAsJsonArray("weapons").get(actor.weapon_slot()).getAsString().equals("minecraft:wind_charge") && actor.wind_charge_count() == 0);
+						if (actor.weapon_slot() >= 0 && !emptyThrowable) SimulationContract.selectedSlot(loadout, actor.weapon(), actor.weapon_slot(), -1);
 						if (actor.controls().select_slot() >= 0) {
 							SimulationContract.selectedSlot(loadout, actor.controls().weapon(), actor.controls().select_slot(), -1);
 							if (actor.weapon_slot() >= 0 && !actor.weapon_slot().equals(actor.controls().select_slot())) {
 								throw new IOException("Actor slot disagrees with selected control at tick " + frame.tick());
 							}
 						}
-						if (!loadout.getAsJsonArray("weapons").contains(ReplayAnalysis.JSON.toJsonTree(actor.weapon()))
+						if (!emptyThrowable && !loadout.getAsJsonArray("weapons").contains(ReplayAnalysis.JSON.toJsonTree(actor.weapon()))
 								|| actor.shield_equipped() != loadout.get("offhand").getAsString().equals("minecraft:shield")
 								|| !actor.armor().equals(loadout.getAsJsonObject("armor"))
 								|| actor.controls().select_weapon() && !loadout.getAsJsonArray("weapons").contains(ReplayAnalysis.JSON.toJsonTree(actor.controls().weapon()))) {

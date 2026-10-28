@@ -12,11 +12,12 @@
 
 namespace minecraft_sim::app {
 
-inline constexpr std::array<const char*, 16> weapon_names{
+inline constexpr std::array<const char*, 21> weapon_names{
     "minecraft:air", "minecraft:wooden_sword", "minecraft:stone_sword", "minecraft:copper_sword",
     "minecraft:golden_sword", "minecraft:iron_sword", "minecraft:diamond_sword", "minecraft:netherite_sword",
     "minecraft:wooden_axe", "minecraft:stone_axe", "minecraft:copper_axe", "minecraft:golden_axe",
-    "minecraft:iron_axe", "minecraft:diamond_axe", "minecraft:netherite_axe", "minecraft:bow"};
+    "minecraft:iron_axe", "minecraft:diamond_axe", "minecraft:netherite_axe", "minecraft:bow", "minecraft:mace",
+    "minecraft:snowball", "minecraft:egg", "minecraft:ender_pearl", "minecraft:wind_charge"};
 inline constexpr auto armor_slots = armor_slot_names;
 inline constexpr std::array<const char*, 9> armor_materials{
     "none", "leather", "copper", "chainmail", "iron", "golden", "diamond", "netherite", "turtle"};
@@ -39,7 +40,9 @@ inline std::vector<WeaponItem> applyLoadout(PlayerState& state, const nlohmann::
     if (!loadout.is_object()) throw std::invalid_argument("Loadout must be an object");
     for (const auto& entry : loadout.items()) {
         if (entry.key() != "weapons" && entry.key() != "selected" && entry.key() != "offhand"
-            && entry.key() != "armor" && entry.key() != "arrows") {
+            && entry.key() != "armor" && entry.key() != "arrows"
+            && entry.key() != "snowballs" && entry.key() != "eggs" && entry.key() != "ender_pearls"
+            && entry.key() != "wind_charges") {
             throw std::invalid_argument("Unsupported loadout field: " + entry.key());
         }
     }
@@ -73,6 +76,21 @@ inline std::vector<WeaponItem> applyLoadout(PlayerState& state, const nlohmann::
     }
     state.selected_weapon_slot = selected;
     state.ordinary_arrow_count = arrow_count;
+    const auto stackCount = [&](const char* field, WeaponItem item, int maximum = 16) {
+        const bool present = std::find(slots.begin(), slots.end(), item) != slots.end();
+        if (loadout.contains(field) && !loadout.at(field).is_number_integer()) {
+            throw std::invalid_argument(std::string(field) + " count must be an integer");
+        }
+        const int count = loadout.value(field, present ? 1 : 0);
+        if ((present && (count < 1 || count > maximum)) || (!present && count != 0)) {
+            throw std::invalid_argument(std::string(field) + " requires a matching stack of 1.." + std::to_string(maximum) + " items");
+        }
+        return count;
+    };
+    state.snowball_count = stackCount("snowballs", WeaponItem::snowball);
+    state.egg_count = stackCount("eggs", WeaponItem::egg);
+    state.ender_pearl_count = stackCount("ender_pearls", WeaponItem::ender_pearl);
+    state.wind_charge_count = stackCount("wind_charges", WeaponItem::wind_charge, 64);
     const auto offhand = loadout.value("offhand", std::string("minecraft:air"));
     if (offhand != "minecraft:air" && offhand != "minecraft:shield") throw std::invalid_argument("Unsupported offhand item: " + offhand);
     state.weapon = slots[selected];
@@ -113,8 +131,13 @@ inline nlohmann::json describeLoadout(const PlayerState& state, const std::vecto
     }
     auto armor = nlohmann::json::object();
     for (int slot = 0; slot < 4; ++slot) armor[armor_slots[slot]] = armorName(state.armor_items[slot], slot);
-    return {{"weapons", weapons}, {"selected", selected}, {"offhand", state.shield_equipped ? "minecraft:shield" : "minecraft:air"},
+    nlohmann::json result = {{"weapons", weapons}, {"selected", selected}, {"offhand", state.shield_equipped ? "minecraft:shield" : "minecraft:air"},
         {"armor", armor}, {"arrows", state.ordinary_arrow_count}};
+    if (std::find(slots.begin(), slots.end(), WeaponItem::snowball) != slots.end()) result["snowballs"] = state.snowball_count;
+    if (std::find(slots.begin(), slots.end(), WeaponItem::egg) != slots.end()) result["eggs"] = state.egg_count;
+    if (std::find(slots.begin(), slots.end(), WeaponItem::ender_pearl) != slots.end()) result["ender_pearls"] = state.ender_pearl_count;
+    if (std::find(slots.begin(), slots.end(), WeaponItem::wind_charge) != slots.end()) result["wind_charges"] = state.wind_charge_count;
+    return result;
 }
 
 template<std::size_t Size>

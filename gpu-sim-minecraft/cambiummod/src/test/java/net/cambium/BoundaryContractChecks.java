@@ -63,6 +63,12 @@ public final class BoundaryContractChecks {
 		JsonObject duplicate = spawn.deepCopy();
 		duplicate.getAsJsonObject("loadout").getAsJsonArray("weapons").set(8, ReplayAnalysis.JSON.toJsonTree("minecraft:diamond_sword"));
 		reject(() -> SimulationContract.loadout(duplicate, "configured"));
+		JsonObject thrown = JsonParser.parseString("{\"loadout\":{\"weapons\":[\"minecraft:snowball\",\"minecraft:egg\",\"minecraft:ender_pearl\"],\"snowballs\":16,\"eggs\":2,\"ender_pearls\":8}}").getAsJsonObject();
+		JsonObject thrownLoadout = SimulationContract.loadout(thrown, "configured");
+		require(thrownLoadout.get("snowballs").getAsInt() == 16 && thrownLoadout.get("eggs").getAsInt() == 2 && thrownLoadout.get("ender_pearls").getAsInt() == 8,
+				"Throwable counts survive loadout normalization");
+		thrown.getAsJsonObject("loadout").addProperty("eggs", 0);
+		reject(() -> SimulationContract.loadout(thrown, "configured"));
 		require(DeploymentSummary.describe(new JsonObject()).contains("no curriculum runtime"),
 				"Historical inference explicitly remains fixed-scenario shared learner");
 		JsonObject info = JsonParser.parseString("""

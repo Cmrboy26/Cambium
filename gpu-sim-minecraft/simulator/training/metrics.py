@@ -12,6 +12,9 @@ def definition(label, unit, scope="training", field=None):
 
 CATALOG = {
     "win_rate": definition("Benchmark win rate", "%", "evaluation", "win_rate"),
+    "self_launch_rate": definition("Self-launch rate", "%", "evaluation", "self_launch_rate"),
+    "mace_smash_rate": definition("Mace smash rate", "%", "evaluation", "mace_smash_rate"),
+    "launch_smash_rate": definition("Launch-to-smash rate", "%", "evaluation", "launch_smash_rate"),
     "evaluation_reward": definition("Benchmark episode return", "reward / episode", "evaluation", "reward_mean"),
     "training_win_rate": definition("Training win rate", "%", "episode"),
     "training_loss_rate": definition("Training loss rate", "%", "episode"),

@@ -111,8 +111,9 @@ def _geometry(value):
     required = value.get("requires", [])
     if not isinstance(required, list) or any(item not in CAPABILITIES for item in required):
         raise ValueError("Arena requires unsupported capabilities")
-    rules = fields(value.get("rules", {}), tuple(RULES), "physical rules")
-    if any(type(item) is not bool or item is not False for item in rules.values()):
+    rules = fields(value.get("rules", {}), (*RULES, "simulate_fall_damage"), "physical rules")
+    if any(type(item) is not bool for item in rules.values()) or any(
+            rules.get(name, False) for name in RULES):
         raise ValueError("Physical rules require frozen food and disabled natural regeneration")
 
 
@@ -139,7 +140,7 @@ def _player(value, scene):
     ticks = result["attack_strength_ticks"]
     if type(ticks) is not int or not 0 <= ticks <= 2**31 - 1:
         raise ValueError("Player attack_strength_ticks must be a nonnegative int32")
-    loadout = fields(result["loadout"], ("weapons", "selected", "offhand", "armor", "arrows"), "loadout")
+    loadout = fields(result["loadout"], ("weapons", "selected", "offhand", "armor", "arrows", "snowballs", "eggs", "ender_pearls", "wind_charges"), "loadout")
     slots = loadout["weapons"]
     if not isinstance(slots, list) or not 1 <= len(slots) <= 9:
         raise ValueError("Player weapons must contain 1..9 slots")
@@ -369,7 +370,10 @@ class _Authoring:
             _name(raw.get("name"), "Arena name")
             _geometry(raw)
             raw["requires"] = sorted(set(raw.get("requires", [])))
+            fall_damage = raw.get("rules", {}).get("simulate_fall_damage", False)
             raw["rules"] = dict(RULES)
+            if fall_damage:
+                raw["rules"]["simulate_fall_damage"] = True
             self.arenas[path] = raw
         return deepcopy(self.arenas[path])
 

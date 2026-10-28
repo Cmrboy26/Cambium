@@ -53,6 +53,16 @@ inline nlohmann::json replayFrame(std::uint64_t tick, const PlayerState* players
             actors.back().update({{"arrow_count", bow.ordinary_arrows},
                 {"bow_using", state.using_bow}, {"bow_draw_ticks", bow.draw_ticks},
                 {"bow_power", state.using_bow ? bowPower(bow.draw_ticks) : 0.0F}});
+            if (projectiles->thrown_item_capacity > 0) {
+                actors.back()["snowball_count"] = state.snowball_count;
+                actors.back()["egg_count"] = state.egg_count;
+                actors.back()["ender_pearl_count"] = state.ender_pearl_count;
+                actors.back()["ender_pearl_cooldown"] = state.ender_pearl_cooldown;
+            }
+            if (projectiles->wind_charge_capacity > 0) {
+                actors.back()["wind_charge_count"] = state.wind_charge_count;
+                actors.back()["wind_charge_cooldown"] = state.wind_charge_cooldown;
+            }
         }
     }
     auto frame = nlohmann::json{{"tick", tick}, {"actors", actors}};
@@ -68,6 +78,23 @@ inline nlohmann::json replayFrame(std::uint64_t tick, const PlayerState* players
                 {"age", arrow.age}, {"left_owner", arrow.left_owner},
                 {"in_ground", arrow.in_ground}, {"in_ground_ticks", arrow.in_ground_ticks},
                 {"critical", arrow.critical}});
+        }
+            for (int slot = 0; slot < projectiles->thrown_item_capacity; ++slot) {
+                const auto& thrown = projectiles->thrown_items[slot];
+                if (!thrown.active) continue;
+                frame["projectiles"].push_back({{"id", slot}, {"type", thrown.item == ThrownItem::snowball ? "snowball"
+                    : thrown.item == ThrownItem::egg ? "egg" : "ender_pearl"},
+                {"owner", thrown.owner}, {"position", {thrown.position.x, thrown.position.y, thrown.position.z}},
+                {"velocity", {thrown.velocity.x, thrown.velocity.y, thrown.velocity.z}}, {"age", thrown.age},
+                {"left_owner", thrown.left_owner}, {"in_ground", false}, {"in_ground_ticks", 0}, {"critical", false}});
+            }
+        for (int slot = 0; slot < projectiles->wind_charge_capacity; ++slot) {
+            const auto& wind = projectiles->wind_charges[slot];
+            if (!wind.active) continue;
+            frame["projectiles"].push_back({{"id", slot}, {"type", "wind_charge"}, {"owner", wind.owner},
+                {"position", {wind.position.x, wind.position.y, wind.position.z}},
+                {"velocity", {wind.velocity.x, wind.velocity.y, wind.velocity.z}}, {"age", wind.age},
+                {"left_owner", wind.left_owner}, {"in_ground", false}, {"in_ground_ticks", 0}, {"critical", false}});
         }
     }
     return frame;

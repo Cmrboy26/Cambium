@@ -29,6 +29,8 @@ struct Scene {
     std::array<Controls, 1> held{};
     std::array<WorldState, 1> worlds{};
     std::vector<ArrowState> arrow_storage;
+    std::vector<ThrownProjectileState> thrown_storage;
+    std::vector<WindChargeState> wind_storage;
     std::array<ProjectileWorldState, 1> projectile_states{};
     std::vector<Block> cells;
     SineTable sine = makeSineTable();
@@ -67,7 +69,9 @@ struct Scene {
         const auto rules = definition.value("rules", nlohmann::json::object());
         if (!rules.is_object()) throw std::invalid_argument("Scenario rules must be an object");
         for (const auto& rule : rules.items()) {
-            if ((rule.key() != "simulate_food" && rule.key() != "natural_regeneration") || rule.value() != false) {
+            if (rule.key() == "simulate_fall_damage" && rule.value().is_boolean()) {
+                worlds[0].simulate_fall_damage = rule.value().get<bool>();
+            } else if ((rule.key() != "simulate_food" && rule.key() != "natural_regeneration") || rule.value() != false) {
                 throw std::invalid_argument("Scenario bridge requires frozen food and no natural regeneration");
             }
         }
@@ -130,6 +134,18 @@ struct Scene {
         arrow_storage.resize(projectile_arrow_capacity);
         projectile_states[0].arrows = arrow_storage.data();
         projectile_states[0].arrow_capacity = projectile_arrow_capacity;
+        for (const auto& player : initial_players) {
+            if (player.snowball_count || player.egg_count || player.ender_pearl_count) {
+                thrown_storage.resize(96);
+                projectile_states[0].thrown_items = thrown_storage.data();
+                projectile_states[0].thrown_item_capacity = static_cast<int>(thrown_storage.size());
+            }
+            if (player.wind_charge_count) {
+                wind_storage.resize(128);
+                projectile_states[0].wind_charges = wind_storage.data();
+                projectile_states[0].wind_charge_capacity = static_cast<int>(wind_storage.size());
+            }
+        }
         resetProjectileWorld(projectile_states[0], 1);
         for (int player = 0; player < 2; ++player) {
             projectile_states[0].bows[player].ordinary_arrows = initial_players[player].ordinary_arrow_count;
@@ -232,6 +248,7 @@ struct Scene {
         resolved.erase("policy");
         resolved["requires"] = {"movement", "melee", "equipment", "shield", "armor"};
         resolved["rules"] = {{"simulate_food", false}, {"natural_regeneration", false}};
+        if (worlds[0].simulate_fall_damage) resolved["rules"]["simulate_fall_damage"] = true;
         const auto parsed = parsePlayers(definition.at("players"));
         resolved["players"] = parsed.resolved;
         for (const auto& slots : parsed.weapon_slots) {

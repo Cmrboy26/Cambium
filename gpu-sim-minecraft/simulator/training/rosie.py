@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -392,7 +393,8 @@ def configure(game, host, user, runs_directory):
 class Rosie:
     def __init__(self, game, offline=False):
         self.game = Path(game).resolve()
-        self.configuration = json.loads(config_path(game).read_text(encoding="utf-8-sig"))
+        path = config_path(game)
+        self.configuration = {} if offline and not path.is_file() else json.loads(path.read_text(encoding="utf-8-sig"))
         self.cache = self.game / "sim-rosie-cache"
         self.offline = offline
         self.session = None
@@ -614,7 +616,25 @@ class Rosie:
         self.index_run(run)
         return len(replays)
 
-    def index_run(self, run):
+    def import_checkpoint(self, source):
+        source = Path(source).expanduser().resolve()
+        if source.suffix.lower() != ".pt" or not source.is_file():
+            raise ValueError("Choose an existing .pt checkpoint")
+        if source.stat().st_size > MAX_FILE:
+            raise ValueError("Checkpoint exceeds the size limit")
+        self.cache.mkdir(parents=True, exist_ok=True)
+        folder = Path(tempfile.mkdtemp(prefix="import-", dir=self.cache))
+        try:
+            checkpoint = folder / "latest.pt"
+            shutil.copyfile(source, checkpoint)
+            if checkpoint.stat().st_size > MAX_FILE:
+                raise ValueError("Checkpoint exceeds the size limit")
+            return self.index_run(folder.name, imported_name=source.stem)
+        except BaseException:
+            shutil.rmtree(folder)
+            raise
+
+    def index_run(self, run, imported_name=None):
         from simulator.training.serve import Policy
 
         path = self.cache / "library.json"
@@ -634,6 +654,8 @@ class Rosie:
                 continue
             policy = Policy(checkpoint)
             identity = run + ":" + checkpoint.relative_to(folder).as_posix()
+            if imported_name is not None:
+                aliases[identity] = imported_name
             policies.append({"id": identity, "name": aliases.get(identity, run + " / " + checkpoint.stem),
                              "run": run, "path": str(checkpoint), "update": policy.info["update"],
                              "stage": policy.info.get("experiment", {}).get("stage", ""),
@@ -669,7 +691,10 @@ class Rosie:
                     group["sources"].append(source)
                     known_ids.add(source["id"])
         environments = list(grouped_environments.values())
-        result = {"version": 1, "policies": policies, "environments": environments, "runs": previous.get("runs", [])}
+        runs = previous.get("runs", [])
+        if imported_name is not None:
+            runs.append({"id": run, "name": imported_name})
+        result = {"version": 1, "policies": policies, "environments": environments, "runs": runs}
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.cache, delete=False) as target:
             temporary = Path(target.name)
             try:
@@ -683,8 +708,9 @@ class Rosie:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel", "local"))
+    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel", "local", "import"))
     parser.add_argument("--duel", type=Path)
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--minecraft-directory", required=True)
     parser.add_argument("--run", default="latest")
     parser.add_argument("--replay", default="latest")
@@ -720,6 +746,14 @@ def main(argv=None):
             if args.json or args.offline:
                 raise ValueError("Password login requires connect in a local terminal, without --json or --offline")
             connect_terminal(args.minecraft_directory)
+            return 0
+        if args.action == "import":
+            if args.checkpoint is None:
+                raise ValueError("Import requires --checkpoint <policy.pt>")
+            emit("startup", phase="Importing checkpoint", seconds=time.monotonic() - started)
+            rosie = Rosie(args.minecraft_directory, offline=True)
+            library = rosie.import_checkpoint(args.checkpoint)
+            emit("imported", run=library["policies"][-1]["run"], name=args.checkpoint.stem)
             return 0
         if args.action == "local":
             emit("startup", phase="Importing PyTorch", seconds=time.monotonic() - started)

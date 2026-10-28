@@ -1,0 +1,22 @@
+{
+  "format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+  "name": "colten-mace-wind-duel",
+  "arena": "../../arenas/colten/mace-wind-duel.json",
+  "players": {
+    "shared": {
+      "health": 20,
+      "loadout": {"weapons": ["minecraft:mace", "minecraft:wind_charge"], "selected": 0,
+        "wind_charges": 8, "offhand": "minecraft:air", "armor": {}}
+    },
+    "overrides": [
+      {"position": [-2, 1, 0], "yaw": -90, "pitch": 0},
+      {"position": [2, 1, 0], "yaw": 90, "pitch": 0}
+    ]
+  },
+  "task": {
+    "max_ticks": 400,
+    "rewards": {"doing_damage": 20, "taking_damage": -5, "won_duel": 30, "death": -20,
+      "episode_timeout": -5, "no_damage_penalty": -5,
+      "wind_self_launch": 2, "missed_attack_ready_time": -0.3}
+  }
+}

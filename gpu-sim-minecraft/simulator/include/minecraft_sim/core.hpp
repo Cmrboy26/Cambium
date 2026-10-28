@@ -1,5 +1,6 @@
 #pragma once
 
+#include "minecraft_sim/constants_mace.hpp"
 #include "minecraft_sim/equipment.hpp"
 #include "minecraft_sim/geometry.hpp"
 #include "minecraft_sim/math.hpp"
@@ -41,6 +42,8 @@ struct AttackOutcome {
     float health_lost = 0.0F;
     float blocked_damage = 0.0F;
     bool shield_disabled = false;
+    bool mace_smash = false;
+    double attack_speed = 0.0;
 };
 
 struct PlayerState {
@@ -68,6 +71,9 @@ struct PlayerState {
     int sprint_trigger_time = 0;
     int sprint_window = 7;
     double fall_distance = 0.0;
+    double impulse_impact_y = 0.0;
+    int impulse_grace_ticks = 0;
+    bool has_impulse_impact = false;
     PlayerPose pose = PlayerPose::standing;
     double knockback_resistance = 0.0;
     bool pushable = true;
@@ -92,6 +98,12 @@ struct PlayerState {
     WeaponItem weapon = WeaponItem::diamond_sword;
     int selected_weapon_slot = 0;
     int ordinary_arrow_count = 0;
+    int snowball_count = 0;
+    int egg_count = 0;
+    int ender_pearl_count = 0;
+    int ender_pearl_cooldown = 0;
+    int wind_charge_count = 0;
+    int wind_charge_cooldown = 0;
     double attack_damage = 7.0;
     double attack_speed = 4.0 + double(-2.4F);
     double attack_knockback = 0.0;
@@ -143,14 +155,16 @@ struct PlayerState {
 };
 
 enum class Difficulty : std::uint8_t { peaceful, easy, normal, hard };
-enum class DamageKind : std::uint8_t { melee, starvation, arrow };
+enum class DamageKind : std::uint8_t { melee, starvation, arrow, fall };
 
 struct WorldState {
     std::uint64_t tick = 0;
     bool natural_regeneration = false;
     bool simulate_food = false;
+    bool simulate_fall_damage = false;
     Difficulty difficulty = Difficulty::normal;
     float projectile_health_dealt[2]{};
+    double wind_self_launch[2]{};
     float projectile_health_taken[2]{};
     float projectile_arrow_progress[2]{};
 };
@@ -216,6 +230,12 @@ public:
     }
 
     MCSIM_HD void equipWeapon(WeaponItem item) {
+        if ((item == WeaponItem::snowball && state_->snowball_count <= 0)
+            || (item == WeaponItem::egg && state_->egg_count <= 0)
+            || (item == WeaponItem::ender_pearl && state_->ender_pearl_count <= 0)
+            || (item == WeaponItem::wind_charge && state_->wind_charge_count <= 0)) {
+            item = WeaponItem::unarmed;
+        }
         if (state_->weapon == item) {
             return;
         }
@@ -305,7 +325,7 @@ public:
             state_->hurt_duration = 10;
             state_->hurt_time = state_->hurt_duration;
         }
-        if (kind != DamageKind::starvation) {
+        if (kind != DamageKind::starvation && kind != DamageKind::fall) {
             const float toughness = 2.0F + state_->armor_toughness / 4.0F;
             const float effective_armor = static_cast<float>(maximum(state_->armor * 0.2F,
                 minimum(20.0F, state_->armor - applied_damage / toughness)));
@@ -319,7 +339,7 @@ public:
         }
         if (full_hit && !blocked) {
             state_->needs_sync = true;
-            if (kind != DamageKind::starvation) {
+            if (kind != DamageKind::starvation && kind != DamageKind::fall) {
                 const double direction_x = kind == DamageKind::arrow
                     ? -projectile_motion.x : source_position.x - state_->position.x;
                 const double direction_z = kind == DamageKind::arrow
@@ -334,7 +354,8 @@ public:
         return !blocked;
     }
 
-    MCSIM_HD void resolveMelee(PlayerView victim, MathView math, int target_index = -1) {
+    MCSIM_HD void resolveMelee(PlayerView victim, MathView math, int target_index = -1,
+                               PlayerState* players = nullptr, int player_count = 0) {
         auto& outcome = state_->last_attack;
         outcome = {};
         if (!state_->alive() || !victim.state_->alive() || state_ == victim.state_
@@ -355,6 +376,15 @@ public:
         float damage = static_cast<float>(state_->attack_damage);
         damage *= 0.2F + outcome.charge * outcome.charge * 0.8F;
         state_->attack_strength_ticks = 0;
+        // Minecraft 26.3: Player.java:1002-1029; MaceItem.java:101-124, 164.
+        const bool mace_smash = state_->weapon == WeaponItem::mace
+            && state_->fall_distance > double(MACE_SMASH_FALL_THRESHOLD);
+        if (mace_smash) {
+            const double distance = state_->fall_distance;
+            const double bonus = distance <= MACE_DAMAGE_THRESHOLD_1 ? 4.0 * distance
+                : distance <= MACE_DAMAGE_THRESHOLD_2 ? 12.0 + 2.0 * (distance - 3.0) : 22.0 + distance - 8.0;
+            damage += static_cast<float>(bonus);
+        }
         if (damage <= 0.0F) {
             return;
         }
@@ -370,6 +400,7 @@ public:
         if (!outcome.accepted) {
             return;
         }
+        outcome.mace_smash = mace_smash;
         addExhaustion(0.1F);
         const float extra_power = static_cast<float>(state_->attack_knockback) / 2.0F
             + (outcome.sprint_bonus ? 0.5F : 0.0F);
@@ -379,6 +410,43 @@ public:
             state_->velocity.x *= 0.6;
             state_->velocity.z *= 0.6;
             state_->sprinting = false;
+        }
+        if (mace_smash) {
+            // Minecraft 26.3: MaceItem.java:56-78, 128-160; postHurtEnemy:93-96.
+            state_->velocity.y = double(0.01F);
+            // Minecraft 26.3: MaceItem.java:81-86; LivingEntity.java:1874-1884.
+            if (!state_->has_impulse_impact || state_->impulse_impact_y > state_->position.y) {
+                state_->impulse_impact_y = state_->position.y;
+            }
+            state_->has_impulse_impact = true;
+            if (state_->impulse_grace_ticks < 40) state_->impulse_grace_ticks = 40;
+            const auto target_box = victim.state_->bounds();
+            const double radius = double(MACE_KNOCKBACK_RADIUS);
+            const Aabb area{{target_box.lower.x - radius, target_box.lower.y - radius, target_box.lower.z - radius},
+                            {target_box.upper.x + radius, target_box.upper.y + radius, target_box.upper.z + radius}};
+            for (int index = 0; index < player_count; ++index) {
+                auto& candidate = players[index];
+                const Vec3 direction{candidate.position.x - victim.state_->position.x,
+                                     candidate.position.y - victim.state_->position.y,
+                                     candidate.position.z - victim.state_->position.z};
+                const double distance_squared = direction.lengthSquared();
+                if (&candidate == state_ || &candidate == victim.state_ || !area.intersects(candidate.bounds())
+                    || distance_squared > radius * radius) {
+                    continue;
+                }
+                const double distance = ::sqrt(distance_squared);
+                const double resistance = minimum(1.0, candidate.knockback_resistance + candidate.armor_knockback_resistance);
+                const double power = (radius - distance) * MACE_KNOCKBACK_POWER
+                    * (state_->fall_distance > double(MACE_HEAVY_THRESHOLD) ? 2.0 : 1.0) * (1.0 - resistance);
+                if (power > 0.0) {
+                    const double scale = distance < double(1.0E-5F) ? 0.0 : power / distance;
+                    candidate.velocity.x += direction.x * scale;
+                    candidate.velocity.y += double(0.7F);
+                    candidate.velocity.z += direction.z * scale;
+                    candidate.needs_sync = true;
+                }
+            }
+            state_->fall_distance = 0.0;
         }
     }
 
@@ -701,10 +769,29 @@ private:
         }
         state_->vertical_collision = requested.y != accepted.y;
         state_->on_ground = state_->vertical_collision && requested.y < 0.0;
+        // Minecraft 26.3: Entity.java:1762-1772, checkFallDamage.
+        if (accepted.y < 0.0) {
+            state_->fall_distance -= double(static_cast<float>(accepted.y));
+        }
         if (state_->on_ground) {
+            // Minecraft 26.3: LivingEntity.java:1848-1870, 1891-1914; fall bypasses armor.
+            if (world_ && world_->simulate_fall_damage && state_->fall_distance > 0.0) {
+                double effective_distance = state_->fall_distance;
+                if (state_->has_impulse_impact) {
+                    effective_distance = minimum(effective_distance, state_->impulse_impact_y - state_->position.y);
+                    if (effective_distance <= 0.0 || state_->impulse_grace_ticks == 0) {
+                        state_->has_impulse_impact = false;
+                        state_->impulse_grace_ticks = 0;
+                    }
+                }
+                const double damage = ::floor(effective_distance + 1.0E-6 - 3.0);
+                if (damage > 0.0) {
+                    state_->has_impulse_impact = false;
+                    state_->impulse_grace_ticks = 0;
+                    hurt(static_cast<float>(damage), state_->position, 0.0F, true, DamageKind::fall);
+                }
+            }
             state_->fall_distance = 0.0;
-        } else if (accepted.y < 0.0) {
-            state_->fall_distance -= accepted.y;
         }
         if (collision_x) {
             state_->velocity.x = -state_->velocity.x * 0.0;
@@ -733,6 +820,10 @@ private:
     }
 
     MCSIM_HD void updatePostMovementState(BlockWorldView blocks) {
+        // Minecraft 26.3: LivingEntity.java:2885-2886, 2959-2960.
+        if (state_->impulse_grace_ticks > 0) {
+            --state_->impulse_grace_ticks;
+        }
         if (state_->using_shield && state_->shield_use_ticks < (std::numeric_limits<int>::max)()) {
             ++state_->shield_use_ticks;
             if (state_->shield_use_ticks >= 72000) {
@@ -743,6 +834,8 @@ private:
         if (state_->shield_cooldown > 0) {
             --state_->shield_cooldown;
         }
+        if (state_->ender_pearl_cooldown > 0) --state_->ender_pearl_cooldown;
+        if (state_->wind_charge_cooldown > 0) --state_->wind_charge_cooldown;
         if (state_->attack_strength_ticks < (std::numeric_limits<int>::max)()) {
             ++state_->attack_strength_ticks;
         }
@@ -775,6 +868,8 @@ public:
     MCSIM_HD PlayerView player(int index) const {
         return {players_ + index, queued_ + index, held_ + index, math_, state_};
     }
+
+    MCSIM_HD int playerCount() const { return player_count_; }
 
     MCSIM_HD const Controls& queuedInput(int index) const { return queued_[index]; }
 
@@ -818,6 +913,11 @@ public:
     // Source: minecraft-26.3-src/net/minecraft/client/Minecraft.java, handleKeybinds;
     // item-button release suppresses attacks for the sample that ends active use.
     MCSIM_HD void processTick(const bool* item_release_suppressed = nullptr) {
+        beginTick(item_release_suppressed);
+        finishTick();
+    }
+
+    MCSIM_HD void beginTick(const bool* item_release_suppressed = nullptr) {
         latchInputs();
         for (int index = 0; index < player_count_; ++index) {
             player(index).prepareTick();
@@ -827,9 +927,13 @@ public:
             auto& state = players_[index];
             if (held_[index].attack && state.alive() && state.attack_miss_time == 0 && !state.attack_suppressed) {
                 state.last_attack.attempted = true;
+                state.last_attack.attack_speed = state.attack_speed;
                 state.last_attack.target = pickAttackTarget(index, &state.last_attack.hit_block);
             }
         }
+    }
+
+    MCSIM_HD void finishTick() {
         for (int index = 0; index < player_count_; ++index) {
             auto& state = players_[index];
             if (!state.last_attack.attempted || !state.alive()) {
@@ -837,7 +941,7 @@ public:
             }
             const int target = state.last_attack.target;
             if (target >= 0) {
-                player(index).resolveMelee(player(target), math_, target);
+                player(index).resolveMelee(player(target), math_, target, players_, player_count_);
                 if (state.last_attack.accepted && state.last_attack.sweep) {
                     sweepAttack(index, target);
                 }

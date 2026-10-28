@@ -23,6 +23,34 @@ reopen Minecraft. [Selection rules](../scripts/AGENTS.md#minecraft-folder).
 
 Template license remains [CC0](LICENSE).
 
+## Bundled Inference
+
+Build the helper on each target OS/architecture using a CPU-only PyTorch Python
+environment and the pinned packaging dependency. From the repository root:
+
+```powershell
+python -m pip install -r simulator/training/requirements-inference-build.txt
+python -m simulator.training.build_inference
+./scripts/build-mod.ps1
+```
+
+The build stages a PyInstaller executable and SHA-256 under
+`cambiummod/build/runtime-bundle/`; Gradle embeds staged platform bundles in the
+JAR. This generated directory is not shared across fresh checkouts. Build each
+target on that target OS/architecture and stage its bundle before assembling a
+multi-platform JAR. A normal mod build without a bundle retains the configured
+Python helper but is not a standalone distribution. The Windows x86-64 CPU
+bundle is approximately 180 MB. `--dry-run` prints the packaging command.
+
+For local import and duels, the mod prefers the matching embedded executable,
+extracts it into a checksum-named directory under the game folder's
+`sim-runtime`, verifies it and runs it over loopback. Missing bundles fall back
+to an existing configured Python helper. Rosie commands still require the local
+Rosie configuration and SSH setup. The helper loads trusted standalone PPO
+checkpoints only; `weights_only=True` is not a sandbox for untrusted files.
+Only the selected concrete checkpoint environment is imported, not the training
+curriculum. Validate each distributed platform and an in-game duel separately.
+
 Gradle packages `cambium-build.properties` with mod version, source SHA-256 and
 UTC build time. Java/resources/Gradle input changes regenerate it; unchanged
 builds retain identity. Initialization logs identity, catalogue hash and loaded
@@ -197,6 +225,9 @@ The bar measures bytes processed, including unchanged files reused from cache;
 indexing can continue after the transfer bar reaches 100%.
 Opening the
 panel, browsing cached entries and starting a local duel never contact Rosie.
+Library Import selects a local `.pt`, validates it in the offline helper and
+copies it into its own cache entry with its policy contract and environment.
+It requires no Rosie configuration when a matching bundled runtime is present.
 Login still happens in the local terminal connection flow, never a password UI.
 Helpers retain generation/world/owner guards, literal process arguments and
 disconnect/LAN/shutdown cleanup. Live Stop Match stops actors and keeps a ready

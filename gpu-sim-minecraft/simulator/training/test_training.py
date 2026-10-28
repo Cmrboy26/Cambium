@@ -52,6 +52,52 @@ class InferenceChecks(unittest.TestCase):
                       "model": ActorCritic(22, 16, 9).state_dict()}
         torch.save(self.saved, self.path)
 
+    @unittest.skipUnless(os.environ.get("CAMBIUM_BUNDLED_HELPER"), "No bundled helper selected")
+    def test_bundled_helper_import_and_inference(self):
+        import signal
+
+        executable = os.environ["CAMBIUM_BUNDLED_HELPER"]
+        game = self.path.parent / "Fresh Minecraft"
+        imported = subprocess.run([executable, "import", "--checkpoint", str(self.path),
+                                   "--minecraft-directory", str(game), "--json"],
+                                  capture_output=True, text=True, timeout=120)
+        self.assertEqual(imported.returncode, 0, imported.stdout + imported.stderr)
+        self.assertEqual(json.loads(imported.stdout.splitlines()[-1])["event"], "imported")
+        library = json.loads((game / "sim-rosie-cache/library.json").read_text())
+        checkpoint = library["policies"][0]["path"]
+        duel = {"format": "minecraft_sim_duel", "version": 1, "reference": checkpoint,
+                "fighters": [{"type": "checkpoint", "path": checkpoint},
+                             {"type": "scripted", "controller": "stationary_target"}]}
+        path = game / "sim-rosie-cache/duel.json"
+        path.write_text(json.dumps(duel))
+        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen([executable, "local", "--minecraft-directory", str(game),
+                                        "--duel", str(path), "--offline", "--json"],
+                                       stdout=subprocess.PIPE, stderr=errors, **options)
+            events = queue.Queue()
+            reader = threading.Thread(target=lambda: events.put(next((line for line in process.stdout
+                if json.loads(line)["event"] in ("policy", "error")), b"")), daemon=True)
+            try:
+                reader.start()
+                event = json.loads(events.get(timeout=120))
+                self.assertEqual(event["event"], "policy", event)
+                base = f"http://127.0.0.1:{event['port']}"
+                with urlopen(base + "/info", timeout=3) as response:
+                    info = json.load(response)
+                body = {"protocol": 1, "session": "bundled-check", "tick": 0,
+                        "contract_hash": info["contract_hash"], "observations": np.zeros((2, 22)).tolist()}
+                with urlopen(Request(base + "/act", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual(len(json.load(response)["actions"]), 2)
+            finally:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=30)
+                process.stdout.close()
+                reader.join(timeout=5)
+
     def test_live_duels_accept_only_builtin_scripted_controllers(self):
         contract = from_legacy(SCHEMA_V2)
         contract.pop("observation_dim")
@@ -378,6 +424,58 @@ class InferenceChecks(unittest.TestCase):
 
 
 class TrainingChecks(unittest.TestCase):
+    def test_self_launch_reward_matches_owner_impulse_and_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+            definition["players"][0]["pitch"] = 90
+            definition["players"][0]["loadout"] = {"weapons": ["minecraft:wind_charge"], "selected": 0,
+                                                  "wind_charges": 2, "offhand": "minecraft:air"}
+            path = Path(directory) / "wind-reward.json"
+            path.write_text(json.dumps(definition), encoding="utf-8")
+            contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                        "ticks_per_action": 1, "observations": [{"feature": "self.velocity.y"}],
+                        "actions": [{"name": "use_item", "values": [False, True]}]}
+            weights = {name: 0.0 for name in REWARD_NAMES}
+            weights["wind_self_launch"] = 2.5
+            with Environment(2, environment=path, weights=weights, contract=contract) as environment:
+                actions = np.zeros((2, 2, 1), dtype=np.int32)
+                actions[0, 0, 0] = 1
+                accumulated = 0.0
+                for tick in range(12):
+                    _, rewards, _, _ = environment.step(actions)
+                    actions.fill(0)
+                    events = environment.step_behavior_events()
+                    np.testing.assert_allclose(rewards, events[:, :, 0] * 2.5, atol=1e-6)
+                    self.assertEqual(events[1, :, 0].sum(), 0)
+                    self.assertEqual(events[0, 1, 0], 0)
+                    accumulated += float(events[0, 0, 0])
+                self.assertGreater(accumulated, 0.2)
+                self.assertAlmostEqual(environment.reward_totals()["wind_self_launch"], 2.5 * accumulated, places=5)
+                environment.reset(np.array([True, False]))
+                self.assertEqual(environment.step_behavior_events()[0, 0, 0], 0)
+
+    def test_missed_attack_ready_time_uses_selected_weapon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+            for player, weapon in zip(definition["players"], ("minecraft:mace", "minecraft:diamond_sword")):
+                player["loadout"] = {"weapons": [weapon] + ["minecraft:air"] * 8,
+                                     "selected": 0, "offhand": "minecraft:air"}
+            path = Path(directory) / "ready-time.json"
+            path.write_text(json.dumps(definition), encoding="utf-8")
+            weights = {name: 0.0 for name in REWARD_NAMES}
+            weights.update(missed_attack=-0.25, missed_attack_ready_time=-0.6)
+            with Environment(1, environment=path, weights=weights) as environment:
+                actions = neutral(1)
+                actions[0, :, 3] = 1
+                _, rewards, _, _ = environment.step(actions)
+                self.assertAlmostEqual(float(rewards[0, 0]), -0.25 - 0.6 / (4.0 + float(np.float32(-3.4))), places=5)
+                self.assertAlmostEqual(float(rewards[0, 1]), -0.25 - 0.6 / (4.0 + float(np.float32(-2.4))), places=5)
+                self.assertAlmostEqual(environment.reward_totals()["missed_attack"], -0.5)
+                self.assertAlmostEqual(environment.reward_totals()["missed_attack_ready_time"],
+                                       float(rewards.sum()) + 0.5, places=5)
+                environment.reset()
+                self.assertEqual(environment.step_reward_totals()["missed_attack_ready_time"], 0)
+
     def test_optional_combat_and_win_speed_weights(self):
         additions = {"missed_attack": -0.1, "shield_disabled": 2.0, "win_speed": 20.0,
                  "arrow_progress": 1.0}
@@ -506,10 +604,10 @@ class TrainingChecks(unittest.TestCase):
     def test_native_build_contract_diagnostics(self):
         with Environment(1) as environment:
             self.assertTrue(Path(environment.build_info["library_path"]).is_file())
-            self.assertEqual(environment.build_info["abi"], 4)
+            self.assertEqual(environment.build_info["abi"], 5)
             self.assertEqual(len(environment.build_info["source_hash"]), 64)
-            self.assertEqual(environment.build_info["reward_inputs"], {"base": 10, "shaping": 5})
-            self.assertEqual(environment.build_info["reward_totals"], {"base": 11, "shaping": 5})
+            self.assertEqual(environment.build_info["reward_inputs"], {"base": 10, "events": 2, "shaping": 5})
+            self.assertEqual(environment.build_info["reward_totals"], {"base": 13, "shaping": 5})
         with mock.patch("simulator.training.environment.CATALOGUE_HASH", "0" * 64):
             with self.assertRaisesRegex(RuntimeError, "catalogue differs"):
                 Environment(1)
@@ -648,6 +746,14 @@ class TrainingChecks(unittest.TestCase):
                 subprocess.run(["powershell", "-NoProfile", "-File", str(ROOT / "scripts/train.ps1"),
                                 "-Resume", str(checkpoint), "-ReplayEvery", "4", "-DryRun"], cwd=ROOT, check=True,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def test_mace_scenario_loadout(self):
+        definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        definition["players"][0]["loadout"] = {"weapons": ["minecraft:mace"]}
+        definition["rules"] = {"simulate_fall_damage": True}
+        resolved = resolve_scenario(definition)
+        self.assertEqual(resolved["players"][0]["loadout"]["weapons"], ["minecraft:mace"])
+        self.assertIs(resolved["rules"]["simulate_fall_damage"], True)
 
     def test_scenario_rejects_unsupported_conditions(self):
         definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
@@ -1133,9 +1239,9 @@ class TrainingChecks(unittest.TestCase):
 
     def test_old_native_reward_abi_requires_rebuild(self):
         with mock.patch("simulator.training.environment.ctypes.CDLL") as library:
-            for version in (1, 2, 3):
+            for version in (1, 2, 3, 4):
                 library.return_value.mcsim_api_version.return_value = version
-                with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "rebuild for arrow-progress rewards"):
+                with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "rebuild for wind event rewards"):
                     Environment(1)
 
     def test_shield_block_reward_excludes_axes(self):

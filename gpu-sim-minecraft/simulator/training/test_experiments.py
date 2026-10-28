@@ -264,6 +264,24 @@ class ExperimentChecks(unittest.TestCase):
     def resolve(self):
         return resolve_plan(self.raw, base_dir=self.plan_path.parent)
 
+    def test_arena_fall_damage_rule_roundtrip(self):
+        self.arena["rules"] = {"simulate_fall_damage": True}
+        self.write()
+        resolved = self.resolve()
+        for condition in [*resolved["stages"], *resolved["evaluations"].values()]:
+            rules = condition["scenario"]["arenas"][0]["environment"]["rules"]
+            self.assertEqual(rules, {"simulate_food": False, "natural_regeneration": False,
+                                     "simulate_fall_damage": True})
+        self.assertEqual(resolve_plan(resolved), resolved)
+        self.arena["rules"]["simulate_fall_damage"] = False
+        self.write()
+        self.assertNotIn("simulate_fall_damage", self.resolve()["scenario"]["arenas"][0]["environment"]["rules"])
+        for value in (1, "true", None):
+            self.arena["rules"]["simulate_fall_damage"] = value
+            self.write()
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.resolve()
+
     def test_explicit_files_and_canonical_runtime_contract(self):
         resolved = self.resolve()
         self.assertEqual(resolved["format"], "minecraft_sim_experiment")

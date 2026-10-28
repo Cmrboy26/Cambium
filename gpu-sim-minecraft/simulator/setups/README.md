@@ -170,6 +170,8 @@ An episode is one duel, ending in a loss or at `task.max_ticks`.
 | `episode_timeout` | Tick limit reached without a loss | Full weight once for each player at timeout |
 | `no_damage_penalty` | You dealt no actual health damage during a timed-out duel | Full weight once at timeout, in addition to `episode_timeout`; not applied on death/arena loss |
 | `missed_attack` | An attempted swing targets no player, including swings into blocks | Full weight per miss; normally negative. No penalty for shield contact, absorption, damage immunity or suppressed attack inputs |
+| `missed_attack_ready_time` | The same missed swings, weighted by the selected weapon's recharge time | `weight / attack_speed` per miss, in seconds; normally negative. This is separate from `missed_attack` |
+| `wind_self_launch` | Upward velocity added by the player's own wind-charge explosion | `weight * positive_delta_y` per explosion, in blocks/tick. Another player's explosion and downward impulse earn nothing |
 | `shield_disabled` | Your attack actually disables the opponent's active shield | Full weight to the attacker once per disable; selecting an axe or hitting an already-disabled shield earns nothing; no per-duel cap |
 | `win_speed` | Win sooner within the tick limit | Once on a win: `weight * max(0, 1 - elapsed_ticks / max_ticks)`, added to `won_duel`; zero for losses, simultaneous losses and timeouts |
 | `blocked_with_shield` | You actually block a non-axe hit | Full weight per block; repeated blocks can exceed the weight over a duel; holding a shield or blocking an axe pays nothing |
@@ -265,8 +267,13 @@ opponent performance. See [controller/evaluation details](../training/AGENTS.md#
 Each stage starts from its declared environment, not the previous stage's patches.
 Local evaluation suites inherit their stage and use stage-local update intervals.
 Top-level suites use global intervals; `stage` pins conditions to a named stage.
-Use suite `overrides` for changed conditions. Threshold metrics are `win_rate` or
-`reward_mean` (mean episode return, not training's mean per-step reward).
+Use suite `overrides` for changed conditions. Threshold metrics include `win_rate`,
+`reward_mean`, `self_launch_rate`, `mace_smash_rate` and `launch_smash_rate`.
+Rates count episodes with at least one qualifying event. A launch requires an own
+wind impulse of at least 0.2 blocks/tick; a launch-to-smash requires an accepted
+falling mace hit within 80 ticks of that launch during the same uninterrupted
+flight. See the [evaluation contract](../training/AGENTS.md#stages-evaluation-and-checkpoints)
+for reset and timing details. `reward_mean` is episode return, not mean tick reward.
 
 Retained policy saves are opt-in: inside a stage, add
 `"snapshots":[{"name":"combat-100","at_updates":100}]` to save after 100 stage updates.

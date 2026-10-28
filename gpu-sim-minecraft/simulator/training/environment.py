@@ -19,10 +19,11 @@ BASE_REWARD_NAMES = ("doing_damage", "taking_damage", "won_duel", "death",
                      "episode_timeout", "no_damage_penalty", "missed_attack",
                      "shield_disabled", "win_speed", "arrow_progress")
 SHAPING_REWARD_NAMES = ("good_aim", "proximity", "pitch_control", "aim_hold", "extreme_pitch_penalty")
-REWARD_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield", *SHAPING_REWARD_NAMES)
-REWARD_TYPE_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield")
+EVENT_REWARD_NAMES = ("wind_self_launch", "missed_attack_ready_time")
+REWARD_TYPE_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield", *EVENT_REWARD_NAMES)
+REWARD_NAMES = (*REWARD_TYPE_NAMES, *SHAPING_REWARD_NAMES)
 DEFAULT_REWARD_WEIGHTS = json.loads(Path(__file__).with_name("reward_weights.json").read_text(encoding="utf-8"))
-REWARD_SEMANTICS = "opponent_damage_bow_aim_projectile_progress_episode_budgets_v5"
+REWARD_SEMANTICS = "wind_launch_ready_time_episode_budgets_v6"
 
 
 def resolve_max_ticks(environment=None, override=None):
@@ -70,14 +71,14 @@ def load_library(library=None, device="cpu"):
         try:
             native = ctypes.CDLL(str(path))
             native.mcsim_api_version.restype = ctypes.c_int
-            if native.mcsim_api_version() != 4:
-                raise RuntimeError("Unsupported training library ABI; rebuild for arrow-progress rewards")
+            if native.mcsim_api_version() != 5:
+                raise RuntimeError("Unsupported training library ABI; rebuild for wind event rewards")
             native.mcsim_build_info.restype = ctypes.c_char_p
             build_info = json.loads(native.mcsim_build_info())
             if build_info.get("catalogue_hash") != CATALOGUE_HASH:
                 raise RuntimeError("Native policy catalogue differs from Python; rebuild the selected library")
             expected_layout = {"scalar_bytes": {"observation": 4, "action": 4, "reward_total": 8, "done": 1},
-                               "reward_inputs": {"base": len(BASE_REWARD_NAMES), "shaping": len(SHAPING_REWARD_NAMES)},
+                               "reward_inputs": {"base": len(BASE_REWARD_NAMES), "events": len(EVENT_REWARD_NAMES), "shaping": len(SHAPING_REWARD_NAMES)},
                                "reward_totals": {"base": len(REWARD_TYPE_NAMES), "shaping": len(SHAPING_REWARD_NAMES)},
                                "players_per_environment": 2}
             if any(build_info.get(name) != value for name, value in expected_layout.items()):
@@ -149,6 +150,9 @@ class Environment:
             raise RuntimeError("Rebuild minecraft_sim_training to enable shaping rewards")
         set_shaping_rewards.argtypes = [pointer, pointer]
         set_shaping_rewards.restype = ctypes.c_int
+        set_event_rewards = self.native.mcsim_set_event_rewards
+        set_event_rewards.argtypes = [pointer, pointer]
+        set_event_rewards.restype = ctypes.c_int
         self.native.mcsim_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p,
                                             ctypes.c_int, ctypes.c_uint64, pointer]
         self.native.mcsim_create.restype = pointer
@@ -192,7 +196,9 @@ class Environment:
             self.close()
             raise RuntimeError(f"Native batch layout differs from policy: {native_layout} != {expected_layout}")
         shaping_weights = reward_weights[-len(SHAPING_REWARD_NAMES):]
+        event_weights = np.array([self.effective_weights[name] for name in EVENT_REWARD_NAMES], dtype=np.float32)
         for setter, value in ((set_block_reward, self.weights["blocked_with_shield"]),
+                      (set_event_rewards, event_weights.ctypes.data),
                               (set_shaping_rewards, shaping_weights.ctypes.data)):
             if setter(self._handle, value) != 0:
                 error = self.native.mcsim_last_error().decode("utf-8", errors="replace")
@@ -291,6 +297,17 @@ class Environment:
         totals = np.empty(len(REWARD_NAMES), dtype=np.float64)
         self._check(function(self._handle, None if selected is None else selected.ctypes.data, totals.ctypes.data))
         return dict(zip(REWARD_NAMES, totals.tolist()))
+
+    def step_behavior_events(self):
+        self._require_open()
+        if self.build_info.get("behavior_events_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training to enable behavior evaluation")
+        function = self.native.mcsim_step_behavior_events
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        events = np.empty((self.count, 2, 3), dtype=np.float32)
+        self._check(function(self._handle, events.ctypes.data))
+        return events
 
     def losses(self, mask):
         self._require_open()
@@ -395,6 +412,8 @@ class Environment:
         base.restype = ctypes.c_int
         self._check(base(self._handle, values.ctypes.data))
         self._check(self.native.mcsim_set_block_reward(self._handle, resolved["blocked_with_shield"]))
+        events = np.array([effective[name] for name in EVENT_REWARD_NAMES], dtype=np.float32)
+        self._check(self.native.mcsim_set_event_rewards(self._handle, events.ctypes.data))
         shaping = np.array([effective[name] for name in SHAPING_REWARD_NAMES], dtype=np.float32)
         self._check(self.native.mcsim_set_shaping_rewards(self._handle, shaping.ctypes.data))
         self.weights, self.effective_weights = resolved, effective

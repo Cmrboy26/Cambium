@@ -5,6 +5,10 @@
 	"client": [
 		"ArrowStateAccess",
 		"ArrowTrackingMixin",
+		"EggTrackingMixin",
+		"SnowballTrackingMixin",
+		"PearlTrackingMixin",
+		"WindTrackingMixin",
 		"DisplayAccess",
 		"ItemDisplayAccess",
 		"LivingEntityRecordingAccessor",

@@ -116,6 +116,7 @@ final class ControlPanel extends Screen {
 	}
 
 	void remoteChanged() { if (width > 0) rebuildWidgets(); }
+	void imported(String run) { libraryRun = run; selectedPolicy = ""; refreshLibrary(); }
 
 	@Override
 	public void tick() {
@@ -197,12 +198,13 @@ final class ControlPanel extends Screen {
 	}
 
 	private void shelf() {
-		EditBox search = new EditBox(font, left, 64, contentWidth - 84, 20, Component.literal("Search local policies"));
+		EditBox search = new EditBox(font, left, 64, contentWidth - 168, 20, Component.literal("Search local policies"));
 		search.setHint(Component.literal("Search local policies"));
 		search.setValue(query);
 		addRenderableWidget(search);
 		search.setResponder(value -> { query = value; page = 0; rebuildWidgets(); });
 		setInitialFocus(search);
+		button("Import", left + contentWidth - 164, 64, 80, this::importPolicy).active = !RosieLauncher.isBusy();
 		button("Refresh", left + contentWidth - 80, 64, 80, this::refreshLibrary);
 		String filter = query.toLowerCase(Locale.ROOT);
 		List<JsonObject> entries = library == null ? List.of() : library.runs.stream().filter(entry -> name(entry).toLowerCase(Locale.ROOT).contains(filter)
@@ -235,6 +237,27 @@ final class ControlPanel extends Screen {
 		button("Name run", left + 3 * (actionWidth + 4), height - 30, actionWidth,
 				() -> minecraft.gui.setScreen(new RenameScreen(library.find(library.runs, libraryRun))))
 				.active = !RosieLauncher.isBusy() && library != null && library.find(library.runs, libraryRun) != null;
+	}
+
+	private void importPolicy() {
+		Object level = minecraft.level;
+		java.awt.EventQueue.invokeLater(() -> {
+			try {
+				java.awt.FileDialog dialog = new java.awt.FileDialog((java.awt.Frame) null, "Import policy", java.awt.FileDialog.LOAD);
+				dialog.setFilenameFilter((directory, filename) -> filename.toLowerCase(Locale.ROOT).endsWith(".pt"));
+				dialog.setVisible(true);
+				String file = dialog.getFile();
+				String directory = dialog.getDirectory();
+				dialog.dispose();
+				if (file != null && directory != null) minecraft.execute(() -> {
+					if (minecraft.gui.screen() == this && minecraft.level == level) {
+						RosieLauncher.start(minecraft, "import", "latest", java.nio.file.Path.of(directory, file).toString());
+					}
+				});
+			} catch (RuntimeException error) {
+				minecraft.execute(() -> { status = "File picker: " + error.getMessage(); });
+			}
+		});
 	}
 
 	private void selectVersion() {

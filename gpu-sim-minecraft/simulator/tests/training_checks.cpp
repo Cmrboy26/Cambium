@@ -45,7 +45,7 @@ void checkResetPlayers(const char* environment, int cuda) {
     const std::array<float, 10> weights{};
     Handle handle(mcsim_create_contract(3, cuda, environment, 100, 123, weights.data(), descriptor.c_str()), mcsim_destroy);
     require(handle != nullptr, "create all-equipment descriptor batch using a two-slot environment");
-    require(mcsim_api_version() == 4, "current training library exposes ABI 4");
+    require(mcsim_api_version() == 5, "current training library exposes ABI 5");
     require(mcsim_set_profiling(nullptr, 1) == -1, "profiling rejects null handles");
     require(mcsim_set_profiling(handle.get(), 2) == -1, "profiling requires a boolean flag");
     require(mcsim_profile(nullptr) == nullptr, "profile rejects null handles");
@@ -218,7 +218,7 @@ void checkStepRewardTotals(int cuda) {
     const std::array<float, 10> weights{0, 0, 0, 0, -3, -7};
     Handle handle(mcsim_create_schema(2, cuda, nullptr, 1, 1, weights.data(), 1), mcsim_destroy);
     require(handle != nullptr, "create selected-player reward batch");
-    std::array<double, 16> totals{};
+    std::array<double, 18> totals{};
     require(mcsim_step_reward_totals(handle.get(), nullptr, totals.data()) == 0,
         "query initial step reward contributions");
     for (double amount : totals) require(amount == 0, "initial reward contributions are zero");
@@ -281,6 +281,58 @@ void checkMaxTicks(int cuda) {
         && truncated == 1, "stage-boundary reset uses replacement timeout");
     require(scenario(handle.get(), 0)["blocks"] == terrain, "timeout changes never rebuild terrain");
     std::cout << "PASS: bounded additive episode timeout replacement without terrain rebuild\n";
+}
+
+void checkFallDamageReset(const char* environment, int cuda) {
+    json descriptor{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1}, {"observations", {{{"feature", "self.health_fraction"}}}},
+        {"actions", {{{"name", "jump"}, {"values", {false, true}}}}}};
+    const std::array<float, 10> weights{};
+    const auto contract = descriptor.dump();
+    Handle seed(mcsim_create_contract(1, cuda, environment, 100, 1, weights.data(), contract.c_str()), mcsim_destroy);
+    require(seed != nullptr, "create fall-damage test seed");
+    auto definition = scenario(seed.get(), 0);
+    definition["rules"]["simulate_fall_damage"] = true;
+    definition["bounds"]["size"][1] = 12;
+    definition["players"][0]["position"][1] = 8.0;
+    definition["players"][0]["velocity"] = {0.0, 0.0, 0.0};
+    definition["players"][0]["on_ground"] = false;
+    const std::string path = cuda ? "training-fall-cuda.json" : "training-fall-cpu.json";
+    {
+        std::ofstream output(path);
+        require(static_cast<bool>(output), "open fall-damage test environment");
+        output << definition;
+    }
+    Handle handle(mcsim_create_contract(2, cuda, path.c_str(), 100, 1, weights.data(), contract.c_str()), mcsim_destroy);
+    std::filesystem::remove(path);
+    require(handle != nullptr, "create fall-damage training batch");
+    require(scenario(handle.get(), 0)["rules"]["simulate_fall_damage"] == true,
+        "resolved scenario preserves opt-in fall damage");
+    std::array<int32_t, 4> actions{};
+    std::array<float, 4> observations{}, rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    const auto step = [&] {
+        for (int tick = 0; tick < 25; ++tick) {
+            require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(),
+                terminated.data(), truncated.data()) == 0, "step fall-damage training batch");
+        }
+    };
+    step();
+    require(frame(handle.get(), 0)["actors"][0]["health"].get<float>() < 20.0F,
+        "enabled fall damage affects training gameplay");
+    const auto other_world = frame(handle.get(), 1);
+    const std::array<uint8_t, 2> selected{1, 0};
+    require(mcsim_reset(handle.get(), selected.data(), observations.data()) == 0, "selective fall-damage reset");
+    require(frame(handle.get(), 1) == other_world, "selective reset leaves the other fall-damage world unchanged");
+    step();
+    require(frame(handle.get(), 0)["actors"][0]["health"].get<float>() < 20.0F,
+        "selective reset preserves fall-damage rule");
+    require(mcsim_reset(handle.get(), nullptr, observations.data()) == 0, "full fall-damage reset");
+    step();
+    for (int index = 0; index < 2; ++index) {
+        require(frame(handle.get(), index)["actors"][0]["health"].get<float>() < 20.0F,
+            "full reset preserves fall-damage rule in each world");
+    }
 }
 
 void checkEmptySlots(const char* environment, int cuda) {
@@ -417,6 +469,146 @@ void checkArrowObservation() {
     }
 }
 
+void checkThrownObservation() {
+    minecraft_sim::PlayerState source, target;
+    source.snowball_count = 1;
+    source.egg_count = 0;
+    std::array<float, minecraft_sim::app::feature_names.size()> catalogue{};
+    minecraft_sim::app::equipmentObservation(catalogue.data(), source, target,
+        {minecraft_sim::WeaponItem::snowball, minecraft_sim::WeaponItem::egg});
+    require(catalogue[43] == 1.0F && catalogue[47] == 0.0F,
+        "equipment observation hides depleted throwable stacks");
+}
+
+void checkWindAdapter(const char* environment, int cuda) {
+    json descriptor{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1}, {"observations", {{{"feature", "self.weapon_slot_0.present"}}}},
+        {"actions", {{{"name", "use_item"}, {"values", {false, true}}}}}};
+    const std::array<float, 10> weights{};
+    const auto contract = descriptor.dump();
+    Handle seed(mcsim_create_contract(1, cuda, environment, 100, 1, weights.data(), contract.c_str()), mcsim_destroy);
+    require(seed != nullptr, "create wind test seed");
+    auto definition = scenario(seed.get(), 0);
+    definition["players"][0]["loadout"] = {{"weapons", {"minecraft:wind_charge", "minecraft:mace"}}, {"wind_charges", 1}};
+    definition["players"][0]["pitch"] = 90;
+    const std::string path = cuda ? "training-wind-cuda.json" : "training-wind-cpu.json";
+    {
+        std::ofstream output(path);
+        require(static_cast<bool>(output), "open wind test environment");
+        output << definition;
+    }
+    Handle handle(mcsim_create_contract(2, cuda, path.c_str(), 100, 1, weights.data(), contract.c_str()), mcsim_destroy);
+    std::filesystem::remove(path);
+    require(handle != nullptr, "create wind training batch");
+    require(scenario(handle.get(), 0)["players"][0]["loadout"]["wind_charges"] == 1, "wind count survives scenario resolution");
+    const std::array<float, 2> event_weights{2.5F, 0.0F};
+    require(mcsim_set_event_rewards(handle.get(), event_weights.data()) == 0, "set wind reward weights");
+    std::array<int32_t, 4> actions{1, 0, 0, 0};
+    std::array<float, 4> observations{}, rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(), terminated.data(), truncated.data()) == 0,
+        "step wind training batch");
+    const auto wind_frame = frame(handle.get(), 0);
+    require(observations[0] == 0.0F && wind_frame["actors"][0]["weapon"] == "minecraft:air"
+        && wind_frame["actors"][0]["wind_charge_count"] == 0 && wind_frame["actors"][0]["wind_charge_cooldown"] > 0
+        && wind_frame["projectiles"].size() == 1 && wind_frame["projectiles"][0]["type"] == "wind_charge",
+        "wind use depletes slot and records projectile and cooldown");
+    const auto other_world = frame(handle.get(), 1);
+    const std::array<uint8_t, 2> selected{1, 0};
+    require(mcsim_reset(handle.get(), selected.data(), observations.data()) == 0
+        && observations[0] == 1.0F && frame(handle.get(), 1) == other_world,
+        "selective wind reset restores only selected world");
+    require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(), terminated.data(), truncated.data()) == 0
+        && frame(handle.get(), 0)["actors"][0]["wind_charge_count"] == 0,
+        "reset wind storage permits another throw");
+    actions.fill(0);
+    float launch_total = 0.0F;
+    for (int tick = 0; tick < 10; ++tick) {
+        require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(), terminated.data(), truncated.data()) == 0,
+            "advance wind explosion");
+        std::array<float, 12> events{};
+        require(mcsim_step_behavior_events(handle.get(), events.data()) == 0, "read wind behavior events");
+        require(std::abs(rewards[0] - events[0] * 2.5F) < 1e-5F && events[3] == 0.0F
+            && events[6] == 0.0F && events[9] == 0.0F, "wind event reward is owner and world isolated");
+        launch_total += events[0];
+    }
+    require(launch_total > 0.2F, "downward charge records an actual upward self impulse");
+    auto reset_definitions = json::array({definition["players"]});
+    require(mcsim_reset_players(seed.get(), nullptr, reset_definitions.dump().c_str(), observations.data()) != 0
+        && std::string(mcsim_last_error()).find("initial wind charge loadout") != std::string::npos,
+        "a batch without wind storage rejects wind reset loadouts");
+}
+
+void checkThrownAdapter(const char* environment, int cuda) {
+    json descriptor{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1}, {"observations", {{{"feature", "self.weapon_slot_0.present"}}}},
+        {"actions", {{{"name", "use_item"}, {"values", {false, true}}}}}};
+    const std::array<float, 10> weights{};
+    const auto contract = descriptor.dump();
+    Handle seed(mcsim_create_contract(1, cuda, environment, 100, 1, weights.data(), contract.c_str()), mcsim_destroy);
+    require(seed != nullptr, "create throwable test seed");
+    auto definition = scenario(seed.get(), 0);
+    definition["players"][0]["loadout"] = {{"weapons", {"minecraft:snowball", "minecraft:egg"}},
+        {"snowballs", 1}, {"eggs", 2}};
+    const std::string path = cuda ? "training-thrown-cuda.json" : "training-thrown-cpu.json";
+    {
+        std::ofstream output(path);
+        require(static_cast<bool>(output), "open throwable test environment");
+        output << definition;
+    }
+    Handle handle(mcsim_create_contract(2, cuda, path.c_str(), 100, 1, weights.data(), contract.c_str()), mcsim_destroy);
+    std::filesystem::remove(path);
+    require(handle != nullptr, "create throwable training batch");
+    require(scenario(handle.get(), 0)["players"][0]["loadout"]["eggs"] == 2,
+        "scenario preserves throwable stack counts");
+    std::array<int32_t, 4> actions{1, 0, 1, 0};
+    std::array<float, 4> observations{}, rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    const auto step = [&] {
+        require(mcsim_step(handle.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0, "step throwable training batch");
+    };
+    step();
+    const auto thrown_frame = frame(handle.get(), 0);
+    require(observations[0] == 0.0F && observations[2] == 0.0F
+        && thrown_frame["actors"][0]["weapon"] == "minecraft:air"
+        && thrown_frame["actors"][0]["snowball_count"] == 0
+        && thrown_frame["actors"][0]["egg_count"] == 2
+        && thrown_frame["projectiles"].size() == 1 && thrown_frame["projectiles"][0]["type"] == "snowball",
+        "throwing the last snowball empties the selected slot in training");
+    const auto other_world = frame(handle.get(), 1);
+    const std::array<uint8_t, 2> selected{1, 0};
+    require(mcsim_reset(handle.get(), selected.data(), observations.data()) == 0,
+        "selectively reset throwable training batch");
+    require(observations[0] == 1.0F && frame(handle.get(), 1) == other_world,
+        "selective reset restores inventory without changing the other world");
+    step();
+    require(observations[0] == 0.0F, "reset projectile storage permits another throw");
+    require(mcsim_reset(handle.get(), nullptr, observations.data()) == 0
+        && observations[0] == 1.0F && observations[2] == 1.0F,
+        "full reset restores both throwable inventories");
+
+    auto pearl_definitions = json::array({scenario(handle.get(), 0)["players"], scenario(handle.get(), 1)["players"]});
+    for (auto& players : pearl_definitions) {
+        players[0]["loadout"] = {{"weapons", {"minecraft:ender_pearl"}}, {"ender_pearls", 2}};
+    }
+    require(mcsim_reset_players(handle.get(), nullptr, pearl_definitions.dump().c_str(), observations.data()) == 0,
+        "reset throwable batch to pearl loadouts");
+    step();
+    const auto pearl_frame = frame(handle.get(), 0);
+    require(pearl_frame["actors"][0]["ender_pearl_count"] == 1
+        && pearl_frame["actors"][0]["ender_pearl_cooldown"] > 0
+        && pearl_frame["projectiles"].size() == 1 && pearl_frame["projectiles"][0]["type"] == "ender_pearl",
+        "pearl use and cooldown appear in training replay");
+    require(mcsim_reset(handle.get(), nullptr, observations.data()) == 0
+        && frame(handle.get(), 0)["actors"][0]["ender_pearl_count"] == 2
+        && frame(handle.get(), 0)["actors"][0]["ender_pearl_cooldown"] == 0,
+        "reset restores pearl inventory and cooldown");
+    require(mcsim_reset_players(seed.get(), nullptr, json::array({pearl_definitions[0]}).dump().c_str(), observations.data()) != 0
+        && std::string(mcsim_last_error()).find("initial throwable loadout") != std::string::npos,
+        "a batch created without throwable storage rejects throwable reset loadouts");
+}
+
 void checkBowAdapter(const char* environment, int cuda) {
     constexpr std::array<const char*, 13> features{
         "self.arrow_count_fraction", "self.bow_using", "self.bow_power_fraction",
@@ -541,7 +733,7 @@ void checkBowAdapter(const char* environment, int cuda) {
         && blocked_frame["actors"][1]["health"] == 20.0
         && blocked_frame["projectiles"].size() == 1,
         "delayed ordinary arrow damages health, while an active shield deflects without health loss");
-    std::array<double, 16> totals{};
+    std::array<double, 18> totals{};
     const std::array<uint8_t, 4> hit_world{1, 1, 0, 0};
     require(mcsim_step_reward_totals(handle.get(), hit_world.data(), totals.data()) == 0
         && std::abs(totals[0] - 2.0 * health_lost / 20.0) < 1.0e-6
@@ -579,8 +771,12 @@ int main(int argc, char** argv) {
         const int cuda = argc == 3 ? 1 : 0;
         if (cuda && !mcsim_cuda_available()) return 77;
         checkResetPlayers(argv[1], cuda);
+        checkFallDamageReset(argv[1], cuda);
         checkEmptySlots(argv[1], cuda);
         checkArrowObservation();
+        checkThrownObservation();
+        checkWindAdapter(argv[1], cuda);
+        checkThrownAdapter(argv[1], cuda);
         checkBowAdapter(argv[1], cuda);
         checkRewardWeights(cuda);
         checkStepRewardTotals(cuda);

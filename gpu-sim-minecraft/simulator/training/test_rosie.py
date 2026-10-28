@@ -1323,6 +1323,65 @@ class RosieTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not cached"):
             offline.replay("rosie-123", manifest)
 
+    def test_import_local_checkpoint_indexes_policy_and_environment(self):
+        import torch
+        from backend.fast_rl_model import ActorCritic
+        from simulator.training.environment import ROOT, SCHEMA
+
+        environment = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        source = self.root / "my policy.pt"
+        torch.save({"format": "minecraft_sim_ppo", "version": 1, "update": 42,
+                    "metadata": {"schema": SCHEMA, "hidden_dim": 8, "max_ticks": 300,
+                                 "players_per_environment": 2, "learner": "both_shared_policy",
+                                 "environment": environment},
+                    "model": ActorCritic(22, 8, 9).state_dict()}, source)
+        with patch.object(self.rosie, "ssh_command", side_effect=AssertionError("import contacted Rosie")):
+            library = self.rosie.import_checkpoint(source)
+        self.assertEqual(len(library["policies"]), 1)
+        self.assertEqual(library["policies"][0]["update"], 42)
+        self.assertEqual(library["policies"][0]["name"], "my policy")
+        self.assertEqual(library["runs"][0]["name"], "my policy")
+        self.assertEqual(len(library["environments"]), 1)
+        self.assertEqual(Path(library["policies"][0]["path"]).read_bytes(), source.read_bytes())
+        before = (self.rosie.cache / "library.json").read_bytes()
+        invalid = self.root / "invalid.pt"
+        torch.save({"format": "other"}, invalid)
+        with self.assertRaises(ValueError):
+            self.rosie.import_checkpoint(invalid)
+        self.assertEqual((self.rosie.cache / "library.json").read_bytes(), before)
+        self.assertEqual(len(list(self.rosie.cache.glob("import-*"))), 1)
+
+    def test_import_command_needs_no_rosie_configuration(self):
+        import torch
+        from backend.fast_rl_model import ActorCritic
+        from simulator.training.environment import ROOT, SCHEMA
+
+        environment = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        source = self.root / "local policy.pt"
+        torch.save({"format": "minecraft_sim_ppo", "version": 1,
+                    "metadata": {"schema": SCHEMA, "hidden_dim": 8, "max_ticks": 300,
+                                 "players_per_environment": 2, "learner": "both_shared_policy",
+                                 "environment": environment},
+                    "model": ActorCritic(22, 8, 9).state_dict()}, source)
+        fresh_game = self.root / "fresh game"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["import", "--checkpoint", str(source), "--minecraft-directory", str(fresh_game), "--json"])
+        self.assertEqual(result, 0, output.getvalue())
+        event = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(event["event"], "imported")
+        self.assertEqual(event["name"], "local policy")
+        self.assertTrue((fresh_game / "sim-rosie-cache" / "library.json").is_file())
+
+    def test_inference_build_command_uses_absolute_data_paths(self):
+        from simulator.training.build_inference import ROOT, build_command, platform_name
+
+        command = build_command()
+        self.assertIn("--onefile", command)
+        self.assertTrue(any(str(ROOT / "contracts/policy_catalogue.json") in item for item in command))
+        self.assertTrue(any(str(ROOT / "simulator/training/reward_weights.json") in item for item in command))
+        self.assertRegex(platform_name(), r"^(windows|linux|macos)-(x86_64|arm64)$")
+
     def test_named_snapshot_sync_and_persistent_local_library(self):
         import torch
         from backend.fast_rl_model import ActorCritic

@@ -52,16 +52,19 @@ struct TrainingBatch {
     std::vector<WorldState> worlds;
     std::vector<ProjectileWorldState> projectile_states;
     std::vector<ArrowState> projectile_arrows;
+    std::vector<ThrownProjectileState> projectile_thrown;
+    std::vector<WindChargeState> projectile_wind;
     std::vector<ArrowObservationSummary> arrow_summaries;
     std::vector<BlockWorldView> blocks;
     std::vector<std::uint8_t> finished;
     std::vector<std::uint8_t> dealt_damage;
     std::vector<std::uint64_t> episodes;
     std::vector<int> observed_opponent_disable;
-    std::vector<std::array<double, 16>> step_reward_totals;
+    std::vector<std::array<double, 18>> step_reward_totals;
     std::array<float, 10> weights;
     float block_weight = 0.0F;
-    std::array<double, 11> reward_totals{};
+    std::array<double, 13> reward_totals{};
+    std::array<float, 2> event_weights{};
     std::array<float, 5> shaping_weights{};
     std::array<double, 5> shaping_totals{};
     std::uint64_t seed;
@@ -114,10 +117,28 @@ struct TrainingBatch {
         }
         scenario = terrain.resolvedDefinition().dump();
         std::copy_n(reward_weights, weights.size(), weights.begin());
+        bool has_throwables = false;
+        bool has_wind = false;
+        for (const auto& player : terrain.initial_players) {
+            has_throwables = has_throwables || player.snowball_count > 0 || player.egg_count > 0 || player.ender_pearl_count > 0;
+            has_wind = has_wind || player.wind_charge_count > 0;
+        }
+        constexpr int thrown_capacity = 96;
+        constexpr int wind_capacity = 128;
+        if (has_throwables) projectile_thrown.resize(std::size_t(count) * thrown_capacity);
+        if (has_wind) projectile_wind.resize(std::size_t(count) * wind_capacity);
         for (int environment = 0; environment < count; ++environment) {
             projectile_states[environment].arrows = projectile_arrows.data()
                 + std::size_t(environment) * projectile_arrow_capacity;
             projectile_states[environment].arrow_capacity = projectile_arrow_capacity;
+            if (has_throwables) {
+                projectile_states[environment].thrown_items = projectile_thrown.data() + std::size_t(environment) * thrown_capacity;
+                projectile_states[environment].thrown_item_capacity = thrown_capacity;
+            }
+            if (has_wind) {
+                projectile_states[environment].wind_charges = projectile_wind.data() + std::size_t(environment) * wind_capacity;
+                projectile_states[environment].wind_charge_capacity = wind_capacity;
+            }
         }
         reset(nullptr);
         if (use_cuda) {
@@ -165,6 +186,7 @@ struct TrainingBatch {
             }
             ids.push_back(environment);
             worlds[environment] = {};
+            worlds[environment].simulate_fall_damage = terrain.worlds[0].simulate_fall_damage;
             finished[environment] = 0;
             const auto episode = episodes[environment]++;
             resetProjectileWorld(projectile_states[environment],
@@ -210,6 +232,20 @@ struct TrainingBatch {
                 continue;
             }
             auto parsed = terrain.parsePlayers(definitions[environment], true);
+            if (projectile_thrown.empty()) {
+                for (const auto& player : parsed.players) {
+                    if (player.snowball_count > 0 || player.egg_count > 0 || player.ender_pearl_count > 0) {
+                        throw std::invalid_argument("Throwable reset loadouts require an initial throwable loadout");
+                    }
+                }
+            }
+            if (projectile_wind.empty()) {
+                for (const auto& player : parsed.players) {
+                    if (player.wind_charge_count > 0) {
+                        throw std::invalid_argument("Wind charge reset loadouts require an initial wind charge loadout");
+                    }
+                }
+            }
             for (const auto& slots : parsed.weapon_slots) {
                 if (schema_version == 2 && slots.size() != 2) {
                     throw std::invalid_argument("Equipment preset requires two weapon slots");
@@ -471,7 +507,14 @@ struct TrainingBatch {
                 if (state.last_attack.attempted && state.last_attack.target < 0) {
                     rewards[index] += weights[6];
                     recordReward(index, 6, weights[6]);
+                    const double speed = state.last_attack.attack_speed;
+                    const float penalty = speed > 0.0 ? static_cast<float>(event_weights[1] / speed) : 0.0F;
+                    rewards[index] += penalty;
+                    recordReward(index, 12, penalty);
                 }
+                const float launch_reward = static_cast<float>(event_weights[0] * worlds[environment].wind_self_launch[player]);
+                rewards[index] += launch_reward;
+                recordReward(index, 11, launch_reward);
                 if (state.last_attack.shield_disabled) {
                     rewards[index] += weights[7];
                     recordReward(index, 7, weights[7]);
@@ -526,19 +569,20 @@ int protect(Function function) {
 }
 
 MCSIM_EXPORT const char* mcsim_last_error() { return last_error.c_str(); }
-MCSIM_EXPORT int mcsim_api_version() { return 4; }
+MCSIM_EXPORT int mcsim_api_version() { return 5; }
 MCSIM_EXPORT const char* mcsim_build_info() {
     static const std::string description = nlohmann::json{
-        {"abi", 4}, {"minecraft", "26.3"}, {"version", MCSIM_BUILD_VERSION},
+        {"abi", 5}, {"minecraft", "26.3"}, {"version", MCSIM_BUILD_VERSION},
         {"source_hash", MCSIM_SOURCE_HASH}, {"revision", MCSIM_SOURCE_REVISION},
         {"compiler", MCSIM_BUILD_COMPILER}, {"compiled", __DATE__ " " __TIME__},
         {"catalogue_hash", app::catalogue_hash}, {"capabilities", app::capability_names},
         {"observation_projection_version", 1},
+        {"behavior_events_version", 1},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
                            {"reward_total", sizeof(double)}, {"done", sizeof(std::uint8_t)}}},
-        {"reward_inputs", {{"base", 10}, {"shaping", 5}}},
-        {"reward_totals", {{"base", 11}, {"shaping", 5}}},
+        {"reward_inputs", {{"base", 10}, {"events", 2}, {"shaping", 5}}},
+        {"reward_totals", {{"base", 13}, {"shaping", 5}}},
 #if defined(MCSIM_HAS_CUDA)
         {"cuda_compiled", true}
 #else
@@ -663,6 +707,16 @@ MCSIM_EXPORT int mcsim_set_block_reward(void* handle, float weight) {
         static_cast<TrainingBatch*>(handle)->block_weight = weight;
     });
 }
+MCSIM_EXPORT int mcsim_set_event_rewards(void* handle, const float* weights) {
+    return protect([&] {
+        if (!handle || !weights) throw std::invalid_argument("Null event reward argument");
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        for (std::size_t index = 0; index < batch.event_weights.size(); ++index) {
+            if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
+        }
+        std::copy_n(weights, batch.event_weights.size(), batch.event_weights.begin());
+    });
+}
 MCSIM_EXPORT int mcsim_set_shaping_rewards(void* handle, const float* weights) {
     return protect([&] {
         if (!handle || !weights) throw std::invalid_argument("Null shaping reward argument");
@@ -709,7 +763,7 @@ MCSIM_EXPORT int mcsim_step_reward_totals(void* handle, const std::uint8_t* mask
         if (mask && std::any_of(mask, mask + batch.players.size(), [](auto value) { return value > 1; })) {
             throw std::invalid_argument("Step reward mask must contain one boolean per player");
         }
-        std::array<double, 16> selected{};
+        std::array<double, 18> selected{};
         for (std::size_t index = 0; index < batch.players.size(); ++index) {
             if (mask && !mask[index]) continue;
             for (std::size_t term = 0; term < selected.size(); ++term) {
@@ -717,6 +771,18 @@ MCSIM_EXPORT int mcsim_step_reward_totals(void* handle, const std::uint8_t* mask
             }
         }
         std::copy(selected.begin(), selected.end(), totals);
+    });
+}
+MCSIM_EXPORT int mcsim_step_behavior_events(void* handle, float* events) {
+    return protect([&] {
+        if (!handle || !events) throw std::invalid_argument("Null behavior events argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        for (std::size_t index = 0; index < batch.players.size(); ++index) {
+            const auto& player = batch.players[index];
+            events[index * 3] = static_cast<float>(batch.worlds[index / 2].wind_self_launch[index % 2]);
+            events[index * 3 + 1] = player.last_attack.mace_smash ? 1.0F : 0.0F;
+            events[index * 3 + 2] = player.on_ground ? 1.0F : 0.0F;
+        }
     });
 }
 MCSIM_EXPORT int mcsim_losses(void* handle, std::uint8_t* losses) {

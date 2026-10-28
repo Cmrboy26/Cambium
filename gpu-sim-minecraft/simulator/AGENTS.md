@@ -70,7 +70,7 @@ Pure base observation math is in `apps/observation.hpp`; raycasts and equipment
 sampling stay in the training adapter. Native `shared_core_checks` consumes the
 same [fixture file](../contracts/policy_fixtures.json) as Java/Python.
 
-The training library exports ABI 4 plus JSON `mcsim_build_info()` and
+The training library exports ABI 5 plus JSON `mcsim_build_info()` and
 `mcsim_batch_info(handle)`. Build info contains catalogue/capabilities, scalar
 widths, reward input/total counts, compiler/revision/compile time, CUDA build flag
 and SHA-256 of native headers/support sources/training entry point/CMake input.
@@ -104,15 +104,15 @@ counters or immutable terrain. Python reapplies timeout-normalized shaping
 weights. The setter does not rewrite the original scenario metadata.
 
 The additive `mcsim_step_reward_totals(handle, player_mask, totals)` returns the
-last successful tick's 15 reward contributions for selected actors. The mask
+last successful tick's 18 reward contributions for selected actors. The mask
 has `worlds*2` boolean entries; null selects both players. Resets clear selected
 worlds' last-step contributions, not cumulative batch totals. Opponent-pool
 training selects its learner actor before episode reset or side reassignment.
-ten for missed attacks, shield disables and win speed; shaping remains five.
-ABI 4 expands base reward inputs from nine to ten and base totals from ten to
-eleven for arrow progress; shaping remains five. Per-player step totals contain
-sixteen contributions. Rebuild older libraries; Python rejects earlier ABI
-versions before buffer use.
+ABI 5 uses ten base and two event reward inputs, thirteen event/base totals and
+five shaping totals. Rebuild older libraries; Python rejects earlier ABI versions
+before buffer use. `mcsim_step_behavior_events` returns three floats per player
+in world-major order: own positive wind impulse, accepted mace-smash flag and
+grounded flag. Read after stepping and before resetting selected worlds.
 
 The default remains an unarmored diamond sword without shield; v1 policies stay
 sword-only. [V2](training/AGENTS.md#swordaxeshield-v2) adds weapon/shield controls.

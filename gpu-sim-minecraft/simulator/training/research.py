@@ -216,6 +216,12 @@ class SampledWorlds:
                 totals[name] += amount
         return totals
 
+    def step_behavior_events(self):
+        result = np.empty((self.count, 2, 3), dtype=np.float32)
+        for ids, environment in self.groups:
+            result[ids] = environment.step_behavior_events()
+        return result
+
     def losses(self, mask):
         result = np.zeros((self.count, 2), dtype=bool)
         for ids, environment in self.groups:
@@ -399,6 +405,35 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
     return rollout, observations, endings, timeouts
 
 
+class BehaviorEvaluation:
+    def __init__(self, count):
+        self.launched = np.zeros(count, dtype=bool)
+        self.smashed = np.zeros(count, dtype=bool)
+        self.launch_smash = np.zeros(count, dtype=bool)
+        self.remaining = np.zeros(count, dtype=np.int32)
+        self.airborne = np.zeros(count, dtype=bool)
+
+    def step(self, events, slots):
+        selected = events[np.arange(len(slots)), slots]
+        launch = selected[:, 0] >= 0.2
+        smash = selected[:, 1] > 0
+        grounded = selected[:, 2] > 0
+        self.smashed |= smash
+        self.launch_smash |= smash & (self.remaining > 0) & self.airborne
+        self.remaining = np.maximum(0, self.remaining - 1)
+        self.airborne |= (self.remaining > 0) & ~grounded
+        landed = grounded & self.airborne
+        self.remaining[landed] = 0
+        self.airborne[landed] = False
+        self.launched |= launch
+        self.remaining[launch] = 80
+        self.airborne[launch] = ~grounded[launch]
+
+    def reset(self, mask):
+        for value in (self.launched, self.smashed, self.launch_smash, self.remaining, self.airborne):
+            value[mask] = 0
+
+
 @torch.no_grad()
 def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
     count = min(suite.get("worlds", 16), suite["episodes"])
@@ -413,6 +448,8 @@ def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
         if opponent_pool is not None:
             pool.copy_snapshots(opponent_pool)
         total = wins = finished = 0
+        behavior = BehaviorEvaluation(count)
+        launch_successes = smash_successes = launch_smash_successes = 0
         episode_rewards = np.zeros(count)
         observations = worlds.observe()
         pool.reset(np.ones(count, dtype=bool))
@@ -421,6 +458,7 @@ def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
             current = torch.as_tensor(observations[ids, pool.learner_slots], device=device)
             actions, _, _, _ = policy_actions(model, current, worlds.action_names, fixed)
             observations, rewards, terminated, truncated = worlds.step(pool.act(observations, actions.cpu().numpy()))
+            behavior.step(worlds.step_behavior_events(), pool.learner_slots)
             episode_rewards += rewards[ids, pool.learner_slots]
             done = terminated | truncated
             for world in np.flatnonzero(done):
@@ -431,12 +469,19 @@ def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
                 wins += int(terminated[world] and not _lost(frame["actors"][slot], scenario)
                             and _lost(frame["actors"][1 - slot], scenario))
                 total += float(episode_rewards[world])
+                launch_successes += int(behavior.launched[world])
+                smash_successes += int(behavior.smashed[world])
+                launch_smash_successes += int(behavior.launch_smash[world])
                 finished += 1
             if done.any() and finished < suite["episodes"]:
                 observations = worlds.reset(done)
                 pool.reset(done)
                 episode_rewards[done] = 0
+                behavior.reset(done)
         return {"win_rate": wins / suite["episodes"], "reward_mean": total / suite["episodes"],
+            "self_launch_rate": launch_successes / suite["episodes"],
+            "mace_smash_rate": smash_successes / suite["episodes"],
+            "launch_smash_rate": launch_smash_successes / suite["episodes"],
             "episodes": suite["episodes"], "worlds": count}
     finally:
         model.train(was_training)

@@ -204,7 +204,8 @@ final class LivePolicy implements AutoCloseable {
 	static Weapon weapon(ItemStack stack) {
 		String name = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
 		boolean axe = name.endsWith("_axe");
-		boolean present = !stack.isEmpty() && (axe || name.endsWith("_sword"));
+		boolean present = !stack.isEmpty() && (axe || name.endsWith("_sword") || stack.is(Items.MACE)
+				|| stack.is(Items.BOW) || stack.is(Items.SNOWBALL) || stack.is(Items.EGG) || stack.is(Items.ENDER_PEARL) || stack.is(Items.WIND_CHARGE));
 		if (!present) return new Weapon(false, false, 0, 0);
 		var modifiers = stack.getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS, ItemAttributeModifiers.EMPTY);
 		return new Weapon(true, axe, modifiers.compute(Attributes.ATTACK_DAMAGE, 1.0, EquipmentSlot.MAINHAND),

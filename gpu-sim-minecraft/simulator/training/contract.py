@@ -19,8 +19,8 @@ _EQUIPMENT_MATERIALS = ("leather", "copper", "chainmail", "iron", "golden", "dia
 _WEAPONS = frozenset({"minecraft:air", *(f"minecraft:{material}_{kind}" for material in _EQUIPMENT_MATERIALS
     if material not in ("leather", "chainmail") for kind in ("sword", "axe")),
     "minecraft:wooden_sword", "minecraft:wooden_axe", "minecraft:stone_sword", "minecraft:stone_axe",
-    "minecraft:bow"})
-_LOADOUT_FIELDS = frozenset(("weapons", "selected", "offhand", "armor", "arrows"))
+    "minecraft:bow", "minecraft:mace", "minecraft:snowball", "minecraft:egg", "minecraft:ender_pearl", "minecraft:wind_charge"})
+_LOADOUT_FIELDS = frozenset(("weapons", "selected", "offhand", "armor", "arrows", "snowballs", "eggs", "ender_pearls", "wind_charges"))
 _ARMOR_SLOTS = tuple(CATALOGUE["armor_slots"])
 _ARMOR_ITEMS = {slot: frozenset({"minecraft:air", *(f"minecraft:{material}_{slot}"
     for material in _EQUIPMENT_MATERIALS), *(["minecraft:turtle_helmet"] if slot == "helmet" else [])})
@@ -199,6 +199,14 @@ def resolve_players(players, profile="configured"):
                 raise ValueError(f"Unsupported armor item: {item}")
         player["loadout"] = {"weapons": list(slots), "selected": selected, "offhand": offhand,
                       "armor": armor, "arrows": arrows}
+        for field, item, maximum in (("snowballs", "minecraft:snowball", 16), ("eggs", "minecraft:egg", 16),
+                ("ender_pearls", "minecraft:ender_pearl", 16), ("wind_charges", "minecraft:wind_charge", 64)):
+            present = item in slots
+            count = loadout.get(field, 1 if present else 0)
+            if type(count) is not int or (present and not 1 <= count <= maximum) or (not present and count != 0):
+                raise ValueError(f"{field} requires a matching stack of 1..{maximum} items")
+            if present:
+                player["loadout"][field] = count
     json.dumps(players, allow_nan=False)
     return players
 
@@ -213,10 +221,13 @@ def resolve_scenario(definition):
         if capability not in CAPABILITIES:
             raise ValueError(f"Unsupported scenario capability: {capability}")
     rules = scenario.get("rules", {})
-    if (not isinstance(rules, dict) or set(rules) - set(RULES)
-            or any(type(value) is not bool or value is not False for value in rules.values())):
+    if (not isinstance(rules, dict) or set(rules) - (set(RULES) | {"simulate_fall_damage"})
+            or any(type(value) is not bool or (key != "simulate_fall_damage" and value is not False)
+                   for key, value in rules.items())):
         raise ValueError("Scenario bridge currently requires frozen food and no natural regeneration")
     scenario["rules"] = dict(RULES)
+    if rules.get("simulate_fall_damage", False):
+        scenario["rules"]["simulate_fall_damage"] = True
     scenario["players"] = resolve_players(scenario["players"], profile)
     scenario["profile"] = "configured"
     scenario["requires"] = [capability for capability in CAPABILITIES if capability != "bow"]

@@ -23,7 +23,11 @@ inline void equipmentObservation(float* catalogue, const PlayerState& source, co
     for (int slot = 0; slot < 9; ++slot) {
         float* values = catalogue + 43 + slot * 4;
         std::fill_n(values, 4, 0.0F);
-        if (slot >= static_cast<int>(own_slots.size()) || own_slots[slot] == WeaponItem::unarmed) continue;
+        if (slot >= static_cast<int>(own_slots.size()) || own_slots[slot] == WeaponItem::unarmed
+            || (own_slots[slot] == WeaponItem::snowball && source.snowball_count == 0)
+            || (own_slots[slot] == WeaponItem::egg && source.egg_count == 0)
+            || (own_slots[slot] == WeaponItem::ender_pearl && source.ender_pearl_count == 0)
+            || (own_slots[slot] == WeaponItem::wind_charge && source.wind_charge_count == 0)) continue;
         const auto attributes = weaponAttributes(own_slots[slot]);
         values[0] = 1.0F;
         values[1] = attributes.disable_shield_seconds > 0.0F ? 1.0F : 0.0F;

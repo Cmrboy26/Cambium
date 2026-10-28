@@ -20,7 +20,7 @@ from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions
-from simulator.training.research import EpisodeMetrics, OpponentPool, SampledWorlds, collect, evaluate
+from simulator.training.research import BehaviorEvaluation, EpisodeMetrics, OpponentPool, SampledWorlds, collect, evaluate
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
 from simulator.training.timing import CollectionTimer
@@ -35,6 +35,29 @@ def short_plan():
 
 
 class EpisodeMetricChecks(unittest.TestCase):
+    def test_launch_smash_requires_same_player_and_uninterrupted_flight(self):
+        behavior = BehaviorEvaluation(4)
+        slots = np.array([0, 1, 0, 0])
+        events = np.zeros((4, 2, 3), dtype=np.float32)
+        events[:, :, 2] = 1
+        events[0, 0, 0] = events[1, 1, 0] = events[2, 0, 0] = 0.3
+        events[3, 1, 0] = 0.3
+        behavior.step(events, slots)
+        events.fill(0)
+        behavior.step(events, slots)
+        events[1, 1, 2] = 1
+        behavior.step(events, slots)
+        behavior.remaining[2] = 1
+        events.fill(0)
+        behavior.step(events, slots)
+        events[:, :, 1] = 1
+        behavior.step(events, slots)
+        np.testing.assert_array_equal(behavior.launch_smash, [True, False, False, False])
+        np.testing.assert_array_equal(behavior.launched, [True, True, True, False])
+        behavior.reset(np.array([True, False, False, False]))
+        self.assertFalse(behavior.launch_smash[0])
+        self.assertEqual(behavior.remaining[0], 0)
+
     def test_rollout_aggregates_include_every_completion_and_span_boundaries(self):
         metrics = EpisodeMetrics(1, window=2)
         metrics.step(np.array([10.]), np.array([False]), [], [])
@@ -109,6 +132,19 @@ class PlanChecks(unittest.TestCase):
             self.assertEqual(defaults[1]["loadout"]["weapons"][0], "minecraft:diamond_sword")
 
     def test_resolve_players_preserves_equipment_validation(self):
+        thrown = resolve_players([{"loadout": {"weapons": ["minecraft:snowball", "minecraft:egg"],
+                                                "snowballs": 16, "eggs": 2}}, {}])[0]["loadout"]
+        self.assertEqual((thrown["snowballs"], thrown["eggs"]), (16, 2))
+        pearl = resolve_players([{"loadout": {"weapons": ["minecraft:ender_pearl"], "ender_pearls": 8}}, {}])[0]["loadout"]
+        self.assertEqual(pearl["ender_pearls"], 8)
+        wind = resolve_players([{"loadout": {"weapons": ["minecraft:mace", "minecraft:wind_charge"], "wind_charges": 64}}, {}])[0]["loadout"]
+        self.assertEqual(wind["wind_charges"], 64)
+        self.assertNotIn("snowballs", resolve_players([{}, {}])[0]["loadout"])
+        for loadout in ({"weapons": ["minecraft:egg"], "eggs": 0},
+                        {"weapons": ["minecraft:snowball"], "snowballs": 17},
+                        {"weapons": ["minecraft:air"], "eggs": 1}):
+            with self.assertRaises(ValueError):
+                resolve_players([{"loadout": loadout}, {}])
         for material in ("wooden", "stone", "copper", "iron", "golden", "diamond", "netherite"):
             for kind in ("sword", "axe"):
                 item = f"minecraft:{material}_{kind}"

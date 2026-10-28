@@ -131,8 +131,11 @@ final class RosieLauncher {
 		if (busy) return message(client, "Rosie is busy: " + operation + ". Use /simrosie shutdown before switching helpers.");
 		Path game = client.gameDirectory.toPath().toAbsolutePath();
 		Path configuration = game.resolve("config/cambium-rosie.json");
-		if (!Files.isRegularFile(configuration)) {
-			return message(client, "Configure Rosie once locally: scripts/rosie-play.ps1 -Setup -MinecraftDirectory <this game folder>.");
+		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import");
+		boolean bundled = local && BundledInference.available();
+		if (!bundled && !Files.isRegularFile(configuration)) {
+			return message(client, local ? "This mod build has no bundled inference runtime for this platform."
+					: "Configure Rosie once locally: scripts/rosie-play.ps1 -Setup -MinecraftDirectory <this game folder>.");
 		}
 		long selected = ++generation;
 		UUID owner = client.player.getUUID();
@@ -148,10 +151,15 @@ final class RosieLauncher {
 			Process process = null;
 			boolean reported = false;
 			try {
-				JsonObject config = JsonParser.parseString(Files.readString(configuration)).getAsJsonObject();
 				Path logs = game.resolve("logs");
 				Files.createDirectories(logs);
-				process = helper(config, game, action, run, replay, scope).start();
+				ProcessBuilder builder;
+				if (bundled) builder = BundledInference.helper(BundledInference.prepare(game), game, action, replay);
+				else {
+					JsonObject config = JsonParser.parseString(Files.readString(configuration)).getAsJsonObject();
+					builder = helper(config, game, action, run, replay, scope);
+				}
+				process = builder.start();
 				synchronized (RosieLauncher.class) {
 					if (generation != selected) {
 						terminate(process);
@@ -241,11 +249,12 @@ final class RosieLauncher {
 	}
 
 	static ProcessBuilder helper(JsonObject config, Path game, String action, String run, String replay, String scope) {
-		boolean local = action.equals("local") || action.equals("local-world");
+		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import");
 		var arguments = new ArrayList<>(List.of(config.get("python").getAsString(), "-u", "-B", "-m",
-				"simulator.training.rosie", local ? "local" : action, "--minecraft-directory", game.toString(),
+				"simulator.training.rosie", action.equals("local-world") ? "local" : action, "--minecraft-directory", game.toString(),
 				"--run", run, "--replay", replay, "--json"));
-		if (local) arguments.addAll(List.of("--duel", game.resolve("sim-rosie-cache/duel.json").toString(), "--offline"));
+		if (action.equals("import")) arguments.addAll(List.of("--checkpoint", replay, "--offline"));
+		else if (local) arguments.addAll(List.of("--duel", game.resolve("sim-rosie-cache/duel.json").toString(), "--offline"));
 		else arguments.add("--connect");
 		if (action.equals("sync")) {
 			if (!List.of("policy", "latest", "all").contains(scope)) throw new IllegalArgumentException("Unknown sync scope");
@@ -305,6 +314,10 @@ final class RosieLauncher {
 				if (progress != null) progress.addProperty("phase", "complete");
 				message(client, "Cached " + event.get("run").getAsString() + " and " + event.get("replays").getAsInt() + " replays.");
 				if (client.gui.screen() instanceof ControlPanel panel) panel.refreshLibrary();
+			}
+			case "imported" -> {
+				message(client, "Imported " + event.get("name").getAsString() + ".");
+				if (client.gui.screen() instanceof ControlPanel panel) panel.imported(event.get("run").getAsString());
 			}
 			default -> throw new IllegalArgumentException("Unknown Rosie helper event");
 		}

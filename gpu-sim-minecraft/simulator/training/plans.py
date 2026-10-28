@@ -179,12 +179,13 @@ def advance_rule(rule, evaluations):
             advance_rule(child, evaluations)
     elif key == "evaluation":
         fields(value, ("suite", "metric", "at_least"), "evaluation advancement")
-        if (value.get("suite") not in evaluations or value.get("metric") not in ("win_rate", "reward_mean")
+        rate_metrics = ("win_rate", "self_launch_rate", "mace_smash_rate", "launch_smash_rate")
+        if (value.get("suite") not in evaluations or value.get("metric") not in (*rate_metrics, "reward_mean")
                 or "at_least" not in value):
             raise ValueError("Evaluation advancement needs an existing suite, metric and threshold")
         finite(value["at_least"], "evaluation threshold")
-        if value["metric"] == "win_rate" and not 0 <= value["at_least"] <= 1:
-            raise ValueError("Win rate threshold must be in [0,1]")
+        if value["metric"] in rate_metrics and not 0 <= value["at_least"] <= 1:
+            raise ValueError("Rate threshold must be in [0,1]")
     else:
         positive(value, key)
 
