@@ -708,7 +708,7 @@ class Rosie:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel", "local", "import"))
+    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel", "local", "local-policy", "import"))
     parser.add_argument("--duel", type=Path)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--minecraft-directory", required=True)
@@ -754,6 +754,19 @@ def main(argv=None):
             rosie = Rosie(args.minecraft_directory, offline=True)
             library = rosie.import_checkpoint(args.checkpoint)
             emit("imported", run=library["policies"][-1]["run"], name=args.checkpoint.stem)
+            return 0
+        if args.action == "local-policy":
+            if args.checkpoint is None:
+                raise ValueError("Local policy requires --checkpoint <policy.pt>")
+            emit("startup", phase="Importing PyTorch", seconds=time.monotonic() - started)
+            import torch
+            from simulator.training.serve import Policy, make_server
+
+            torch.set_num_threads(1)
+            emit("startup", phase="Loading checkpoint", seconds=time.monotonic() - started)
+            with make_server(Policy(args.checkpoint), 0) as server:
+                emit("policy", run=args.checkpoint.stem, port=server.server_address[1], startup_seconds=time.monotonic() - started)
+                server.serve_forever()
             return 0
         if args.action == "local":
             emit("startup", phase="Importing PyTorch", seconds=time.monotonic() - started)

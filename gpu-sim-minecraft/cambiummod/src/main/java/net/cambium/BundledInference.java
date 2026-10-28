@@ -74,7 +74,7 @@ final class BundledInference {
 	static ProcessBuilder helper(Path executable, Path game, String action, String checkpoint) {
 		String command = action.equals("local-world") ? "local" : action;
 		var arguments = new ArrayList<>(List.of(executable.toString(), command, "--minecraft-directory", game.toString(), "--json", "--offline"));
-		if (action.equals("import")) arguments.addAll(List.of("--checkpoint", checkpoint));
+		if (action.equals("import") || action.equals("local-policy")) arguments.addAll(List.of("--checkpoint", checkpoint));
 		else arguments.addAll(List.of("--duel", game.resolve("sim-rosie-cache/duel.json").toString()));
 		return new ProcessBuilder(arguments).directory(game.toFile())
 				.redirectError(ProcessBuilder.Redirect.appendTo(game.resolve("logs/rosie-launcher.log").toFile()));

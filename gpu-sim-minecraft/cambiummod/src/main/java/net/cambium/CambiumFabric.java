@@ -34,6 +34,7 @@ public class CambiumFabric implements ClientModInitializer {
 	public void onInitializeClient() {
 		SimulationReplay.initialize();
 		RosieLauncher.initialize();
+		PlayerControl.initialize();
 		DuelHud.initialize();
 		ControlPanel.initialize();
 		KeyMapping toggle = KeyMappingHelper.registerKeyMapping(new KeyMapping(

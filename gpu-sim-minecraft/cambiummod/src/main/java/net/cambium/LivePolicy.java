@@ -94,6 +94,40 @@ final class LivePolicy implements AutoCloseable {
 		return request("/act", body);
 	}
 
+	CompletableFuture<JsonObject> actOne(String session, int tick, float[] observations) {
+		JsonObject body = new JsonObject();
+		body.addProperty("protocol", 1);
+		body.addProperty("session", session);
+		body.addProperty("tick", tick);
+		body.addProperty("contract_hash", contractHash);
+		body.add("observations", ReplayAnalysis.JSON.toJsonTree(new float[][]{observations}));
+		return request("/act-one", body);
+	}
+
+	void requirePlayerSupport(java.util.Set<String> features, java.util.Set<String> actions) {
+		if (contract == null) throw new IllegalArgumentException("Player control needs a descriptive policy contract");
+		contract.requireSupported(features, actions);
+	}
+
+	boolean observes(String feature) { return contract != null && contract.observes(feature); }
+	boolean acts(String action) { return contract != null && contract.acts(action); }
+
+	float[] project(float[] catalogue) {
+		if (contract == null) throw new IllegalStateException("Policy contract is not loaded");
+		return contract.project(catalogue);
+	}
+
+	ReplayTrace.Controls mapOneAction(JsonObject response, String session, int tick) {
+		if (contract == null || integer(response.get("protocol")) != 1 || !session.equals(response.get("session").getAsString())
+				|| integer(response.get("tick")) != tick || !contractHash.equals(response.get("contract_hash").getAsString())) {
+			throw new IllegalArgumentException("Stale response or policy contract mismatch");
+		}
+		JsonArray actors = response.getAsJsonArray("actions");
+		if (actors.size() != 1) throw new IllegalArgumentException("Expected one policy action");
+		if (contract.acts("weapon")) throw new IllegalArgumentException("Player weapon-slot actions are unsupported");
+		return contract.decode(actors.get(0).getAsJsonArray(), null);
+	}
+
 	int observationCount() { return contract == null ? 22 : contract.observationCount(); }
 
 	boolean fullBowBridgeReady() {
@@ -123,7 +157,8 @@ final class LivePolicy implements AutoCloseable {
 				target.isAlive(), targetVelocity.x, targetVelocity.y, targetVelocity.z, bowState(target));
 		float[] base = ObservationEncoder.observe(own, other, rays);
 		if (contract == null) return base;
-		float[] catalogue = java.util.Arrays.copyOf(base, SimulationContract.FEATURES.size());
+		float[] catalogue = ObservationEncoder.catalogue(own, other, rays, source.onGround(), target.onGround(),
+				source.isSprinting(), target.isSprinting(), nearestOpponentArrow(source, target));
 		catalogue[22] = weaponIsAxe(source) ? 1 : 0;
 		catalogue[23] = weaponIsAxe(target) ? 1 : 0;
 		catalogue[24] = usingShield(source) ? 1 : 0;
@@ -136,10 +171,7 @@ final class LivePolicy implements AutoCloseable {
 		catalogue[30] = usingShield(source) ? Math.min(source.getTicksUsingItem() / 5.0F, 1) : 0;
 		catalogue[31] = source.getInventory().getSelectedSlot();
 		catalogue[32] = target.getInventory().getSelectedSlot();
-		ObservationEncoder.velocityObservation(catalogue, own, other);
-		ObservationEncoder.movementObservation(catalogue, source.onGround(), target.onGround(), source.isSprinting(), target.isSprinting());
 		ObservationEncoder.equipment(catalogue, equipment(source), equipment(target), weaponSlots(source));
-		ObservationEncoder.bowObservation(catalogue, own, other, nearestOpponentArrow(source, target));
 		return contract.project(catalogue);
 	}
 

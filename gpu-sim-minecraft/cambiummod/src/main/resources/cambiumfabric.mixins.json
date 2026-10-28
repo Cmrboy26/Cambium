@@ -15,6 +15,7 @@
 		"LocalPlayerRecordingAccessor",
 		"LocalPlayerRecordingMixin",
 		"PlayerEquipmentAccess",
+		"PlayerControlGameModeAccess",
 		"ReplayInputAccess"
 	],
 	"injectors": {

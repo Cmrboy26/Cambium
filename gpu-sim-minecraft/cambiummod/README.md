@@ -1,8 +1,9 @@
 # CambiumFabric
 
 Movement recording, replay comparison and live policy duels in Minecraft Java
-**26.3**. Client-installed Fabric mod for private singleplayer, not dedicated
-servers. Use a disposable test world.
+**26.3**. Client-installed Fabric mod, not a dedicated-server mod. Private
+duels require singleplayer; experimental player control can run in multiplayer.
+Use a disposable test world.
 
 ## Installation
 
@@ -25,13 +26,13 @@ before building that JAR. Runtime bundles are specific to their OS and architect
 
 ## In-Game Panel
 
-Press **F8** or use `/simmenu` in a private singleplayer world. After the
+Press **F8** or use `/simmenu` in a world. After the
 [one-time local Rosie setup](../rosie/README.md#local-replays-and-duels), the
 **Rosie** tab lists runs and syncs policies only, policies plus the latest replay,
 or all outputs, with transfer progress. **Library** groups policies by run, with
 a version selector and local-only run/policy display names. **Import** adds a
 trusted compatible `.pt` checkpoint and its embedded environment without Rosie.
-In **Duel**, choose an environment and independently select a policy or scripted
+In a private singleplayer world, **Duel** lets you choose an environment and independently select a policy or scripted
 controller for each fighter, set the round duration, then start. Synced setups
 run locally while offline. **Stop match** keeps Python/PyTorch warm for the next
 launch; **Shutdown inference** releases it. **Live** also has pause/resume/reset
@@ -39,6 +40,24 @@ and join/leave controls. The debug
 HUD places P1 left, P2 right and match status centrally, with health/charge/time
 bars and gear icons. Toggle it there or with `/simduel hud`, never the action bar.
 Selections and aliases persist in the game folder. Existing commands still work.
+
+## Experimental Player Control
+
+Join a world or server, press **F8**, and import a trusted `.pt` in **Library**.
+In **Player**, select the checkpoint and a nearby player, then start. For bow
+policies, equip a bow in the main hand and no bow in the offhand. **F10**, opening
+a screen, losing focus, death, disconnect, target loss, or an inference failure
+stops control. Stopping while drawing attempts to cancel via a hotbar switch;
+this has not yet been verified in a multiplayer game and may change your slot or
+release a shot. Test with consent in a disposable environment first.
+
+Only movement, jump, sprint, sneak, aim and main-hand bow-use actions are
+supported. Other required observations or actions are rejected. The target's
+movement and visible arrows are estimates, and unknown arrow owners or unloaded
+required areas stop control. Client information, latency and arbitrary terrain
+can differ from training; no multiplayer performance or fidelity is guaranteed.
+The server remains authoritative and server rules still apply. The private duel,
+replay and Rosie operations remain restricted to private singleplayer worlds.
 
 ## Live Policy Commands
 

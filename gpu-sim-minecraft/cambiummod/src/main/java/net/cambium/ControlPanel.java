@@ -43,6 +43,7 @@ final class ControlPanel extends Screen {
 	private int page;
 	private String query = "";
 	private String selectedPolicy = "";
+	private String selectedTarget = "";
 	private String libraryRun = "";
 	private int maxTicks;
 	private String selectedRun = "";
@@ -57,6 +58,7 @@ final class ControlPanel extends Screen {
 	ControlPanel(Screen previous) {
 		super(Component.literal("Cambium"));
 		this.previous = previous;
+		if (!privateWorld(Minecraft.getInstance())) tab = 1;
 		refreshLibrary();
 		try {
 			if (library != null && Files.isRegularFile(library.root.resolve("selections.json"))) {
@@ -84,8 +86,7 @@ final class ControlPanel extends Screen {
 			while (menu.consumeClick()) open(client);
 			Object world = requestedWorld;
 			requestedWorld = null;
-			if (world != null && client.level == world && client.player != null && client.getSingleplayerServer() != null
-					&& !client.getSingleplayerServer().isPublished() && !(client.gui.screen() instanceof ControlPanel)) {
+			if (world != null && client.level == world && client.player != null && !(client.gui.screen() instanceof ControlPanel)) {
 				client.gui.setScreen(new ControlPanel(client.gui.screen()));
 			}
 		});
@@ -94,12 +95,16 @@ final class ControlPanel extends Screen {
 	}
 
 	static int open(Minecraft client) {
-		if (client.getSingleplayerServer() == null || client.getSingleplayerServer().isPublished() || client.player == null) {
-			client.gui.hud.getChat().addClientSystemMessage(Component.literal("Cambium requires a private singleplayer world."));
+		if (client.level == null || client.player == null) {
+			client.gui.hud.getChat().addClientSystemMessage(Component.literal("Join a world to open Cambium."));
 			return 0;
 		}
 		requestedWorld = client.level;
 		return 1;
+	}
+
+	private static boolean privateWorld(Minecraft client) {
+		return client.getSingleplayerServer() != null && !client.getSingleplayerServer().isPublished();
 	}
 
 	void refreshLibrary() {
@@ -138,18 +143,19 @@ final class ControlPanel extends Screen {
 		contentWidth = Math.min(740, width - 24);
 		left = (width - contentWidth) / 2;
 		button("Close", left + contentWidth - 60, 10, 60, this::onClose);
-		String[] tabs = {"Duel", "Library", "Rosie", "Live"};
-		int tabWidth = (contentWidth - 12) / 4;
+		String[] tabs = {"Duel", "Library", "Rosie", "Live", "Player"};
+		int tabWidth = (contentWidth - 16) / 5;
 		for (int index = 0; index < tabs.length; index++) {
 			final int selected = index;
 			Button item = button(tabs[index], left + index * (tabWidth + 4), 34, tabWidth, () -> { tab = selected; page = 0; status = ""; rebuildWidgets(); });
-			item.active = tab != index;
+			item.active = tab != index && (privateWorld(minecraft) || index == 1 || index == 4);
 		}
 		switch (tab) {
 			case 0 -> duel();
 			case 1 -> shelf();
 			case 2 -> rosie();
 			case 3 -> live();
+			case 4 -> playerControl();
 			default -> throw new IllegalStateException("Unknown panel tab");
 		}
 	}
@@ -228,7 +234,7 @@ final class ControlPanel extends Screen {
 			final int fighter = index;
 			button(index == 0 ? "Assign A" : "Assign B", left + index * (actionWidth + 4), height - 30, actionWidth,
 					() -> { policyIds[fighter] = selectedPolicy; modes[fighter] = "Policy"; tab = 0; persist(); rebuildWidgets(); })
-					.active = library != null && library.find(library.policies, selectedPolicy) != null;
+					.active = privateWorld(minecraft) && library != null && library.find(library.policies, selectedPolicy) != null;
 		}
 		button("Name policy", left + 2 * (actionWidth + 4), height - 30, actionWidth, () -> {
 			JsonObject entry = library.find(library.policies, selectedPolicy);
@@ -237,6 +243,39 @@ final class ControlPanel extends Screen {
 		button("Name run", left + 3 * (actionWidth + 4), height - 30, actionWidth,
 				() -> minecraft.gui.setScreen(new RenameScreen(library.find(library.runs, libraryRun))))
 				.active = !RosieLauncher.isBusy() && library != null && library.find(library.runs, libraryRun) != null;
+	}
+
+	private void playerControl() {
+		JsonObject selected = library == null ? null : library.find(library.policies, selectedPolicy);
+		label("Policy", left, 65, contentWidth, 0xFFB5C2BE);
+		button(selected == null ? "Select a local policy" : name(selected), left, 78, contentWidth, () ->
+				choose("Player policy", library.policies, entry -> selectedPolicy = identity(entry)))
+				.active = library != null && !library.policies.isEmpty() && !PlayerControl.active();
+		List<JsonObject> targets = new ArrayList<>();
+		for (var player : minecraft.level.players()) if (!player.getUUID().equals(minecraft.player.getUUID())) {
+			JsonObject entry = new JsonObject();
+			entry.addProperty("id", player.getUUID().toString());
+			entry.addProperty("name", player.getName().getString());
+			targets.add(entry);
+		}
+		JsonObject target = library == null ? null : library.find(targets, selectedTarget);
+		label("Target", left, 111, contentWidth, 0xFFB5C2BE);
+		button(target == null ? "Select a nearby player" : name(target), left, 124, contentWidth,
+				() -> choose("Target player", targets, entry -> selectedTarget = identity(entry)))
+				.active = !targets.isEmpty() && !PlayerControl.active();
+		label("Remote movement and arrows are estimates", left, 158, contentWidth, 0xFFF3B298);
+		label("F10 stops control; opening a screen also stops it", left, 174, contentWidth, 0xFFACBDB5);
+		button(PlayerControl.active() ? "Stop player control" : "Start player control", left, height - 30, contentWidth, () -> {
+			if (PlayerControl.active()) { PlayerControl.stop(minecraft, "Stopped from panel"); rebuildWidgets(); return; }
+			try {
+				JsonObject policy = library.find(library.policies, selectedPolicy);
+				new SimulationContract(policy.getAsJsonObject("policy")).requireSupported(ClientObservation.FEATURES, ClientObservation.ACTIONS);
+				JsonObject fighter = library.policyFighter(policy, policy.get("contract_hash").getAsString());
+				java.util.UUID uuid = java.util.UUID.fromString(selectedTarget);
+				PlayerControl.start(minecraft, java.nio.file.Path.of(fighter.get("path").getAsString()), uuid);
+				minecraft.gui.setScreen(null);
+			} catch (IOException | RuntimeException error) { status = error.getMessage(); }
+		}).active = PlayerControl.active() || selected != null && target != null;
 	}
 
 	private void importPolicy() {
@@ -532,7 +571,7 @@ final class ControlPanel extends Screen {
 		graphics.fill(0, 0, width, 58, 0xF0202829);
 		graphics.text(font, "CAMBIUM", left, 15, 0xFF92DDB3);
 		for (Label label : labels) graphics.text(font, fit(label.text(), label.width()), label.left(), label.top(), label.color());
-		String message = status.isEmpty() ? RosieLauncher.status() : status;
+		String message = status.isEmpty() ? tab == 4 ? PlayerControl.status() : RosieLauncher.status() : status;
 		graphics.text(font, fit(message, contentWidth), left, height - 45, status.isEmpty() ? 0xFFACBDB5 : 0xFFF3B298);
 		JsonObject progress = RosieLauncher.progress();
 		if (tab == 2 && progress != null) {

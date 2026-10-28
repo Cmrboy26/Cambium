@@ -32,6 +32,7 @@ final class RosieLauncher {
 	private static volatile long generation;
 	private static boolean busy;
 	private static boolean serving;
+	private static boolean importing;
 	private static Object world;
 	private static String operation = "idle";
 	private static String lastMessage = "Local library ready";
@@ -80,7 +81,7 @@ final class RosieLauncher {
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> cancel());
 		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> cancel());
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			if (busy && (client.level != world || client.getSingleplayerServer() == null || client.getSingleplayerServer().isPublished())) cancel();
+			if (busy && (client.level != world || !importing && (client.getSingleplayerServer() == null || client.getSingleplayerServer().isPublished()))) cancel();
 		});
 	}
 
@@ -121,7 +122,8 @@ final class RosieLauncher {
 
 	static int start(Minecraft client, String action, String run, String replay, String scope) {
 		var server = client.getSingleplayerServer();
-		if (server == null || client.player == null || server.isPublished()) {
+		boolean importOnly = action.equals("import");
+		if (client.player == null || client.level == null || !importOnly && (server == null || server.isPublished())) {
 			return message(client, "Rosie commands require a private singleplayer world.");
 		}
 		if (busy && serving && !reloading && (action.equals("local") || action.equals("local-world"))) {
@@ -131,7 +133,7 @@ final class RosieLauncher {
 		if (busy) return message(client, "Rosie is busy: " + operation + ". Use /simrosie shutdown before switching helpers.");
 		Path game = client.gameDirectory.toPath().toAbsolutePath();
 		Path configuration = game.resolve("config/cambium-rosie.json");
-		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import");
+		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import") || action.equals("local-policy");
 		boolean bundled = local && BundledInference.available();
 		if (!bundled && !Files.isRegularFile(configuration)) {
 			return message(client, local ? "This mod build has no bundled inference runtime for this platform."
@@ -142,6 +144,7 @@ final class RosieLauncher {
 		Object level = client.level;
 		world = level;
 		busy = true;
+		importing = importOnly;
 		startedAt = System.nanoTime();
 		progress = null;
 		arenaMode = !action.equals("local-world");
@@ -173,7 +176,7 @@ final class RosieLauncher {
 						JsonObject event = JsonParser.parseString(line).getAsJsonObject();
 						if (event.get("event").getAsString().equals("error")) reported = true;
 						client.execute(() -> {
-							if (generation == selected && client.getSingleplayerServer() == server && !server.isPublished()
+							if (generation == selected && (importOnly || client.getSingleplayerServer() == server && !server.isPublished())
 									&& client.level == level && client.player != null && client.player.getUUID().equals(owner)) handle(client, event);
 						});
 					}
@@ -253,7 +256,7 @@ final class RosieLauncher {
 		var arguments = new ArrayList<>(List.of(config.get("python").getAsString(), "-u", "-B", "-m",
 				"simulator.training.rosie", action.equals("local-world") ? "local" : action, "--minecraft-directory", game.toString(),
 				"--run", run, "--replay", replay, "--json"));
-		if (action.equals("import")) arguments.addAll(List.of("--checkpoint", replay, "--offline"));
+		if (action.equals("import") || action.equals("local-policy")) arguments.addAll(List.of("--checkpoint", replay, "--offline"));
 		else if (local) arguments.addAll(List.of("--duel", game.resolve("sim-rosie-cache/duel.json").toString(), "--offline"));
 		else arguments.add("--connect");
 		if (action.equals("sync")) {
@@ -340,6 +343,7 @@ final class RosieLauncher {
 		if (worker != null) terminate(worker);
 		worker = null;
 		busy = false;
+		importing = false;
 		serving = false;
 		reloading = false;
 		matchStopped = false;

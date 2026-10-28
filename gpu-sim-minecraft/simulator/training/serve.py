@@ -23,7 +23,7 @@ LIVE_SCRIPTED_CONTROLLERS = frozenset((
 ))
 
 
-def inference_observations(request, schema, contract_hash):
+def inference_observations(request, schema, contract_hash, players=2):
     if (not isinstance(request, dict) or request.get("protocol") != 1
             or not isinstance(request.get("session"), str) or not 1 <= len(request["session"]) <= 64
             or type(request.get("tick")) is not int or not 0 <= request["tick"] < 2**53):
@@ -33,8 +33,8 @@ def inference_observations(request, schema, contract_hash):
             and request.get("contract_hash") != contract_hash:
         raise ValueError("Inference request policy contract fingerprint does not match")
     features = schema["observation_dim"]
-    if observations.shape != (2, features) or not np.isfinite(observations).all():
-        raise ValueError(f"Expected finite observations with shape [2,{features}]")
+    if observations.shape != (players, features) or not np.isfinite(observations).all():
+        raise ValueError(f"Expected finite observations with shape [{players},{features}]")
     return observations
 
 
@@ -94,12 +94,14 @@ class Policy:
             self.info["experiment"] = manifest["experiment"]
 
     @torch.inference_mode()
-    def act(self, request):
-        observations = inference_observations(request, self.schema, self.info["contract_hash"])
+    def act(self, request, players=2):
+        if players == 1 and (not isinstance(request, dict) or request.get("contract_hash") != self.info["contract_hash"]):
+            raise ValueError("Single-player inference requires the negotiated policy contract hash")
+        observations = inference_observations(request, self.schema, self.info["contract_hash"], players)
         with self.lock:
             logits, _ = self.model(torch.as_tensor(observations, device=self.device))
             actions = torch.stack([
-                torch.full((2,), self.fixed[name], dtype=torch.long, device=self.device) if name in self.fixed
+                torch.full((players,), self.fixed[name], dtype=torch.long, device=self.device) if name in self.fixed
                 else logits[name].argmax(-1) if self.deterministic
                 else torch.distributions.Categorical(logits=logits[name]).sample()
                 for name in self.schema["action_names"]], dim=-1).cpu().tolist()
@@ -199,7 +201,7 @@ def make_server(policy, port, reload_policy=None, reload_token=None):
             self.reply(200, active[0].info) if self.path == "/info" else self.reply(404, {"error": "Not found"})
 
         def do_POST(self):
-            if self.path != "/act" and not (self.path == "/reload" and reload_policy is not None):
+            if self.path not in ("/act", "/act-one") and not (self.path == "/reload" and reload_policy is not None):
                 self.reply(404, {"error": "Not found"})
                 return
             if self.path == "/reload" and (not reload_token or not hmac.compare_digest(
@@ -221,6 +223,10 @@ def make_server(policy, port, reload_policy=None, reload_token=None):
                         replacement = reload_policy()
                         active[0] = replacement
                     self.reply(200, {"reloaded": True, "seconds": time.monotonic() - started})
+                elif self.path == "/act-one":
+                    if not isinstance(active[0], Policy):
+                        raise ValueError("Single-player inference requires a standalone checkpoint")
+                    self.reply(200, active[0].act(request, players=1))
                 else:
                     self.reply(200, active[0].act(request))
             except (ValueError, TypeError, OverflowError) as error:

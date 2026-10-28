@@ -153,6 +153,21 @@ final class SimulationContract {
 
 	int observationCount() { return observationCount; }
 
+	void requireSupported(Set<String> features, Set<String> actions) {
+		for (Observation observation : observations) {
+			String feature = FEATURES.get(observation.feature());
+			if (!features.contains(feature)) throw new IllegalArgumentException("Unsupported player observation: " + feature);
+		}
+		for (Head head : heads) {
+			if (!actions.contains(head.name())) throw new IllegalArgumentException("Unsupported player action: " + head.name());
+		}
+	}
+
+	boolean observes(String feature) {
+		return observations.stream().anyMatch(observation -> FEATURES.get(observation.feature()).equals(feature));
+	}
+	boolean acts(String action) { return heads.stream().anyMatch(head -> head.name().equals(action)); }
+
 	float[] project(float[] catalogue) {
 		if (catalogue.length != FEATURES.size()) throw new IllegalArgumentException("Incomplete observation catalogue");
 		float[] result = new float[observationCount];

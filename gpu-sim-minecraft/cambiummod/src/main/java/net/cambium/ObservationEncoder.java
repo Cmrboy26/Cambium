@@ -16,6 +16,15 @@ final class ObservationEncoder {
 	record Weapon(boolean present, boolean axe, double damage, double speed) {}
 	record Equipment(boolean shield, double damage, double speed, double armor, double toughness) {}
 
+	static float[] catalogue(State source, State target, float[] rays, boolean sourceGrounded, boolean targetGrounded,
+			boolean sourceSprinting, boolean targetSprinting, ArrowState arrow) {
+		float[] result = java.util.Arrays.copyOf(observe(source, target, rays), SimulationContract.FEATURES.size());
+		velocityObservation(result, source, target);
+		movementObservation(result, sourceGrounded, targetGrounded, sourceSprinting, targetSprinting);
+		bowObservation(result, source, target, arrow);
+		return result;
+	}
+
 	static void equipment(float[] catalogue, Equipment own, Equipment opponent, Weapon[] ownSlots) {
 		for (int actor = 0; actor < 2; actor++) {
 			Equipment state = actor == 0 ? own : opponent;

@@ -6,8 +6,9 @@ common commands in [README.md](README.md).
 ## Runtime And Build
 
 Client-installed mod for Minecraft Java 26.3, Fabric Loader >=0.19.5 and matching
-Fabric API (template 0.163.0+26.3). Never install on a dedicated server. Singleplayer
-worlds must be private; use disposable worlds for replay/live experiments.
+Fabric API (template 0.163.0+26.3). Never install on a dedicated server. Duels and
+replays require private singleplayer; experimental player control also supports
+multiplayer clients. Use disposable worlds for experiments.
 
 Requires JDK 25. From repository root: `./scripts/build-mod.ps1`, or `-Task check`
 for checks, `-Task replayAnalysisChecks` for headless bridge/replay checks.
@@ -65,6 +66,18 @@ hash is checked when supplied; older descriptor-compatible services may omit it.
 Gradle check loads shared fixtures via an explicit system property, independent
 of working directory. Fixtures cover base math, projection, decoding and rejection,
 not real world raycasts or full live behavior.
+
+`ClientObservation` selects the shared features available to player control and
+rejects other contract primitives. Client target velocity is the per-tick change
+in interpolated position; arrow ownership, motion and type are client estimates.
+`PlayerControl` owns a separate offline checkpoint process and one outstanding
+`/act-one` request, validates session/tick/hash, and stops after five ticks or
+250 ms. Its explicit target must stay visible and alive. F10, screens, focus
+loss and lifecycle events stop it. A main-hand draw is cancelled by synchronizing
+a different hotbar slot before clearing local use; this requires real multiplayer
+validation and is not guaranteed for offhand use, which is deliberately excluded.
+`/act` remains a two-actor duel protocol. New features need explicit client
+availability and fidelity review before being added to its supported set.
 
 ## Live Policy Duels
 

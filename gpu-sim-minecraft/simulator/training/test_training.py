@@ -52,6 +52,70 @@ class InferenceChecks(unittest.TestCase):
                       "model": ActorCritic(22, 16, 9).state_dict()}
         torch.save(self.saved, self.path)
 
+    def test_single_player_inference_keeps_duel_protocol_and_fixed_controls(self):
+        self.saved["metadata"]["controls"] = {"fixed": {"attack": False}}
+        torch.save(self.saved, self.path)
+        policy = Policy(self.path, deterministic=True)
+        request = {"protocol": 1, "session": "single", "tick": 1,
+                   "contract_hash": policy.info["contract_hash"], "observations": [[0.0] * 22]}
+        with make_server(policy, 0) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                def post(path, body):
+                    return urlopen(Request(base + path, json.dumps(body).encode(),
+                                           {"Content-Type": "application/json"}), timeout=3)
+                with post("/act-one", request) as response:
+                    single = json.load(response)["actions"]
+                self.assertEqual(len(single), 1)
+                self.assertEqual(single[0][3], 0)
+                with post("/act", {**request, "observations": request["observations"] * 2}) as response:
+                    self.assertEqual(json.load(response)["actions"][0], single[0])
+                for invalid in ({**request, "observations": request["observations"] * 2},
+                                {**request, "observations": [[float("nan")] * 22]},
+                                {**request, "contract_hash": "0" * 64},
+                                {key: value for key, value in request.items() if key != "contract_hash"}):
+                    with self.assertRaises(HTTPError) as failure:
+                        post("/act-one", invalid)
+                    self.assertEqual(failure.exception.code, 400)
+                    failure.exception.close()
+                with self.assertRaises(HTTPError) as failure:
+                    post("/act", request)
+                failure.exception.close()
+            finally:
+                server.shutdown()
+                worker.join(timeout=3)
+
+    def test_offline_single_checkpoint_launcher(self):
+        game = self.path.parent / "Minecraft with spaces"
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen([sys.executable, "-u", "-B", "-m", "simulator.training.rosie",
+                "local-policy", "--minecraft-directory", str(game), "--checkpoint", str(self.path), "--offline", "--json"],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=errors)
+            events = queue.Queue()
+            reader = threading.Thread(target=lambda: events.put(next((line for line in process.stdout
+                if json.loads(line)["event"] in ("policy", "error")), b"")), daemon=True)
+            try:
+                reader.start()
+                event = json.loads(events.get(timeout=30))
+                self.assertEqual(event["event"], "policy", event)
+                base = f"http://127.0.0.1:{event['port']}"
+                with urlopen(base + "/info", timeout=3) as response:
+                    info = json.load(response)
+                body = {"protocol": 1, "session": "offline-player", "tick": 0,
+                        "contract_hash": info["contract_hash"], "observations": [[0.0] * 22]}
+                with urlopen(Request(base + "/act-one", json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual(len(json.load(response)["actions"]), 1)
+                self.assertFalse((game / "config/cambium-rosie.json").exists())
+            finally:
+                process.terminate()
+                process.wait(timeout=10)
+                process.stdout.close()
+                if reader.ident is not None:
+                    reader.join(timeout=3)
+
     @unittest.skipUnless(os.environ.get("CAMBIUM_BUNDLED_HELPER"), "No bundled helper selected")
     def test_bundled_helper_import_and_inference(self):
         import signal
@@ -89,6 +153,34 @@ class InferenceChecks(unittest.TestCase):
                         "contract_hash": info["contract_hash"], "observations": np.zeros((2, 22)).tolist()}
                 with urlopen(Request(base + "/act", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=3) as response:
                     self.assertEqual(len(json.load(response)["actions"]), 2)
+            finally:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=30)
+                process.stdout.close()
+                reader.join(timeout=5)
+
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen([executable, "local-policy", "--minecraft-directory", str(game),
+                                        "--checkpoint", checkpoint, "--offline", "--json"],
+                                       stdout=subprocess.PIPE, stderr=errors, **options)
+            events = queue.Queue()
+            reader = threading.Thread(target=lambda: events.put(next((line for line in process.stdout
+                if json.loads(line)["event"] in ("policy", "error")), b"")), daemon=True)
+            try:
+                reader.start()
+                event = json.loads(events.get(timeout=120))
+                self.assertEqual(event["event"], "policy", event)
+                base = f"http://127.0.0.1:{event['port']}"
+                with urlopen(base + "/info", timeout=3) as response:
+                    info = json.load(response)
+                body = {"protocol": 1, "session": "bundled-player", "tick": 0,
+                        "contract_hash": info["contract_hash"], "observations": np.zeros((1, 22)).tolist()}
+                with urlopen(Request(base + "/act-one", json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual(len(json.load(response)["actions"]), 1)
             finally:
                 if os.name == "nt":
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
@@ -208,6 +300,11 @@ class InferenceChecks(unittest.TestCase):
                     actions = json.load(response)["actions"]
                 self.assertEqual(actions[0][3], 0)
                 self.assertEqual(actions[1][3], 1)
+                with self.assertRaises(HTTPError) as single_denied:
+                    urlopen(Request(base + "/act-one", json.dumps({**body, "observations": [[0.0] * 22]}).encode(),
+                                    {"Content-Type": "application/json"}), timeout=3)
+                self.assertEqual(single_denied.exception.code, 400)
+                single_denied.exception.close()
                 with self.assertRaises(HTTPError) as denied:
                     urlopen(Request(base + "/reload", b"{}", {"Content-Type": "application/json"}), timeout=3)
                 self.assertEqual(denied.exception.code, 403)

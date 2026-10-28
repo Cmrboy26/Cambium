@@ -111,7 +111,7 @@ public final class ReplayAnalysisChecks {
 		}
 	}
 
-	private static void checkRosieLauncher() {
+	private static void checkRosieLauncher() throws Exception {
 		Path root = Path.of(System.getProperty("java.io.tmpdir")).resolve("Minecraft with spaces").toAbsolutePath();
 		JsonObject config = new JsonObject();
 		config.addProperty("python", root.resolve("venv with spaces/python.exe").toString());
@@ -142,6 +142,52 @@ public final class ReplayAnalysisChecks {
 		require(bundled.get(bundled.indexOf("--checkpoint") + 1).equals(checkpoint), "Bundled import must preserve the checkpoint path");
 		var bundledDuel = BundledInference.helper(root.resolve("runtime.exe"), root, "local-world", "").command();
 		require(bundledDuel.get(1).equals("local") && bundledDuel.contains("--duel"), "Bundled world duels must use local inference");
+		for (var command : java.util.List.of(RosieLauncher.helper(config, root, "local-policy", "latest", checkpoint).command(),
+				BundledInference.helper(root.resolve("runtime.exe"), root, "local-policy", checkpoint).command())) {
+			require(command.contains("--offline") && !command.contains("--duel") && !command.contains("--connect")
+					&& command.get(command.indexOf("--checkpoint") + 1).equals(checkpoint), "Player helper must use a literal local checkpoint");
+		}
+		JsonObject supported = JsonParser.parseString("""
+				{"format":"minecraft_sim_policy","version":1,"minecraft":"26.3","ticks_per_action":1,
+				 "observations":[{"feature":"self.health_fraction"}],"actions":[{"name":"jump","values":[false,true]}]}
+				""").getAsJsonObject();
+		new SimulationContract(supported).requireSupported(ClientObservation.FEATURES, ClientObservation.ACTIONS);
+		Path sniper = Path.of(System.getProperty("cambium.contractFixtures")).getParent().getParent()
+				.resolve("simulator/setups/policies/colten/sniper-duel.json");
+		new SimulationContract(JsonParser.parseString(Files.readString(sniper)).getAsJsonObject())
+				.requireSupported(ClientObservation.FEATURES, ClientObservation.ACTIONS);
+		try (LivePolicy player = new LivePolicy(12345)) {
+			var contractField = LivePolicy.class.getDeclaredField("contract");
+			var hashField = LivePolicy.class.getDeclaredField("contractHash");
+			contractField.setAccessible(true);
+			hashField.setAccessible(true);
+			contractField.set(player, new SimulationContract(supported));
+			hashField.set(player, "a".repeat(64));
+			JsonObject response = JsonParser.parseString("""
+					{"protocol":1,"session":"test","tick":7,"contract_hash":"%s","actions":[[1]]}
+					""".formatted("a".repeat(64))).getAsJsonObject();
+			require(player.mapOneAction(response, "test", 7).jump(), "One actor action must decode without a scenario loadout");
+			boolean stale = false;
+			try { player.mapOneAction(response, "test", 8); } catch (IllegalArgumentException expected) { stale = true; }
+			require(stale, "Stale one-actor actions must be rejected");
+			response.addProperty("contract_hash", "b".repeat(64));
+			boolean wrongContract = false;
+			try { player.mapOneAction(response, "test", 7); } catch (IllegalArgumentException expected) { wrongContract = true; }
+			require(wrongContract, "One-actor actions must match the negotiated contract");
+		}
+		require(!PlayerControl.expired(10, 5, 250_000_000L) && PlayerControl.expired(11, 5, 1)
+				&& PlayerControl.expired(5, 5, 250_000_001L), "Player control must expire on tick or wall-clock timeout");
+		supported.getAsJsonArray("observations").get(0).getAsJsonObject().addProperty("feature", "opponent.weapon_slot");
+		boolean rejected = false;
+		try { new SimulationContract(supported).requireSupported(ClientObservation.FEATURES, ClientObservation.ACTIONS); }
+		catch (IllegalArgumentException expected) { rejected = expected.getMessage().contains("opponent.weapon_slot"); }
+		require(rejected, "Player control must reject unsupported observations by name");
+		supported.getAsJsonArray("observations").get(0).getAsJsonObject().addProperty("feature", "self.health_fraction");
+		supported.getAsJsonArray("actions").get(0).getAsJsonObject().addProperty("name", "attack");
+		rejected = false;
+		try { new SimulationContract(supported).requireSupported(ClientObservation.FEATURES, ClientObservation.ACTIONS); }
+		catch (IllegalArgumentException expected) { rejected = expected.getMessage().contains("attack"); }
+		require(rejected, "Player control must reject unsupported actions by name");
 		System.out.println("PASS: Rosie helper uses literal arguments, configured repository and separate JSON output");
 	}
 
