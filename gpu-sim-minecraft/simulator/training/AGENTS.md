@@ -253,6 +253,9 @@ The dashboard's Benchmark / Training toggle switches performance panels, headlin
 scores and suite/opponent controls without changing axes or hiding PPO/runtime
 diagnostics. Training always shows full-rollout summaries; bounded recent history
 remains available internally and through the PNG CLI, not a dashboard selector.
+Benchmark charts default to all recorded suites, with independent snapshot-aligned
+lines and legend visibility; selecting a suite restores its individual headline
+metrics. Multiple suites are not averaged because their conditions can differ.
 Opponent details remain collapsed by default and live refresh preserves the mode.
 The smoothing slider maps positions 0..1000 to rounded `500 ** (position / 1000)`
 EMA spans: 1 is Off, the midpoint is 22, and the maximum is 500. It updates charts

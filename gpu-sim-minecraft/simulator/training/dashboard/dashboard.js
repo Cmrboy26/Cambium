@@ -2,6 +2,9 @@
 
 const element = (id) => document.getElementById(id);
 const colors = { green: "#18764f", blue: "#347aa2", red: "#b84242", amber: "#b27413", gray: "#6b746f" };
+const suitePalette = [colors.green, colors.blue, colors.red, colors.amber, "#746ca8", "#29898c", "#8f364c", "#7b8542",
+    "#4f6170", "#ab7256", "#148b61", "#c35191", "#5868b0", "#a84f27", "#568b9b", "#796329"];
+const suiteColors = new Map();
 const rewardTypes = [
     ["doing_damage", "Damage dealt", colors.green], ["taking_damage", "Damage taken", colors.red],
     ["won_duel", "Win", colors.blue], ["death", "Death", "#8f364c"],
@@ -106,8 +109,9 @@ function setTheme(theme) {
         for (const [id, series] of definitions) {
             const chart = charts.get(id);
             if (!chart) continue;
-            series.forEach(([, , color], index) => {
-                chart.data.datasets[index].borderColor = chart.data.datasets[index].backgroundColor = themeColor(color);
+            chart.data.datasets.forEach((dataset, index) => {
+                const color = dataset.baseColor ?? series[index]?.[2];
+                if (color) dataset.borderColor = dataset.backgroundColor = themeColor(color);
             });
             updateChartTheme(chart);
         }
@@ -152,9 +156,9 @@ function renderPerformanceMode() {
     for (const input of document.querySelectorAll('input[name="performance-mode"]')) input.checked = input.value === performanceMode;
 }
 
-function metricValue(row, metric) {
+function metricValue(row, metric, suite = selectedSuite) {
     const entry = metricCatalog[metric] ?? {};
-    const source = entry.scope === "evaluation" ? row.evaluations?.[selectedSuite]
+    const source = entry.scope === "evaluation" ? row.evaluations?.[suite]
         : entry.scope === "episode" ? trainingSummary(row) : row;
     let value = source?.[entry.field ?? metric];
     if (!Number.isFinite(value) && metric === "training_loss_or_draw_rate"
@@ -268,7 +272,7 @@ function updateWindowRange(bound, rawValue) {
     redrawCharts();
 }
 
-function metricPoints(key, derivative = false) {
+function metricPoints(key, derivative = false, suite = selectedSuite) {
     const rows = chartRows();
     const updates = new Map(rows.map(row => [row.update, row]));
     const seen = new Set();
@@ -282,7 +286,7 @@ function metricPoints(key, derivative = false) {
     for (const row of rows) {
         let anchor = row;
         if (entry?.scope === "evaluation") {
-            const snapshot = row.evaluations?.[selectedSuite]?.snapshot_update;
+            const snapshot = row.evaluations?.[suite]?.snapshot_update;
             if (!Number.isFinite(snapshot) || seen.has(snapshot) || !updates.has(snapshot)) continue;
             seen.add(snapshot);
             anchor = updates.get(snapshot);
@@ -290,7 +294,7 @@ function metricPoints(key, derivative = false) {
         const stage = anchor.stage_index ?? anchor.stage;
         if (entry?.scope !== "evaluation" && stage !== previousStage) previous = previousPoint = null;
         previousStage = stage;
-        const value = typeof key === "function" ? key(row) : metricValue(row, key);
+        const value = typeof key === "function" ? key(row) : metricValue(row, key, suite);
         const x = anchor[chartAxis];
         let y = null;
         if (Number.isFinite(value) && Number.isFinite(x)) {
@@ -344,26 +348,30 @@ function selectOptions(id, entries, preferred = "") {
 function renderPerformance() {
     renderPerformanceMode();
     const suiteNames = [...new Set(records.flatMap(row => Object.keys(row.evaluations ?? {})))].sort();
-    selectedSuite = selectOptions("benchmark-suite", suiteNames.length ? suiteNames.map(name => [name, name])
-        : [["", "No evaluations yet"]], "combined_benchmark");
+    selectedSuite = selectOptions("benchmark-suite", suiteNames.length ? [["", "All benchmarks"], ...suiteNames.map(name => [name, name])]
+        : [["", "No evaluations yet"]]);
     const opponents = [...new Set(records.flatMap(row => Object.keys(trainingSummary(row, "").training_opponents ?? {})))].sort();
     selectedOpponent = selectOptions("training-opponent", [["", "All opponents"], ...opponents.map(name => [name, name])]);
     const metric = selectOptions("metric-select", Object.entries(metricCatalog).map(([key, entry]) =>
         [key, `${entry.label} (${entry.unit})`]), "training_return");
     if (metric) definitions.find(([id]) => id === "metric-chart")[1][0][0] = metric;
     const latest = records.at(-1) ?? {};
-    const evaluation = records.map(row => row.evaluations?.[selectedSuite]).filter(Boolean).at(-1);
+    const summarySuite = selectedSuite || (suiteNames.length === 1 ? suiteNames[0] : "");
+    const evaluation = records.map(row => row.evaluations?.[summarySuite]).filter(Boolean).at(-1);
     const snapshot = evaluation?.snapshot_update;
     const freshness = Number.isFinite(snapshot) ? `Update ${format(snapshot)} / ${format(latest.update - snapshot)} updates ago` : "Snapshot age unavailable";
-    const detail = evaluation ? `${selectedSuite} / ${format(evaluation.episodes)} episodes` : "Awaiting evaluation";
+    const detail = evaluation ? `${summarySuite} / ${format(evaluation.episodes)} episodes`
+        : suiteNames.length ? `${format(suiteNames.length)} benchmark suites` : "Awaiting evaluation";
     element("stat-benchmark").textContent = evaluation ? `${format(evaluation.win_rate * 100, 2)}%` : "--";
     element("stat-benchmark-return").textContent = format(evaluation?.reward_mean, 3);
     element("stat-benchmark-detail").textContent = detail;
-    element("stat-benchmark-age").textContent = freshness;
+    element("stat-benchmark-age").textContent = !summarySuite && suiteNames.length ? "Select a suite for its summary" : freshness;
     const experiment = resolvedExperiment(configuration);
-    const suite = experiment?.evaluations?.[selectedSuite] ?? experiment?.stages?.[evaluation?.stage_index]?.evaluations?.[selectedSuite];
+    const suite = experiment?.evaluations?.[summarySuite] ?? experiment?.stages?.[evaluation?.stage_index]?.evaluations?.[summarySuite];
     const moving = (suite?.opponents ?? []).some(({id}) => ["self_play", "frozen_self_play"].includes(experiment?.opponents?.[id]?.type));
-    element("benchmark-status").textContent = `${detail} / ${freshness}${moving ? " / Moving-opponent evaluation" : ""}${evaluation?.win_rate === 1 ? " / Benchmark ceiling reached" : ""}`;
+    element("benchmark-status").textContent = evaluation
+        ? `${detail} / ${freshness}${moving ? " / Moving-opponent evaluation" : ""}${evaluation?.win_rate === 1 ? " / Benchmark ceiling reached" : ""}`
+        : detail;
     const source = trainingSummary(latest, "");
     const summary = trainingSummary(latest);
     const count = summary.training_episodes ?? (selectedOpponent && source.source !== "recovered_rewards"
@@ -605,11 +613,11 @@ const legendSoloHandlers = new WeakMap();
 const legendSolo = {
     id: "legendSolo",
     afterInit(chart) {
-        if (chart.data.datasets.length < 2) return;
+        if (chart.data.datasets.length < 2 || legendSoloHandlers.has(chart)) return;
         chart.canvas.title = "Click a legend entry to toggle it. Right-click to solo; right-click the solo entry again to show all.";
         const handler = event => {
             const legend = chart.legend;
-            if (!legend || !legend.options.display) return;
+            if (chart.data.datasets.length < 2 || !legend || !legend.options.display) return;
             const {x, y} = Chart.helpers.getRelativePosition(event, chart);
             const hit = legend.legendHitBoxes.findIndex(box => x >= box.left && x <= box.left + box.width
                 && y >= box.top && y <= box.top + box.height);
@@ -687,6 +695,47 @@ function chartBounds(domain) {
     return [minimum - padding, maximum + padding];
 }
 
+function chartDataset(id, label, color, stacked = false) {
+    return {
+        label, data: [], baseColor: color, borderColor: themeColor(color), backgroundColor: themeColor(color),
+        borderWidth: 1.8, pointRadius: stacked ? 0 : context => isolatedPointRadius(context, connectsStages(id)),
+        pointHitRadius: 8, pointHoverRadius: 3,
+        tension: 0, spanGaps: false,
+        segment: {borderColor: context => context.p0.raw.stage !== context.p1.raw.stage
+            && !connectsStages(id) ? "transparent" : undefined},
+    };
+}
+
+function updateBenchmarkDatasets(chart, id, key, derivative) {
+    const suites = [...new Set(records.flatMap(row => Object.keys(row.evaluations ?? {})))].sort();
+    for (const suite of suites) {
+        if (!suiteColors.has(suite)) suiteColors.set(suite, suitePalette[suiteColors.size % suitePalette.length]);
+    }
+    const visibleSuites = selectedSuite ? [selectedSuite] : suites;
+    const visibility = chart.suiteVisibility ??= new Map();
+    const previous = new Map();
+    chart.data.datasets.forEach((dataset, index) => {
+        if (dataset.suiteName !== undefined) {
+            visibility.set(dataset.suiteName, chart.isDatasetVisible(index));
+            previous.set(dataset.suiteName, dataset);
+        }
+    });
+    chart.data.datasets = visibleSuites.map(suite => {
+        const dataset = previous.get(suite) ?? chartDataset(id, suite, suiteColors.get(suite));
+        dataset.suiteName = suite;
+        dataset.data = metricPoints(key, derivative, suite);
+        return dataset;
+    });
+    chart.data.datasets.forEach((dataset, index) => chart.setDatasetVisibility(index, visibility.get(dataset.suiteName) ?? true));
+    chart.options.plugins.legend.display = visibleSuites.length > 1;
+    legendSolo.afterInit(chart);
+    chart.options.normalized = visibleSuites.length <= 1;
+    chart.options.interaction.mode = visibleSuites.length > 1 ? "nearest" : "index";
+    chart.canvas.parentElement?.classList.toggle("multi-benchmark-plot", visibleSuites.length > 1);
+    chart.canvas.title = visibleSuites.length > 1
+        ? "Click a legend entry to toggle it. Right-click to solo; right-click the solo entry again to show all." : "";
+}
+
 function initCharts() {
     if (typeof Chart === "undefined") throw new Error("Chart library could not be loaded.");
     Chart.defaults.font.family = '"Bahnschrift", "Segoe UI", sans-serif';
@@ -715,15 +764,7 @@ function initCharts() {
         charts.set(id, new Chart(element(id), {
             type: stacked ? "bar" : "line",
             plugins: [stageMarkers, legendSolo],
-            data: { datasets: series.map(([, label, color]) => ({
-                label, data: [], borderColor: themeColor(color), backgroundColor: themeColor(color),
-                borderWidth: 1.8, pointRadius: stacked ? 0 : context => isolatedPointRadius(context, connectsStages(id)),
-                pointHitRadius: 8, pointHoverRadius: 3,
-                tension: 0, spanGaps: false,
-                segment: {borderColor: context => context.p0.raw.stage !== context.p1.raw.stage
-                    && !connectsStages(id)
-                    ? "transparent" : undefined},
-            })) },
+            data: { datasets: series.map(([, label, color]) => chartDataset(id, label, color, stacked)) },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
                 normalized: true, interaction: { mode: "index", intersect: false },
@@ -781,11 +822,24 @@ function redrawCharts() {
         const chart = charts.get(id);
         if (!chart) continue;
         const derivative = document.querySelector(`input[name="${id}-mode"]:checked`)?.value === "derivative";
-        series.forEach(([key], index) => {
-            chart.data.datasets[index].data = metricPoints(key, derivative);
-            const entry = typeof key === "string" ? metricCatalog[key] : null;
-            if (entry && series.length === 1) chart.data.datasets[index].label = `${entry.label} (${entry.unit})`;
-        });
+        const evaluationChart = ["benchmark-win-chart", "benchmark-return-chart"].includes(id)
+            || (id === "metric-chart" && metricCatalog[series[0][0]]?.scope === "evaluation");
+        if (evaluationChart) updateBenchmarkDatasets(chart, id, series[0][0], derivative);
+        else {
+            if (chart.data.datasets.some(dataset => dataset.suiteName !== undefined) || chart.data.datasets.length !== series.length) {
+                chart.data.datasets = series.map(([, label, color]) => chartDataset(id, label, color, id === "reward-types-chart"));
+                chart.options.plugins.legend.display = series.length > 1;
+                chart.options.normalized = true;
+                chart.options.interaction.mode = "index";
+                chart.canvas.parentElement?.classList.remove("multi-benchmark-plot");
+                chart.data.datasets.forEach((dataset, index) => chart.setDatasetVisibility(index, true));
+            }
+            series.forEach(([key], index) => {
+                chart.data.datasets[index].data = metricPoints(key, derivative);
+                const entry = typeof key === "string" ? metricCatalog[key] : null;
+                if (entry && series.length === 1) chart.data.datasets[index].label = `${entry.label} (${entry.unit})`;
+            });
+        }
         const entry = metricCatalog[series[0][0]];
         chart.options.scales.x.min = minimum;
         chart.options.scales.x.max = maximum;

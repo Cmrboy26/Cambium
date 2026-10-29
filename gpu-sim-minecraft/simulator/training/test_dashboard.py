@@ -877,7 +877,8 @@ vm.runInContext(`metricCatalog=catalog; chartAxis='samples'; windowSize=0; smoot
 records=[
     {update:1,samples:10,stage:'aim',stage_index:0,training_rollout:{training_return:2}},
     {update:2,samples:20,stage:'aim',stage_index:0,training_rollout:{training_return:4},
-     evaluations:{combined_benchmark:{snapshot_update:2,win_rate:.75,reward_mean:9,episodes:40}}},
+    evaluations:{combined_benchmark:{snapshot_update:2,win_rate:.75,reward_mean:9,episodes:40},
+               archer:{snapshot_update:2,win_rate:.25,reward_mean:-4,episodes:20}}},
     {update:3,samples:30,stage:'combat',stage_index:1,training_return:-99,training_win_rate:.1,
      training_episodes:1000,training_episode_window:1000,
      training_opponents:{past:{training_win_rate:.05,training_return:-50,training_episodes:20}},
@@ -885,12 +886,19 @@ records=[
          training_opponents:{past:{training_win_rate:.25,training_loss_rate:.75,training_return:-3,training_length:25,training_episodes:20}}},
      evaluations:{combined_benchmark:{snapshot_update:2,win_rate:.75,reward_mean:9,episodes:40}}}
 ]; renderPerformance();`,context);
+assert.equal(document.getElementById('stat-benchmark').textContent,'--');
+assert.match(document.getElementById('stat-benchmark-detail').textContent,/2 benchmark suites/);
+assert.match(document.getElementById('stat-benchmark-age').textContent,/Select a suite/);
+document.getElementById('benchmark-suite').value='combined_benchmark';
+vm.runInContext('renderPerformance();',context);
 assert.equal(document.getElementById('stat-benchmark').textContent,'75%');
 assert.match(document.getElementById('stat-benchmark-detail').textContent,/40 episodes/);
 assert.match(document.getElementById('stat-benchmark-age').textContent,/1 updates ago/);
 assert.equal(document.getElementById('stat-training-win').textContent,'50%');
 assert.deepEqual(evaluate("metricPoints('win_rate').map(({x,y})=>({x,y}))"),[{x:20,y:75}]);
 assert.deepEqual(evaluate("metricPoints('evaluation_reward').map(point=>point.y)"),[9]);
+assert.deepEqual(evaluate("metricPoints('win_rate',false,'archer').map(({x,y})=>({x,y}))"),[{x:20,y:25}]);
+assert.deepEqual(evaluate("metricPoints('evaluation_reward',false,'archer').map(point=>point.y)"),[-4]);
 assert.equal(evaluate("metricPoints('training_return').at(-1).y"),100,'EMA must restart at stage boundary');
 assert.equal(evaluate("metricPoints('training_return',true).at(-1).y"),null,'Derivative must restart at stage boundary');
 document.getElementById('training-opponent').value='past';
@@ -911,9 +919,34 @@ assert.equal(document.getElementById('optimization-title').hidden,undefined);
 assert.equal(document.getElementById('runtime-title').hidden,undefined);
 assert.equal(document.getElementById('stat-training-win').textContent,'70%');
 assert.match(document.getElementById('episode-status').textContent,/1,200 completed episodes in this rollout/);
-context.Chart=class {static defaults={font:{}};constructor(canvas,config){this.data=config.data;this.options=config.options;this.plugins=config.plugins;}update(){}};
+context.Chart=class {static defaults={font:{}};constructor(canvas,config){this.canvas=canvas;this.data=config.data;this.options=config.options;this.plugins=config.plugins;this.visibility=new Map();}
+    isDatasetVisible(index){return this.visibility.get(this.data.datasets[index]) ?? true;}
+    setDatasetVisibility(index,visible){this.visibility.set(this.data.datasets[index],visible);}
+    update(){}};
 vm.runInContext('initCharts(); redrawCharts();',context);
 assert.equal(evaluate("[...charts.values()].every(chart=>chart.plugins.some(plugin=>plugin.id==='legendSolo'))"),true);
+document.getElementById('benchmark-suite').value='';
+vm.runInContext('renderPerformance(); redrawCharts();',context);
+assert.deepEqual(evaluate("charts.get('benchmark-win-chart').data.datasets.map(dataset=>[dataset.label,dataset.data.map(point=>point.y)])"),
+    [['archer',[25]],['combined_benchmark',[75]]]);
+assert.deepEqual(evaluate("charts.get('benchmark-return-chart').data.datasets.map(dataset=>[dataset.label,dataset.data.map(point=>point.y)])"),
+    [['archer',[-4]],['combined_benchmark',[9]]]);
+assert.equal(evaluate("charts.get('benchmark-win-chart').options.plugins.legend.display"),true);
+assert.equal(evaluate("charts.get('benchmark-win-chart').options.normalized"),false);
+assert.equal(evaluate("charts.get('benchmark-win-chart').options.interaction.mode"),'nearest');
+assert.notEqual(evaluate("charts.get('benchmark-win-chart').data.datasets[0].borderColor"),
+    evaluate("charts.get('benchmark-win-chart').data.datasets[1].borderColor"));
+vm.runInContext("charts.get('benchmark-win-chart').setDatasetVisibility(0,false); redrawCharts();",context);
+assert.equal(evaluate("charts.get('benchmark-win-chart').isDatasetVisible(0)"),false,'Refresh preserves legend visibility');
+document.getElementById('benchmark-suite').value='combined_benchmark';
+vm.runInContext('renderPerformance(); redrawCharts();',context);
+assert.equal(evaluate("charts.get('benchmark-win-chart').data.datasets.length"),1);
+assert.equal(evaluate("charts.get('benchmark-win-chart').options.plugins.legend.display"),false);
+document.getElementById('benchmark-suite').value='';
+vm.runInContext('renderPerformance(); redrawCharts();',context);
+assert.equal(evaluate("charts.get('benchmark-win-chart').isDatasetVisible(0)"),false,'Switching suites preserves legend visibility');
+document.getElementById('benchmark-suite').value='combined_benchmark';
+vm.runInContext('renderPerformance(); redrawCharts();',context);
 assert.equal(evaluate("charts.get('training-outcomes-chart').data.datasets[0].data.at(-1).y"),70);
 assert.equal(evaluate("charts.get('training-outcomes-chart').options.scales.y.max"),100);
 assert.equal(evaluate("charts.get('training-outcomes-chart').options.scales.x.title.text"),'Learner transitions');

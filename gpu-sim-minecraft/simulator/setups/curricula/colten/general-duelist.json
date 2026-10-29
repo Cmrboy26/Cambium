@@ -1,0 +1,88 @@
+{
+  "format": "minecraft_sim_training_plan", "version": 2,
+  "name": "colten-general-duelist", "seed": 42,
+  "policy": "../../policies/colten/general-duelist.json",
+  "environment": "../../environments/colten/general-duelist.json",
+  "learner": {"hidden_dim": 256, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024, "ent_coef": 0.01},
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "walker": {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 25, "wall_margin": 2}},
+    "retaliator": {"type": "scripted", "controller": "stationary_melee", "options": {"attack_interval": 20}},
+    "fighter": {"type": "scripted", "controller": "basic_melee", "options": {"attack_interval": 17, "strafe": true, "sprint": true}},
+    "guard": {"type": "scripted", "controller": "basic_melee", "options": {"attack_interval": 17, "strafe": true, "shield": true, "axe_slot": 1, "sword_slot": 0}},
+    "archer": {"type": "scripted", "controller": "archer", "options": {"bow_slot": 2}},
+    "recent_self": {"type": "frozen_self_play", "every_updates": 25},
+    "older_self": {"type": "frozen_self_play", "every_updates": 100},
+    "unseen_evasive": {"type": "scripted", "controller": "tactical_melee", "options": {"style": "evasive", "attack_interval": 11, "melee_distance": 2.8, "strafe_interval": 11, "sprint": true}},
+    "unseen_aggressive": {"type": "scripted", "controller": "tactical_melee", "options": {"style": "aggressive", "attack_interval": 9, "sprint": true}},
+    "unseen_patient": {"type": "scripted", "controller": "tactical_melee", "options": {"style": "patient", "attack_interval": 23, "strafe_interval": 31, "shield": true, "axe_slot": 1, "sword_slot": 0}},
+    "unseen_walker": {"type": "scripted", "controller": "random_walk", "options": {"change_interval": 41, "wall_margin": 2, "sneak": true}}
+  },
+  "mixtures": {
+    "target": [{"id": "target", "weight": 1}],
+    "melee_practice": [{"id": "walker", "weight": 1}, {"id": "retaliator", "weight": 1}, {"id": "fighter", "weight": 2}],
+    "fighter": [{"id": "fighter", "weight": 1}],
+    "shield_practice": [{"id": "guard", "weight": 3}, {"id": "fighter", "weight": 2}, {"id": "walker", "weight": 1}],
+    "guard": [{"id": "guard", "weight": 1}],
+    "bow_practice": [{"id": "target", "weight": 1}, {"id": "walker", "weight": 2}],
+    "walker": [{"id": "walker", "weight": 1}],
+    "integrated": [{"id": "walker", "weight": 1}, {"id": "retaliator", "weight": 1}, {"id": "fighter", "weight": 2}, {"id": "guard", "weight": 2}, {"id": "archer", "weight": 2}, {"id": "recent_self", "weight": 1}, {"id": "older_self", "weight": 1}],
+    "heldout_evasive": [{"id": "unseen_evasive", "weight": 1}],
+    "heldout_aggressive": [{"id": "unseen_aggressive", "weight": 1}],
+    "heldout_patient": [{"id": "unseen_patient", "weight": 1}],
+    "heldout_walker": [{"id": "unseen_walker", "weight": 1}]
+  },
+  "evaluations": {
+    "retained_melee": {"stage": "melee", "overrides": {"opponents": "fighter"}, "every_updates": 50, "worlds": 32, "episodes": 64, "seed": 4100},
+    "retained_shield": {"stage": "shield_axe", "overrides": {"opponents": "guard"}, "every_updates": 50, "worlds": 32, "episodes": 64, "seed": 4105},
+    "retained_bow": {"stage": "bow", "overrides": {"opponents": "heldout_walker"}, "every_updates": 50, "worlds": 32, "episodes": 64, "seed": 4101},
+    "heldout_evasive": {"stage": "integrated", "overrides": {"opponents": "heldout_evasive"}, "every_updates": 50, "worlds": 32, "episodes": 64, "seed": 4102},
+    "heldout_aggressive": {"stage": "integrated", "overrides": {"opponents": "heldout_aggressive"}, "every_updates": 50, "worlds": 32, "episodes": 64, "seed": 4103},
+    "heldout_patient": {"stage": "integrated", "overrides": {"opponents": "heldout_patient", "spawns": {"sample": "episode", "region": {"min": [-9, 1, -9], "max": [9, 1, 9]}, "minimum_separation": 12, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [-10, 10]}}}, "every_updates": 50, "worlds": 32, "episodes": 64, "seed": 4104}
+  },
+  "stages": [
+    {
+      "name": "sword_basics", "opponents": "target",
+      "spawns": {"sample": "episode", "region": {"min": [-3, 1, -3], "max": [3, 1, 3]}, "minimum_separation": 3, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [-10, 10]}},
+      "controls": {"fixed": {"weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 500, "rewards": {"doing_damage": 20, "won_duel": 50, "win_speed": 10, "episode_timeout": -10, "no_damage_penalty": -10, "missed_attack_ready_time": -0.1, "good_aim": 1, "proximity": 1}},
+      "evaluations": {"sword_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 4200}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "sword_check", "metric": "win_rate", "at_least": 0.85}}]},
+      "snapshots": [{"name": "sword-basics-complete", "on_completion": true}]
+    },
+    {
+      "name": "melee", "opponents": "melee_practice",
+      "spawns": {"sample": "episode", "region": {"min": [-5, 1, -5], "max": [5, 1, 5]}, "minimum_separation": 4, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [-10, 10]}},
+      "controls": {"fixed": {"weapon": 0, "shield": false}},
+      "task_override": {"max_ticks": 700, "rewards": {"doing_damage": 20, "taking_damage": -10, "won_duel": 50, "death": -30, "win_speed": 10, "episode_timeout": -10, "no_damage_penalty": -10, "missed_attack_ready_time": -0.1, "good_aim": 0.5, "proximity": 0.5}},
+      "evaluations": {"melee_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 4201, "overrides": {"opponents": "fighter"}}},
+      "advance": {"all": [{"updates": 30}, {"evaluation": {"suite": "melee_check", "metric": "win_rate", "at_least": 0.7}}]},
+      "snapshots": [{"name": "melee-complete", "on_completion": true}]
+    },
+    {
+      "name": "shield_axe", "opponents": "shield_practice",
+      "spawns": {"sample": "episode", "region": {"min": [-5, 1, -5], "max": [5, 1, 5]}, "minimum_separation": 4, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [-10, 10]}},
+      "task_override": {"max_ticks": 700, "rewards": {"doing_damage": 20, "taking_damage": -10, "won_duel": 50, "death": -30, "win_speed": 10, "episode_timeout": -10, "no_damage_penalty": -10, "missed_attack_ready_time": -0.1, "shield_disabled": 0.3, "blocked_with_shield": 0.1}},
+      "evaluations": {"shield_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 4202, "overrides": {"opponents": "guard"}}},
+      "advance": {"all": [{"updates": 30}, {"evaluation": {"suite": "shield_check", "metric": "win_rate", "at_least": 0.6}}]},
+      "snapshots": [{"name": "shield-axe-complete", "on_completion": true}]
+    },
+    {
+      "name": "bow", "opponents": "bow_practice",
+      "spawns": {"sample": "episode", "region": {"min": [-9, 1, -8], "max": [9, 1, 8]}, "minimum_separation": 8, "yaw": {"uniform": [-180, 180]}, "pitch": {"uniform": [-10, 10]}},
+      "controls": {"fixed": {"weapon": 2, "attack": false}},
+      "task_override": {"max_ticks": 700, "rewards": {"doing_damage": 20, "taking_damage": -10, "won_duel": 50, "death": -30, "win_speed": 10, "episode_timeout": -10, "no_damage_penalty": -10, "good_aim": 1, "arrow_progress": 0.2}},
+      "evaluations": {"bow_check": {"every_updates": 10, "worlds": 32, "episodes": 64, "seed": 4203, "overrides": {"opponents": "walker"}}},
+      "advance": {"all": [{"updates": 30}, {"evaluation": {"suite": "bow_check", "metric": "win_rate", "at_least": 0.6}}]},
+      "snapshots": [{"name": "bow-complete", "on_completion": true}]
+    },
+    {
+      "name": "integrated", "opponents": "integrated",
+      "controls": {"fixed": {}},
+      "evaluations": {"training_fighter": {"every_updates": 25, "worlds": 32, "episodes": 64, "seed": 4204, "overrides": {"opponents": "fighter"}},
+        "training_guard": {"every_updates": 25, "worlds": 32, "episodes": 64, "seed": 4205, "overrides": {"opponents": "guard"}}},
+      "advance": {"updates": 1000000},
+      "snapshots": [{"name": "integrated-1000", "at_updates": 1000}, {"name": "integrated-complete", "on_completion": true}]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+  "name": "colten-general-duelist",
+  "arena": "../../arenas/colten/general-duelist.json",
+  "players": {
+    "shared": {
+      "health": 20,
+      "loadout": {
+        "weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe", "minecraft:bow", "minecraft:ender_pearl"],
+        "selected": 0, "arrows": 64, "ender_pearls": 16, "offhand": "minecraft:shield",
+        "armor": {"helmet": "minecraft:iron_helmet", "chestplate": "minecraft:iron_chestplate",
+                  "leggings": "minecraft:iron_leggings", "boots": "minecraft:iron_boots"}
+      }
+    },
+    "overrides": [
+      {"position": [-10, 1, 0], "yaw": -90, "pitch": 0},
+      {"position": [10, 1, 0], "yaw": 90, "pitch": 0}
+    ]
+  },
+  "task": {
+    "max_ticks": 900,
+    "rewards": {"doing_damage": 20, "taking_damage": -10, "won_duel": 50, "death": -30,
+      "win_speed": 10, "episode_timeout": -10, "no_damage_penalty": -10,
+      "missed_attack_ready_time": -0.1}
+  }
+}

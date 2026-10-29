@@ -244,6 +244,7 @@ legend { float: left; padding: 0; margin-right: 10px; color: var(--muted); }
 .chart-mode { margin: -5px 0 12px; font-size: 11px; }
 .chart-mode span { padding: 5px 10px; }
 .plot { position: relative; height: 225px; width: 100%; }
+.plot.multi-benchmark-plot { height: 340px; }
 .analytics-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .analytics-request-button { width: auto; min-height: 34px; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
 .analytics-request-button svg { width: 16px; height: 16px; }
@@ -424,5 +425,6 @@ tbody tr:hover { background: #f3f7f4; }
     .player-equipment dl { grid-template-columns: minmax(0, 1fr); }
     .chart { padding: 14px 12px; }
     .plot { height: 215px; }
+    .plot.multi-benchmark-plot { height: 400px; }
     dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
