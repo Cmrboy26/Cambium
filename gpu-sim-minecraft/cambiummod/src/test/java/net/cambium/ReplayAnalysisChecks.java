@@ -391,6 +391,7 @@ public final class ReplayAnalysisChecks {
 			JsonArray environments = new JsonArray();
 			environment.addProperty("id", "fixture:latest.pt");
 			environment.addProperty("name", "Fixture / latest environment");
+			environment.addProperty("run", "fixture");
 			environment.add("environment", JsonParser.parseString("""
 				{"name":"Shared arena","max_ticks":200,"arena":{"width":5},"loadout":{"weapon":"sword"}}
 				"""));
@@ -398,6 +399,7 @@ public final class ReplayAnalysisChecks {
 			JsonObject duplicate = environment.deepCopy();
 			duplicate.addProperty("id", "another:snapshots/early.pt");
 			duplicate.addProperty("name", "Another policy / early environment");
+			duplicate.addProperty("run", "another");
 			duplicate.getAsJsonObject("environment").addProperty("name", "Another label");
 			environments.add(duplicate);
 			for (String field : java.util.List.of("max_ticks", "arena", "loadout", "contract_hash")) {
@@ -421,11 +423,33 @@ public final class ReplayAnalysisChecks {
 			require(compatibleChoices.size() == 4 && compatibleChoices.stream().allMatch(choice -> choice.get("contract_hash").getAsString().equals("a".repeat(64))),
 					"Environment candidates must be filtered by selected policy layouts");
 			require(choices.getFirst().get("id").getAsString().equals("another:snapshots/early.pt"), "Grouping must preserve an already selected duplicate's identity");
+			require(DuelLibrary.environmentFromRun(choices.getFirst(), "fixture") && DuelLibrary.environmentFromRun(choices.getFirst(), "another"),
+					"Legacy duplicate environments must remain available under every source run");
 			require(choices.getFirst().get("name").getAsString().equals("Another label"), "Environment choices must use environment names rather than checkpoint labels");
 			require(choices.stream().map(choice -> choice.get("name").getAsString()).distinct().count() == choices.size(), "Different setups sharing an environment name must retain distinguishable source labels");
 			require(reopened.environments.getFirst().get("name").getAsString().equals("Fixture / latest environment"), "Selector grouping must not modify cached display names");
 			require(reopened.runs.size() == 1 && reopened.versions("fixture").size() == 2, "Legacy libraries must group downloaded versions by run");
 			require(reopened.versions("fixture").getFirst().get("id").getAsString().endsWith(":latest.pt"), "Latest must appear before named policy versions");
+			require(reopened.versionsByUpdate("fixture").getFirst().get("id").getAsString().endsWith(":latest.pt")
+					&& reopened.versionsByUpdate("fixture").getLast().get("update").getAsLong() == 200,
+					"Checkpoint slider ordering must follow update numbers, not checkpoint names");
+			reopened.find(reopened.policies, "fixture:latest.pt").addProperty("update", 200);
+			require(reopened.versionsByUpdate("fixture").getLast().get("id").getAsString().endsWith(":latest.pt"),
+					"Latest and snapshots at the same update must remain distinct and deterministic");
+			require(ControlPanel.checkpointIndex(0, 3) == 0 && ControlPanel.checkpointIndex(1, 3) == 2
+					&& ControlPanel.checkpointIndex(0.5, 3) == 1 && ControlPanel.checkpointPosition(0, 1) == 0,
+					"Checkpoint slider endpoints, midpoint and single-entry positions must be stable");
+			for (int checkpointIndex = 0; checkpointIndex < 250; checkpointIndex++) {
+				require(ControlPanel.checkpointIndex(ControlPanel.checkpointPosition(checkpointIndex, 250), 250) == checkpointIndex,
+						"Every checkpoint must be reachable by its discrete slider position");
+			}
+			reopened.toggleFavorite("fixture:snapshots/early.pt");
+			DuelLibrary.write(library.root.resolve("library.json"), index);
+			DuelLibrary withFavorite = new DuelLibrary(game);
+			require(withFavorite.isFavorite("fixture:snapshots/early.pt") && withFavorite.favoriteVersions().size() == 1,
+					"Favorites must survive a library index rewrite and reopening");
+			withFavorite.toggleFavorite("fixture:snapshots/early.pt");
+			require(!new DuelLibrary(game).isFavorite("fixture:snapshots/early.pt"), "Removing a favorite must persist");
 			JsonObject compact = environment.deepCopy();
 			compact.add("sources", JsonParser.parseString("""
 				[{"id":"fixture:latest.pt","name":"Fixture / latest environment","run":"fixture"},
@@ -444,6 +468,9 @@ public final class ReplayAnalysisChecks {
 			DuelLibrary.write(library.root.resolve("library.json"), index);
 			DuelLibrary compactLibrary = new DuelLibrary(game);
 			var compactChoices = compactLibrary.environmentChoices("another:snapshots/early.pt");
+			require(DuelLibrary.environmentFromRun(compactChoices.getFirst(), "another")
+					&& !DuelLibrary.environmentFromRun(compactChoices.getLast(), "another"),
+					"Run grouping must include shared environment sources without mixing unrelated variants");
 			JsonObject selectedCompact = compactChoices.stream()
 					.filter(choice -> choice.get("id").getAsString().equals("another:snapshots/early.pt")).findFirst().orElseThrow();
 			require(compactChoices.size() == 2,

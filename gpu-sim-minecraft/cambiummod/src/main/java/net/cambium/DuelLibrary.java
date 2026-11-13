@@ -16,6 +16,7 @@ final class DuelLibrary {
 	final List<JsonObject> policies = new ArrayList<>();
 	final List<JsonObject> environments = new ArrayList<>();
 	final List<JsonObject> runs = new ArrayList<>();
+	private final java.util.Set<String> favorites = new java.util.LinkedHashSet<>();
 	private JsonObject index;
 
 	DuelLibrary(Path game) throws IOException {
@@ -45,6 +46,12 @@ final class DuelLibrary {
 				index.getAsJsonArray("runs").add(run);
 			}
 		}
+		Path favoritesPath = root.resolve("favorites.json");
+		if (Files.isRegularFile(favoritesPath)) {
+			JsonObject saved = JsonParser.parseString(Files.readString(favoritesPath)).getAsJsonObject();
+			if (saved.get("version").getAsInt() != 1) throw new IOException("Unsupported favorites version");
+			for (var value : saved.getAsJsonArray("policies")) favorites.add(value.getAsString());
+		}
 	}
 
 	List<JsonObject> versions(String run) {
@@ -52,6 +59,34 @@ final class DuelLibrary {
 				.sorted(java.util.Comparator.<JsonObject, Boolean>comparing(entry -> !entry.get("id").getAsString().endsWith(":latest.pt"))
 						.thenComparing(java.util.Comparator.comparingLong((JsonObject entry) -> entry.has("update") ? entry.get("update").getAsLong() : 0).reversed()))
 				.toList();
+	}
+
+	List<JsonObject> versionsByUpdate(String run) {
+		return policies.stream().filter(entry -> entry.has("run") ? entry.get("run").getAsString().equals(run) : run.isEmpty())
+				.sorted(java.util.Comparator.comparingLong((JsonObject entry) -> entry.has("update") ? entry.get("update").getAsLong() : 0)
+				.thenComparing(entry -> entry.get("id").getAsString().endsWith(":latest.pt"))
+				.thenComparing(entry -> entry.get("id").getAsString())).toList();
+	}
+
+	boolean isFavorite(String identity) { return favorites.contains(identity); }
+
+	void toggleFavorite(String identity) throws IOException {
+		var updated = new java.util.LinkedHashSet<>(favorites);
+		if (!updated.remove(identity)) updated.add(identity);
+		JsonObject saved = new JsonObject();
+		saved.addProperty("version", 1);
+		JsonArray entries = new JsonArray();
+		updated.forEach(entries::add);
+		saved.add("policies", entries);
+		write(root.resolve("favorites.json"), saved);
+		favorites.clear();
+		favorites.addAll(updated);
+	}
+
+	List<JsonObject> favoriteVersions() {
+		return policies.stream().filter(entry -> isFavorite(entry.get("id").getAsString()))
+				.sorted(java.util.Comparator.comparingLong((JsonObject entry) -> entry.has("update") ? entry.get("update").getAsLong() : 0)
+						.thenComparing(entry -> entry.get("id").getAsString())).toList();
 	}
 
 	List<JsonObject> environmentChoices(String selected) {
@@ -62,15 +97,18 @@ final class DuelLibrary {
 			JsonObject key = new JsonObject();
 			key.add("contract_hash", entry.get("contract_hash"));
 			key.add("environment", definition);
-			if (!choices.containsKey(key) || hasSource(entry, selected)) {
+			JsonObject existing = choices.get(key);
+			if (existing == null || hasSource(entry, selected)) {
 				JsonObject choice = entry.deepCopy();
+				mergeEnvironmentSources(choice, entry);
 				JsonObject environment = entry.getAsJsonObject("environment");
 				if (environment.has("name") && !environment.get("name").getAsString().isBlank()) {
 					choice.addProperty("name", environment.get("name").getAsString());
 				}
 				if (hasSource(entry, selected)) choice.addProperty("id", selected);
+				if (existing != null) mergeEnvironmentSources(choice, existing);
 				choices.put(key, choice);
-			}
+			} else mergeEnvironmentSources(existing, entry);
 		}
 		var names = choices.values().stream().collect(java.util.stream.Collectors.groupingBy(
 				choice -> choice.get("name").getAsString(), java.util.stream.Collectors.counting()));
@@ -85,6 +123,41 @@ final class DuelLibrary {
 	List<JsonObject> environmentChoices(String selected, List<String> contractHashes) {
 		return environmentChoices(selected).stream().filter(choice -> contractHashes.stream()
 				.allMatch(hash -> choice.get("contract_hash").getAsString().equals(hash))).toList();
+	}
+
+	static boolean environmentFromRun(JsonObject entry, String run) {
+		if (entry.has("run") && entry.get("run").getAsString().equals(run)) return true;
+		if (entry.has("sources")) for (var source : entry.getAsJsonArray("sources")) {
+			JsonObject value = source.getAsJsonObject();
+			if (value.has("run") && value.get("run").getAsString().equals(run)) return true;
+		}
+		return false;
+	}
+
+	private static void mergeEnvironmentSources(JsonObject target, JsonObject additional) {
+		JsonArray sources = target.has("sources") ? target.getAsJsonArray("sources") : new JsonArray();
+		if (!target.has("sources")) {
+			JsonObject source = new JsonObject();
+			source.add("id", target.get("id"));
+			source.add("name", target.get("name"));
+			if (target.has("run")) source.add("run", target.get("run"));
+			sources.add(source);
+			target.add("sources", sources);
+		}
+		JsonArray additions = additional.has("sources") ? additional.getAsJsonArray("sources") : new JsonArray();
+		if (!additional.has("sources")) {
+			JsonObject source = new JsonObject();
+			source.add("id", additional.get("id"));
+			source.add("name", additional.get("name"));
+			if (additional.has("run")) source.add("run", additional.get("run"));
+			additions.add(source);
+		}
+		for (var source : additions) {
+			String identity = source.getAsJsonObject().get("id").getAsString();
+			boolean present = false;
+			for (var existing : sources) if (existing.getAsJsonObject().get("id").getAsString().equals(identity)) { present = true; break; }
+			if (!present) sources.add(source.deepCopy());
+		}
 	}
 
 	private static boolean hasSource(JsonObject entry, String identity) {
@@ -110,7 +183,8 @@ final class DuelLibrary {
 	static String versionName(JsonObject entry) {
 		String identity = entry.get("id").getAsString();
 		String version = identity.endsWith(":latest.pt") ? "Latest" : identity.substring(identity.lastIndexOf('/') + 1).replace(".pt", "");
-		return version + " / update " + (entry.has("update") ? entry.get("update").getAsLong() : 0) + " / " + entry.get("name").getAsString();
+		String stage = entry.has("stage") && !entry.get("stage").getAsString().isBlank() ? " / " + entry.get("stage").getAsString() : "";
+		return version + " / update " + (entry.has("update") ? entry.get("update").getAsLong() : 0) + stage + " / " + entry.get("name").getAsString();
 	}
 
 	JsonObject find(List<JsonObject> entries, String identity) {

@@ -30,16 +30,19 @@ Press **F8** or use `/simmenu` in a world. After the
 [one-time local Rosie setup](../rosie/README.md#local-replays-and-duels), the
 **Rosie** tab lists runs and syncs policies only, policies plus the latest replay,
 or all outputs, with transfer progress. **Library** groups policies by run, with
-a version selector and local-only run/policy display names. **Import** adds a
+a checkpoint slider, favorites, and local-only run/policy display names. **Import** adds a
 trusted compatible `.pt` checkpoint and its embedded environment without Rosie.
-In a private singleplayer world, **Duel** lets you choose an environment and independently select a policy or scripted
-controller for each fighter, set the round duration, then start. Synced setups
+In a private singleplayer world, **Duel** groups environments by source run and
+family, and lets you independently select a policy or scripted controller for
+each fighter, set the round duration, then start. Synced setups
 run locally while offline. **Stop match** keeps Python/PyTorch warm for the next
 launch; **Shutdown inference** releases it. **Live** also has pause/resume/reset
 and join/leave controls. The debug
 HUD places P1 left, P2 right and match status centrally, with health/charge/time
 bars and gear icons. Toggle it there or with `/simduel hud`, never the action bar.
-Selections and aliases persist in the game folder. Existing commands still work.
+Selections, favorites and aliases persist in the game folder. Favoriting a run's
+`Latest` follows its latest synced checkpoint; favorite a snapshot to pin it.
+Existing commands still work.
 
 ## Experimental Player Control
 

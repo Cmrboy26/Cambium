@@ -268,10 +268,17 @@ saved IDs through those aliases, including IDs from older version-1 libraries.
 Genuinely different geometry, loadouts, duration or policy layouts remain
 separate and display their useful variant details; source labels disambiguate
 distinct setups with the same name. Re-indexing needs no library version bump.
-Sync preserves other runs and existing policy aliases.
-Library rows select runs; the bottom selector chooses Latest or a retained policy
-version. Local run and per-version display names are independent of remote IDs,
-paths and files; sync preserves both. Renaming is disabled while the helper runs.
+Sync preserves other runs and existing policy aliases. The environment selector
+offers all environments or a source run, then a family and a distinct variant;
+shared sources remain available under every contributing run.
+Library, Duel and Player group policies by run or favorites. Their checkpoint
+sliders order available versions by update, with snapshot and Latest identities
+kept distinct even when updates match. Arrow keys move one checkpoint at a time.
+`sim-rosie-cache/favorites.json` stores local checkpoint IDs independently of the
+rewritten library index. A favorite of Latest follows future syncs; a favorite
+of a named snapshot pins that snapshot. Local run and per-version display names
+are independent of remote IDs, paths and files; sync preserves both. Renaming is
+disabled while the helper runs.
 Cached checkpoints must exist inside
 the cache's real path; mismatched contracts are rejected before starting.
 Arena environment candidates must match the semantic contract hashes of both

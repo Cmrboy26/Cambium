@@ -22,7 +22,8 @@ param(
     [string] $MinecraftDirectory,
     [string] $SshHost = $env:ROSIE_SSH_JUMP,
     [string] $SshUser = $env:ROSIE_SSH_USER,
-    [string] $RemoteRunsDirectory = '~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs',
+    [string] $RemoteCambiumDirectory = $env:ROSIE_REMOTE_CAMBIUM_DIR,
+    [string] $RemoteRunsDirectory,
     [string] $Python,
     [switch] $Offline,
     [switch] $DryRun
@@ -51,6 +52,14 @@ if ($Setup) {
     }
     if (-not $SshUser) { throw 'Specify -SshUser for your Rosie account.' }
     if ($SshUser -notmatch '@') { $SshUser += '@ad.msoe.edu' }
+    if (-not $RemoteRunsDirectory) {
+        if (-not $RemoteCambiumDirectory) { $RemoteCambiumDirectory = '~/minecraftlol/Cambium' }
+        if (-not $DryRun) {
+            $answer = (Read-Host "Remote Cambium directory on Rosie [$RemoteCambiumDirectory]").Trim()
+            if ($answer) { $RemoteCambiumDirectory = $answer }
+        }
+        $RemoteRunsDirectory = "$($RemoteCambiumDirectory.TrimEnd('/'))/gpu-sim-minecraft/simulator/training/runs"
+    }
     $command += @('setup', '--minecraft-directory', $game, '--host', $SshHost,
         '--user', $SshUser, '--runs-directory', $RemoteRunsDirectory)
 } elseif ($Connect) {

@@ -44,7 +44,7 @@ replace underscores with hyphens (for example `--gae-lambda` and `--ent-coef`).
 `clip_eps` controls both policy-ratio and value clipping, preserving the original
 PPO behavior. Positive `ent_coef` encourages stochastic exploration, not faster
 deterministic convergence. GAE and optimization consume the resolved settings
-directly, not the legacy `FastRLAgent` class constants. No hot reload is supported.
+directly. No hot reload is supported.
 
 The resolved experiment and `config.json` options record every effective value.
 Run metadata, `latest.pt` and retained policy snapshots additionally include

@@ -801,7 +801,8 @@ class ResearchChecks(unittest.TestCase):
         observations = torch.zeros(2, 3)
         actions = torch.tensor([[0], [1]])
         with torch.no_grad():
-            log_probs, values, _ = model.evaluate_policy_actions(observations, actions)
+            logits, values = model(observations)
+            log_probs = torch.distributions.Categorical(logits=logits["attack"]).log_prob(actions[:, 0])
         rollout = {"observations": observations.unsqueeze(1), "actions": actions.unsqueeze(1),
                    "log_probs": (log_probs - np.log(1.5)).unsqueeze(1), "values": (values + 1).unsqueeze(1),
                    "advantages": torch.tensor([[1.], [-1.]]), "returns": values.unsqueeze(1)}

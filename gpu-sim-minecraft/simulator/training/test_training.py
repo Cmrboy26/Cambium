@@ -23,8 +23,9 @@ from simulator.training.environment import (
 )
 from simulator.training.contract import FEATURES, from_legacy, validate_contract, resolve_scenario
 from simulator.training.controllers import CONTROLLER_REGISTRY
+from simulator.training.policies import policy_actions
 from simulator.training.serve import DuelPolicy, Policy, make_server
-from simulator.training.compatibility_training import ReplaySamples, collect_rollout, compute_gae, main
+from simulator.training.compatibility_training import ReplaySamples, arguments as compatibility_arguments, collect_rollout, compute_gae, main
 
 
 def neutral(count, heads=6):
@@ -521,6 +522,10 @@ class InferenceChecks(unittest.TestCase):
 
 
 class TrainingChecks(unittest.TestCase):
+    def test_compatibility_learning_rate_default_and_override(self):
+        self.assertEqual(compatibility_arguments([]).lr, 0.0003)
+        self.assertEqual(compatibility_arguments(["--lr", "0.001"]).lr, 0.001)
+
     def test_native_capture_records_selected_pre_step_state(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "capture.bin"
@@ -1127,7 +1132,8 @@ class TrainingChecks(unittest.TestCase):
         self.assertEqual(list(logits), SCHEMA_V2["action_names"])
         self.assertEqual([head.shape[-1] for head in logits.values()], SCHEMA_V2["action_sizes"])
         actions = [torch.zeros(3, dtype=torch.long) for _ in logits]
-        log_probs, _, entropy = model.evaluate_actions(observations, *actions)
+        _, log_probs, _, entropy = policy_actions(model, observations, model.action_names,
+                               actions=torch.stack(actions, dim=-1))
         expected = [torch.distributions.Categorical(logits=head) for head in logits.values()]
         torch.testing.assert_close(log_probs, sum(head.log_prob(action) for head, action in zip(expected, actions)))
         torch.testing.assert_close(entropy, sum(head.entropy() for head in expected))
@@ -1522,7 +1528,9 @@ class TrainingChecks(unittest.TestCase):
             observations = environment.reset()
             self.assertEqual(environment.reward_totals(), totals)
             model = ActorCritic(22, 16, 9)
-            rollout, _, _, _ = collect_rollout(model, environment, observations, 3, torch.device("cpu"))
+            with mock.patch("simulator.training.compatibility_training.compute_gae", wraps=compute_gae) as gae:
+                rollout, _, _, _ = collect_rollout(model, environment, observations, 3, torch.device("cpu"))
+            self.assertEqual(gae.call_args.args[-2:], (0.99, 0.95))
             self.assertEqual(rollout["reward_types"]["episode_timeout"], -120)
             self.assertEqual(rollout["reward_types"]["no_damage_penalty"], -120)
             np.testing.assert_allclose(sum(rollout["reward_types"].values()),

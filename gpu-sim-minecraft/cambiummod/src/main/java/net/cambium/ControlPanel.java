@@ -18,11 +18,13 @@ import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.KeyEvent;
 import net.minecraft.network.chat.Component;
 
 final class ControlPanel extends Screen {
@@ -45,6 +47,7 @@ final class ControlPanel extends Screen {
 	private String selectedPolicy = "";
 	private String selectedTarget = "";
 	private String libraryRun = "";
+	private boolean libraryFavorites;
 	private int maxTicks;
 	private String selectedRun = "";
 	private String syncScope = "policy";
@@ -124,7 +127,7 @@ final class ControlPanel extends Screen {
 	}
 
 	void remoteChanged() { if (width > 0) rebuildWidgets(); }
-	void imported(String run) { libraryRun = run; selectedPolicy = ""; refreshLibrary(); }
+	void imported(String run) { libraryRun = run; libraryFavorites = false; selectedPolicy = ""; refreshLibrary(); }
 
 	@Override
 	public void tick() {
@@ -190,8 +193,7 @@ final class ControlPanel extends Screen {
 					: modes[index].equals("Stationary target") ? "Idle target" : "Script settings";
 			Button selection = button(title, column, 146, columnWidth, () -> {
 				if (modes[fighter].equals("Policy")) {
-					List<JsonObject> compatible = library == null ? List.of() : library.policies;
-					choose("Fighter " + (fighter == 0 ? "A" : "B"), compatible, entry -> { policyIds[fighter] = identity(entry); persist(); });
+					if (library != null) choosePolicy("Fighter " + (fighter == 0 ? "A" : "B"), policyIds[fighter], entry -> { policyIds[fighter] = identity(entry); persist(); });
 				} else minecraft.gui.setScreen(new ScriptScreen(fighter));
 			});
 			selection.active = !modes[index].equals("Stationary target");
@@ -216,22 +218,45 @@ final class ControlPanel extends Screen {
 		button("Import", left + contentWidth - 164, 64, 80, this::importPolicy).active = !RosieLauncher.isBusy();
 		button("Refresh", left + contentWidth - 80, 64, 80, this::refreshLibrary);
 		String filter = query.toLowerCase(Locale.ROOT);
-		List<JsonObject> entries = library == null ? List.of() : library.runs.stream().filter(entry -> name(entry).toLowerCase(Locale.ROOT).contains(filter)
-				|| identity(entry).toLowerCase(Locale.ROOT).contains(filter) || library.versions(identity(entry)).stream().anyMatch(policy -> name(policy).toLowerCase(Locale.ROOT).contains(filter))).toList();
+		List<JsonObject> entries = new ArrayList<>();
+		if (library != null) {
+			List<JsonObject> favorites = library.favoriteVersions();
+			if ("favorites".contains(filter) || favorites.stream().anyMatch(policy -> name(policy).toLowerCase(Locale.ROOT).contains(filter))) {
+				JsonObject group = new JsonObject();
+				group.addProperty("id", "favorites");
+				group.addProperty("name", "Favorites");
+				group.addProperty("favorites_group", true);
+				entries.add(group);
+			}
+			entries.addAll(library.runs.stream().filter(entry -> name(entry).toLowerCase(Locale.ROOT).contains(filter)
+					|| identity(entry).toLowerCase(Locale.ROOT).contains(filter) || library.versions(identity(entry)).stream().anyMatch(policy -> name(policy).toLowerCase(Locale.ROOT).contains(filter))).toList());
+		}
 		int rows = Math.max(1, (height - 212) / 24);
 		page = Math.min(page, Math.max(0, (entries.size() - 1) / rows));
 		for (int index = page * rows; index < Math.min(entries.size(), (page + 1) * rows); index++) {
 			JsonObject entry = entries.get(index);
-			button((identity(entry).equals(libraryRun) ? "> " : "") + name(entry) + " / " + library.versions(identity(entry)).size() + " versions",
-					left, 92 + (index % rows) * 24, contentWidth, () -> { libraryRun = identity(entry); selectVersion(); rebuildWidgets(); });
+			boolean favorites = entry.has("favorites_group");
+			int count = favorites ? library.favoriteVersions().size() : library.versions(identity(entry)).size();
+			boolean selectedGroup = favorites ? libraryFavorites : !libraryFavorites && identity(entry).equals(libraryRun);
+			button((selectedGroup ? "> " : "") + name(entry) + " / " + count + " versions", left, 92 + (index % rows) * 24, contentWidth, () -> {
+						libraryFavorites = favorites;
+						if (!favorites) libraryRun = identity(entry);
+						selectVersion();
+						rebuildWidgets();
+					});
 		}
 		if (entries.isEmpty()) label("No matching local runs", left, 100, contentWidth, 0xFFACBDB5);
 		pager(entries.size(), rows, height - 108);
-		List<JsonObject> versions = library == null ? List.of() : library.versions(libraryRun);
+		List<JsonObject> versions = library == null ? List.of() : libraryFavorites ? library.favoriteVersions() : library.versionsByUpdate(libraryRun);
 		JsonObject version = library == null ? null : library.find(versions, selectedPolicy);
-		if (version != null) addRenderableWidget(CycleButton.builder(entry -> Component.literal(fit(DuelLibrary.versionName(entry), contentWidth - 24)), version)
-				.withValues(versions).displayOnlyValue().create(left, height - 80, contentWidth, 20, Component.literal("Policy version"),
-						(widget, value) -> { selectedPolicy = identity(value); rebuildWidgets(); })).setTooltip(Tooltip.create(Component.literal(DuelLibrary.versionName(version))));
+		if (version != null) {
+			Button favorite = button(favoriteLabel(selectedPolicy), left + contentWidth - 100, height - 80, 100, () -> toggleFavorite(selectedPolicy));
+			addRenderableWidget(new CheckpointSlider(left, height - 80, contentWidth - 104, versions, selectedPolicy, entry -> {
+				selectedPolicy = identity(entry);
+				favorite.setMessage(Component.literal(favoriteLabel(selectedPolicy)));
+				favorite.setTooltip(Tooltip.create(Component.literal(favoriteLabel(selectedPolicy))));
+			}));
+		}
 		int actionWidth = (contentWidth - 12) / 4;
 		for (int index = 0; index < 2; index++) {
 			final int fighter = index;
@@ -245,14 +270,14 @@ final class ControlPanel extends Screen {
 		}).active = !RosieLauncher.isBusy() && library != null && library.find(library.policies, selectedPolicy) != null;
 		button("Name run", left + 3 * (actionWidth + 4), height - 30, actionWidth,
 				() -> minecraft.gui.setScreen(new RenameScreen(library.find(library.runs, libraryRun))))
-				.active = !RosieLauncher.isBusy() && library != null && library.find(library.runs, libraryRun) != null;
+				.active = !libraryFavorites && !RosieLauncher.isBusy() && library != null && library.find(library.runs, libraryRun) != null;
 	}
 
 	private void playerControl() {
 		JsonObject selected = library == null ? null : library.find(library.policies, selectedPolicy);
 		label("Policy", left, 65, contentWidth, 0xFFB5C2BE);
 		button(selected == null ? "Select a local policy" : name(selected), left, 78, contentWidth, () ->
-				choose("Player policy", library.policies, entry -> selectedPolicy = identity(entry)))
+				choosePolicy("Player policy", selectedPolicy, entry -> selectedPolicy = identity(entry)))
 				.active = library != null && !library.policies.isEmpty() && !PlayerControl.active();
 		List<JsonObject> targets = new ArrayList<>();
 		for (var player : minecraft.level.players()) if (!player.getUUID().equals(minecraft.player.getUUID())) {
@@ -303,8 +328,15 @@ final class ControlPanel extends Screen {
 	}
 
 	private void selectVersion() {
-		List<JsonObject> versions = library.versions(libraryRun);
-		if (library.find(versions, selectedPolicy) == null) selectedPolicy = versions.isEmpty() ? "" : identity(versions.getFirst());
+		List<JsonObject> versions = libraryFavorites ? library.favoriteVersions() : library.versions(libraryRun);
+		if (library.find(versions, selectedPolicy) == null) selectedPolicy = versions.isEmpty() ? "" : identity(libraryFavorites ? versions.getLast() : versions.getFirst());
+	}
+
+	private String favoriteLabel(String policy) { return library.isFavorite(policy) ? "Unfavorite" : "Favorite"; }
+
+	private void toggleFavorite(String policy) {
+		try { library.toggleFavorite(policy); selectVersion(); status = ""; rebuildWidgets(); }
+		catch (IOException error) { status = "Could not save favorite: " + error.getMessage(); }
 	}
 
 	private void rosie() {
@@ -408,8 +440,42 @@ final class ControlPanel extends Screen {
 		minecraft.gui.setScreen(new ChoiceScreen(title, entries, entry -> { selected.accept(entry); status = ""; }));
 	}
 
+	private void choosePolicy(String title, String current, Consumer<JsonObject> selected) {
+		minecraft.gui.setScreen(new PolicyScreen(title, current, selected));
+	}
+
 	private void chooseEnvironment() {
 		List<JsonObject> choices = compatibleEnvironmentChoices();
+		var runIds = new java.util.LinkedHashSet<String>();
+		for (JsonObject choice : choices) {
+			if (choice.has("run") && !choice.get("run").getAsString().isBlank()) runIds.add(choice.get("run").getAsString());
+			if (choice.has("sources")) for (var source : choice.getAsJsonArray("sources")) {
+				JsonObject entry = source.getAsJsonObject();
+				if (entry.has("run") && !entry.get("run").getAsString().isBlank()) runIds.add(entry.get("run").getAsString());
+			}
+		}
+		List<JsonObject> groups = new ArrayList<>();
+		JsonObject all = new JsonObject();
+		all.addProperty("id", "all");
+		all.addProperty("name", "All environments (" + choices.size() + ")");
+		groups.add(all);
+		for (String runId : runIds) {
+			JsonObject run = library.find(library.runs, runId);
+			long count = choices.stream().filter(choice -> DuelLibrary.environmentFromRun(choice, runId)).count();
+			JsonObject group = new JsonObject();
+			group.addProperty("id", runId);
+			group.addProperty("run", runId);
+			group.addProperty("name", (run == null ? runId : name(run)) + " (" + count + ")");
+			groups.add(group);
+		}
+		minecraft.gui.setScreen(new ChoiceScreen("Environment runs", groups, (group, screen) -> {
+			List<JsonObject> filtered = group.has("run") ? choices.stream()
+					.filter(choice -> DuelLibrary.environmentFromRun(choice, group.get("run").getAsString())).toList() : choices;
+			chooseEnvironmentFamilies(filtered, screen);
+		}, ControlPanel.this, null));
+	}
+
+	private void chooseEnvironmentFamilies(List<JsonObject> choices, Screen parent) {
 		var families = new java.util.LinkedHashMap<String, List<JsonObject>>();
 		for (JsonObject choice : choices) {
 			JsonObject environment = choice.getAsJsonObject("environment");
@@ -441,7 +507,7 @@ final class ControlPanel extends Screen {
 				persist();
 				status = "";
 			}, familyScreen, ControlPanel.this));
-		}, ControlPanel.this, null));
+		}, parent, null));
 	}
 
 	private JsonObject environment() { return library == null ? null : library.find(library.environmentChoices(environmentId), environmentId); }
@@ -596,6 +662,147 @@ final class ControlPanel extends Screen {
 
 	@Override public boolean isPauseScreen() { return false; }
 	@Override public void onClose() { persist(); minecraft.gui.setScreen(previous); }
+
+	private final class CheckpointSlider extends AbstractSliderButton {
+		private final List<JsonObject> versions;
+		private final Consumer<JsonObject> selected;
+
+		CheckpointSlider(int position, int top, int size, List<JsonObject> versions, String current, Consumer<JsonObject> selected) {
+			super(position, top, size, 20, Component.empty(), sliderPosition(versions, current));
+			this.versions = versions;
+			this.selected = selected;
+			active = versions.size() > 1;
+			updateMessage();
+		}
+
+		private int selectedIndex() { return checkpointIndex(value, versions.size()); }
+
+		@Override protected void updateMessage() {
+			String title = DuelLibrary.versionName(versions.get(selectedIndex()));
+			setMessage(Component.literal(fit(title, getWidth() - 24)));
+			setTooltip(Tooltip.create(Component.literal(title)));
+		}
+
+		@Override protected void applyValue() {
+			int index = selectedIndex();
+			value = checkpointPosition(index, versions.size());
+			selected.accept(versions.get(index));
+		}
+
+		@Override public boolean keyPressed(KeyEvent event) {
+			if (canChangeValue && versions.size() > 1 && (event.isLeft() || event.isRight())) {
+				int index = Math.clamp(selectedIndex() + (event.isLeft() ? -1 : 1), 0, versions.size() - 1);
+				setValue(checkpointPosition(index, versions.size()));
+				return true;
+			}
+			return super.keyPressed(event);
+		}
+	}
+
+	private static double sliderPosition(List<JsonObject> versions, String current) {
+		for (int index = 0; index < versions.size(); index++) {
+			if (identity(versions.get(index)).equals(current)) return checkpointPosition(index, versions.size());
+		}
+		return 0;
+	}
+
+	static int checkpointIndex(double value, int count) { return Math.clamp((int) Math.round(value * (count - 1)), 0, count - 1); }
+
+	static double checkpointPosition(int index, int count) { return count == 1 ? 0 : index / (double) (count - 1); }
+
+	private final class PolicyScreen extends Screen {
+		private final Consumer<JsonObject> selected;
+		private String selectedId;
+		private String groupRun;
+		private boolean favoritesGroup;
+		private String filter = "";
+		private String error = "";
+		private int selectedPage;
+		private int position;
+		private int size;
+
+		PolicyScreen(String title, String current, Consumer<JsonObject> selected) {
+			super(Component.literal(title));
+			this.selected = selected;
+			selectedId = current;
+			JsonObject policy = library.find(library.policies, current);
+			groupRun = policy != null && policy.has("run") ? policy.get("run").getAsString()
+					: library.runs.isEmpty() ? "" : identity(library.runs.getFirst());
+		}
+
+		private List<JsonObject> versions() { return favoritesGroup ? library.favoriteVersions() : library.versionsByUpdate(groupRun); }
+
+		private void selectGroup(String run, boolean favorites) {
+			groupRun = run;
+			favoritesGroup = favorites;
+			List<JsonObject> versions = versions();
+			if (library.find(versions, selectedId) == null) selectedId = versions.isEmpty() ? "" : identity(versions.getLast());
+			rebuildWidgets();
+		}
+
+		@Override protected void init() {
+			size = Math.min(650, width - 32);
+			position = (width - size) / 2;
+			List<JsonObject> versions = versions();
+			if (library.find(versions, selectedId) == null) selectedId = versions.isEmpty() ? "" : identity(versions.getLast());
+			EditBox search = addRenderableWidget(new EditBox(font, position, 42, size, 20, Component.literal("Search runs")));
+			search.setHint(Component.literal("Search runs"));
+			search.setValue(filter);
+			search.setResponder(value -> { filter = value; selectedPage = 0; rebuildWidgets(); });
+			setInitialFocus(search);
+			addRenderableWidget(Button.builder(Component.literal((favoritesGroup ? "> " : "") + "Favorites (" + library.favoriteVersions().size() + ")"),
+					widget -> selectGroup("", true)).bounds(position, 70, size, 20).build());
+			List<JsonObject> groups = new ArrayList<>(library.runs);
+			if (!library.versionsByUpdate("").isEmpty()) {
+				JsonObject ungrouped = new JsonObject();
+				ungrouped.addProperty("id", "");
+				ungrouped.addProperty("name", "Other policies");
+				groups.add(ungrouped);
+			}
+			String searchText = filter.toLowerCase(Locale.ROOT);
+			groups = groups.stream().filter(run -> {
+				String runId = identity(run);
+				return name(run).toLowerCase(Locale.ROOT).contains(searchText) || runId.toLowerCase(Locale.ROOT).contains(searchText)
+						|| library.versionsByUpdate(runId).stream().anyMatch(policy -> name(policy).toLowerCase(Locale.ROOT).contains(searchText));
+			}).toList();
+			int rows = Math.max(1, (height - 218) / 24);
+			selectedPage = Math.min(selectedPage, Math.max(0, (groups.size() - 1) / rows));
+			for (int index = selectedPage * rows; index < Math.min(groups.size(), (selectedPage + 1) * rows); index++) {
+				JsonObject run = groups.get(index);
+				String runId = identity(run);
+				String title = (!favoritesGroup && runId.equals(groupRun) ? "> " : "") + name(run) + " / " + library.versionsByUpdate(runId).size() + " versions";
+				addRenderableWidget(Button.builder(Component.literal(fit(title, size - 12)), widget -> selectGroup(runId, false))
+						.bounds(position, 94 + index % rows * 24, size, 20).tooltip(Tooltip.create(Component.literal(title))).build());
+			}
+			addRenderableWidget(Button.builder(Component.literal("Previous"), widget -> { selectedPage--; rebuildWidgets(); })
+					.bounds(position, height - 126, 90, 20).build()).active = selectedPage > 0;
+			addRenderableWidget(Button.builder(Component.literal("Next"), widget -> { selectedPage++; rebuildWidgets(); })
+					.bounds(position + size - 90, height - 126, 90, 20).build()).active = (selectedPage + 1) * rows < groups.size();
+			Button favorite = addRenderableWidget(Button.builder(Component.literal(selectedId.isEmpty() ? "Favorite" : favoriteLabel(selectedId)), widget -> {
+				try { library.toggleFavorite(selectedId); error = ""; rebuildWidgets(); }
+				catch (IOException failure) { error = "Could not save favorite: " + failure.getMessage(); }
+			}).bounds(position, height - 70, size, 20).build());
+			favorite.active = !selectedId.isEmpty();
+			if (!versions.isEmpty()) addRenderableWidget(new CheckpointSlider(position, height - 98, size, versions, selectedId, entry -> {
+				selectedId = identity(entry);
+				favorite.setMessage(Component.literal(favoriteLabel(selectedId)));
+			}));
+			addRenderableWidget(Button.builder(Component.literal("Back"), widget -> onClose()).bounds(position, height - 32, (size - 4) / 2, 20).build());
+			addRenderableWidget(Button.builder(Component.literal("Use policy"), widget -> {
+				JsonObject policy = library.find(library.policies, selectedId);
+				if (policy != null) { selected.accept(policy); status = ""; minecraft.gui.setScreen(ControlPanel.this); }
+			}).bounds(position + (size + 4) / 2, height - 32, (size - 4) / 2, 20).build()).active = !selectedId.isEmpty();
+		}
+
+		@Override public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
+			graphics.fill(0, 0, width, height, 0xF0181E20);
+			graphics.text(font, title, position, 18, 0xFF92DDB3);
+			if (!error.isEmpty()) graphics.text(font, fit(error, size), position, height - 47, 0xFFF3B298);
+			super.extractRenderState(graphics, mouseX, mouseY, delta);
+		}
+		@Override public boolean isPauseScreen() { return false; }
+		@Override public void onClose() { minecraft.gui.setScreen(ControlPanel.this); }
+	}
 
 	private final class ChoiceScreen extends Screen {
 		private final List<JsonObject> entries;

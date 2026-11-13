@@ -13,7 +13,8 @@ import tempfile
 import numpy as np
 import torch
 
-from backend.fast_rl_model import ActorCritic, FastRLAgent
+from backend.fast_rl_model import ActorCritic
+from simulator.training.compiler import LEARNER_DEFAULTS
 from simulator.training.environment import ACTION_NAMES, Environment, REWARD_SEMANTICS, ROOT, SCHEMA, SCHEMAS, resolve_max_ticks
 from simulator.training.ppo import compute_gae, optimize
 
@@ -144,7 +145,7 @@ def collect_rollout(model, environment, observations, steps, device, replays=Non
         observations = environment.reset(done) if done.any() else final_obs
     rollout["advantages"], rollout["returns"] = compute_gae(
         rollout["rewards"], rollout["values"], rollout["next_values"],
-        rollout["terminated"], rollout["truncated"], FastRLAgent.GAMMA, FastRLAgent.GAE_LAMBDA)
+        rollout["terminated"], rollout["truncated"], LEARNER_DEFAULTS["gamma"], LEARNER_DEFAULTS["gae_lambda"])
     if initial_rewards is not None:
         final_rewards = environment.reward_totals()
         rollout["reward_types"] = {name: final_rewards[name] - value for name, value in initial_rewards.items()}
@@ -194,7 +195,7 @@ def arguments(argv=None):
                         help="Override max_ticks from the environment JSON (default: 300)")
     parser.add_argument("--threads", type=positive, default=4)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=FastRLAgent.LR)
+    parser.add_argument("--lr", type=float, default=LEARNER_DEFAULTS["lr"])
     parser.add_argument("--environment", help="Environment JSON; default environments/duel.json")
     parser.add_argument("--plan", help="Research training plan JSON (controllers, sampling and curriculum)")
     parser.add_argument("--initialize", help="Initialize learner weights without restoring optimizer or task")

@@ -36,7 +36,7 @@ inline void equipmentObservation(float* catalogue, const PlayerState& source, co
     }
 }
 
-inline void velocityObservation(float* catalogue, const PlayerState& source, const PlayerState& target) {
+MCSIM_HD inline void velocityObservation(float* catalogue, const PlayerState& source, const PlayerState& target) {
     catalogue[79] = static_cast<float>(source.velocity.x);
     catalogue[80] = static_cast<float>(source.velocity.y);
     catalogue[81] = static_cast<float>(source.velocity.z);
@@ -45,7 +45,7 @@ inline void velocityObservation(float* catalogue, const PlayerState& source, con
     catalogue[84] = static_cast<float>(target.velocity.z - source.velocity.z);
 }
 
-inline void movementObservation(float* catalogue, const PlayerState& source, const PlayerState& target) {
+MCSIM_HD inline void movementObservation(float* catalogue, const PlayerState& source, const PlayerState& target) {
     catalogue[85] = source.on_ground ? 1.0F : 0.0F;
     catalogue[86] = target.on_ground ? 1.0F : 0.0F;
     catalogue[87] = source.sprinting ? 1.0F : 0.0F;
