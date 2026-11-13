@@ -2,6 +2,7 @@
 #include "../apps/actions.hpp"
 #include "../apps/rewards.hpp"
 #include "minecraft_sim/cuda_backend.hpp"
+#include "minecraft_sim/terrain.hpp"
 
 #include <cuda_runtime.h>
 
@@ -15,6 +16,140 @@ namespace {
 
 constexpr int feature_count = 102;
 constexpr int scenario_count = 3;
+
+__global__ void terrainScenario(minecraft_sim::BatchView batch, double* output, int phase) {
+    using namespace minecraft_sim;
+    const auto first = batch.block_worlds[0], second = batch.block_worlds[1];
+    if (phase == 1) {
+        output[9] = first.setPlacedBlock(0, 1, 0, PlacedBlock::team0)
+            && !first.setPlacedBlock(0, 0, 0, PlacedBlock::team0)
+            && !first.setPlacedBlock(2, 1, 0, PlacedBlock::team0);
+    } else if (phase == 2) {
+        output[9] = second.setPlacedBlock(1, 1, 0, PlacedBlock::team1);
+    }
+    const Vec3 origin{-2.0, 1.5, 0.5}, delta{4.0, 0.0, 0.0};
+    const Aabb first_cell{{0.1, 1.1, 0.1}, {0.9, 1.9, 0.9}};
+    const Aabb second_cell{{1.1, 1.1, 0.1}, {1.9, 1.9, 0.9}};
+    output[0] = blockRayFraction(first, origin, delta);
+    output[1] = blockRayFraction(second, origin, delta);
+    output[2] = !noBlockCollision(first, first_cell);
+    output[3] = !noBlockCollision(second, first_cell);
+    output[4] = !noBlockCollision(second, second_cell);
+    output[5] = static_cast<int>(first.overlay[6]);
+    output[6] = static_cast<int>(second.overlay[7]);
+    output[7] = first.cells == second.cells;
+    output[8] = first.overlay != second.overlay;
+    output[10] = first.solid(0, 0, 0) && second.solid(0, 0, 0);
+}
+
+bool checkMutableTerrain() {
+    using namespace minecraft_sim;
+    std::array<Block, 8> base{Block::solid, Block::solid, Block::solid, Block::solid,
+                              Block::air, Block::air, Block::air, Block::air};
+    TerrainOverlays terrain({base.data(), 4, 2, 1, -2, 0, 0}, 2);
+    std::array<PlayerState, 4> players{};
+    std::array<Controls, 4> queued{}, held{};
+    std::array<WorldState, 2> worlds{};
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), 2, 2,
+                   terrain.data(), {sine.data()}, nullptr};
+    CudaBatch device(host);
+    double* output = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&output), 11 * sizeof(double)) != cudaSuccess) return false;
+    std::array<double, 11> actual{};
+    const auto sample = [&](int phase) {
+        terrainScenario<<<1, 1>>>(device.deviceView(), output, phase);
+        return cudaGetLastError() == cudaSuccess
+            && cudaMemcpy(actual.data(), output, sizeof(actual), cudaMemcpyDeviceToHost) == cudaSuccess;
+    };
+    bool result = sample(0) && actual[0] == 1.0 && actual[1] == 1.0
+        && actual[2] == 0.0 && actual[3] == 0.0 && actual[4] == 0.0
+        && actual[7] == 1.0 && actual[8] == 1.0 && actual[10] == 1.0;
+    result = result && sample(1) && actual[0] == 0.5 && actual[1] == 1.0
+        && actual[2] == 1.0 && actual[3] == 0.0 && actual[5] == 1.0 && actual[9] == 1.0;
+    result = result && sample(2) && actual[0] == 0.5 && actual[1] == 0.75
+        && actual[4] == 1.0 && actual[6] == 2.0 && actual[9] == 1.0;
+    const int first = 0;
+    device.resetEnvironments(&first, 1, players.data());
+    result = result && sample(0) && actual[0] == 1.0 && actual[1] == 0.75
+        && actual[2] == 0.0 && actual[4] == 1.0 && actual[5] == 0.0
+        && actual[6] == 2.0 && actual[10] == 1.0;
+    const int second = 1;
+    device.resetEnvironments(&second, 1, players.data() + 2);
+    result = result && sample(0) && actual[0] == 1.0 && actual[1] == 1.0 && actual[6] == 0.0;
+    cudaFree(output);
+    return result;
+}
+
+bool checkFixedTerrainReset() {
+    using namespace minecraft_sim;
+    constexpr int environments = 2;
+    std::array<Block, 8> base{Block::solid, Block::solid, Block::solid, Block::solid,
+                              Block::air, Block::air, Block::air, Block::air};
+    TerrainOverlays terrain({base.data(), 4, 2, 1, -2, 0, 0}, environments);
+    std::array<PlayerState, environments * 2> players{};
+    std::array<Controls, environments * 2> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<ProjectileWorldState, environments> projectiles{};
+    std::array<ArrowState, environments * projectile_arrow_capacity> arrows{};
+    std::array<app::ObservationActorMetadata, environments * 2> actors{};
+    std::array<app::DuelRewardState, environments> reward_states{};
+    std::array<std::uint64_t, environments> episodes{};
+    for (int environment = 0; environment < environments; ++environment) {
+        projectiles[environment].arrows = arrows.data() + environment * projectile_arrow_capacity;
+        projectiles[environment].arrow_capacity = projectile_arrow_capacity;
+    }
+    for (auto& actor : actors) {
+        actor.slot_count = 1;
+        actor.slots[0] = WeaponItem::diamond_sword;
+    }
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                   terrain.data(), {sine.data()}, projectiles.data()};
+    CudaBatch device(host);
+    const app::ObservationProjection projection{0, 1.0F, 0.0F, -1.0F, 1.0F, false};
+    device.configureObservations(&projection, 1, actors.data(), actors.size());
+    app::ActionHead head;
+    head.kind = 0;
+    head.count = 1;
+    head.values[0] = 0.0F;
+    device.configureActions(&head, 1);
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 1;
+    device.configureRewards(settings, reward_states.data(), reward_states.size());
+    device.configureFixedResets(players.data(), actors.data(), episodes.data(), episodes.size(), 123);
+    double* output = nullptr;
+    std::uint8_t* device_mask = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&output), 11 * sizeof(double)) != cudaSuccess) return false;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_mask), environments) != cudaSuccess) {
+        cudaFree(output);
+        return false;
+    }
+    std::array<double, 11> actual{};
+    const auto sample = [&](int phase) {
+        terrainScenario<<<1, 1>>>(device.deviceView(), output, phase);
+        return cudaGetLastError() == cudaSuccess
+            && cudaMemcpy(actual.data(), output, sizeof(actual), cudaMemcpyDeviceToHost) == cudaSuccess;
+    };
+    bool result = sample(1) && actual[9] == 1.0 && sample(2) && actual[9] == 1.0;
+    std::array<std::uint8_t, environments> mask{1, 2};
+    result = result && cudaMemcpy(device_mask, mask.data(), mask.size(), cudaMemcpyHostToDevice) == cudaSuccess;
+    device.resetFixedOnStream(device_mask, mask.size(), nullptr);
+    result = result && device.actionStatus() == 4 && sample(0) && actual[0] == 0.5 && actual[1] == 0.75;
+    device.clearActionStatus();
+    mask = {1, 0};
+    result = result && cudaMemcpy(device_mask, mask.data(), mask.size(), cudaMemcpyHostToDevice) == cudaSuccess;
+    device.resetFixedOnStream(device_mask, mask.size(), nullptr);
+    result = result && device.actionStatus() == 0 && sample(0) && actual[0] == 1.0 && actual[1] == 0.75
+        && actual[5] == 0.0 && actual[6] == 2.0;
+    mask = {0, 1};
+    result = result && cudaMemcpy(device_mask, mask.data(), mask.size(), cudaMemcpyHostToDevice) == cudaSuccess;
+    device.resetFixedOnStream(device_mask, mask.size(), nullptr);
+    result = result && device.actionStatus() == 0 && sample(0) && actual[0] == 1.0 && actual[1] == 1.0;
+    cudaFree(device_mask);
+    cudaFree(output);
+    return result;
+}
 
 MCSIM_HD void encodeScenarios(float* output) {
     using namespace minecraft_sim;
@@ -666,6 +801,14 @@ bool checkBatchedDeviceActions() {
 int main() {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) return 77;
+    if (!checkMutableTerrain()) {
+        std::cerr << "CUDA mutable terrain isolation check failed\n";
+        return 1;
+    }
+    if (!checkFixedTerrainReset()) {
+        std::cerr << "CUDA fixed terrain reset check failed\n";
+        return 1;
+    }
     std::array<float, feature_count * scenario_count> expected{};
     std::array<float, feature_count * scenario_count> actual{};
     encodeScenarios(expected.data());

@@ -1,6 +1,7 @@
 #include "minecraft_sim/core.hpp"
 #include "minecraft_sim/comparison.hpp"
 #include "minecraft_sim/constants_mace.hpp"
+#include "minecraft_sim/terrain.hpp"
 #include "../apps/configuration.hpp"
 #include "../apps/observation.hpp"
 #include "../apps/rewards.hpp"
@@ -41,6 +42,48 @@ void near(double actual, double expected, double tolerance, const char* message)
                << ", expected=" << expected << ", tolerance=" << tolerance;
         throw std::runtime_error(detail.str());
     }
+}
+
+void checkMutableTerrain() {
+    using namespace minecraft_sim;
+    std::array<Block, 8> base{Block::solid, Block::solid, Block::solid, Block::solid,
+                              Block::air, Block::air, Block::air, Block::air};
+    const BlockWorldView static_world{base.data(), 4, 2, 1, -2, 0, 0};
+    TerrainOverlays terrain(static_world, 2);
+    const auto first = terrain.view(0), second = terrain.view(1);
+    const Vec3 origin{-2.0, 1.5, 0.5}, delta{4.0, 0.0, 0.0};
+    const Aabb first_cell{{0.1, 1.1, 0.1}, {0.9, 1.9, 0.9}};
+    near(blockRayFraction(first, origin, delta), 1.0, 0.0, "initial first-world ray");
+    near(blockRayFraction(second, origin, delta), 1.0, 0.0, "initial second-world ray");
+    require(first.setPlacedBlock(0, 1, 0, PlacedBlock::team0), "first-world placement");
+    require(!noBlockCollision(first, first_cell), "first-world placed collision");
+    require(noBlockCollision(second, first_cell), "second world remains empty");
+    require(noBlockCollision(static_world, first_cell), "static world remains empty");
+    near(blockRayFraction(first, origin, delta), 0.5, 0.0, "first-world placed ray");
+    near(blockRayFraction(second, origin, delta), 1.0, 0.0, "second-world isolated ray");
+    require(second.setPlacedBlock(1, 1, 0, PlacedBlock::team1), "second-world placement");
+    near(blockRayFraction(second, origin, delta), 0.75, 0.0, "second-world placed ray");
+    require(!first.setPlacedBlock(0, 0, 0, PlacedBlock::team0), "protected base cannot be edited");
+    require(!first.setPlacedBlock(2, 1, 0, PlacedBlock::team0), "outside edit rejected");
+    require(!static_world.setPlacedBlock(0, 1, 0, PlacedBlock::team0), "static edit rejected");
+    require(!first.setPlacedBlock(0, 1, 0, static_cast<PlacedBlock>(3)), "invalid team rejected");
+    const std::array<std::uint8_t, 2> reset_mask{1, 0};
+    terrain.reset(reset_mask.data());
+    near(blockRayFraction(first, origin, delta), 1.0, 0.0, "selected reset clears first ray");
+    near(blockRayFraction(second, origin, delta), 0.75, 0.0, "selected reset preserves second ray");
+    require(noBlockCollision(first, first_cell) && second.overlay[7] == PlacedBlock::team1,
+            "selected reset preserves other world identity");
+    require(first.solid(0, 0, 0) && second.solid(0, 0, 0), "protected base survives reset");
+    require(second.setPlacedBlock(1, 1, 0, PlacedBlock::empty), "placed block removal");
+    near(blockRayFraction(second, origin, delta), 1.0, 0.0, "removed block no longer occludes ray");
+    bool overflow_rejected = false;
+    try {
+        TerrainOverlays oversized({base.data(), (std::numeric_limits<int>::max)(),
+            (std::numeric_limits<int>::max)(), 3}, 2);
+    } catch (const std::invalid_argument&) {
+        overflow_rejected = true;
+    }
+    require(overflow_rejected, "terrain index overflow rejected before allocation");
 }
 
 void checkPolicyFixtures() {
@@ -2019,6 +2062,7 @@ int main(int argc, char** argv) {
 #endif
             throw std::invalid_argument("Unsupported check mode");
         }
+        checkMutableTerrain();
         checkPolicyFixtures();
         checkEquipmentObservation();
         checkShapingReward();

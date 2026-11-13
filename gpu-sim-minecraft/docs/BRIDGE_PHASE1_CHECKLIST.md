@@ -6,15 +6,15 @@ features are foundations, not completed Bridge features.
 
 ## Next Action
 
-**Owner:** Unassigned. **Blocked by:** None recorded. **First task:** P1-01-01.
+**Owner:** Unassigned for the next slice. **Blocked by:** None recorded.
+**First task:** P1-02-03.
 
-1. Agree and record the Bridge mode rules, unresolved timing/item assumptions,
-   and setup/contract ownership in a new mode specification (P1-01-01 through
-   P1-01-04). Review same-tick and reset semantics before changing native code.
-2. Then implement the first terrain slice (P1-02-02): start two worlds from one
-   protected base with independent editable overlays, change one world, test
-   collision and ray isolation, selectively reset it, and verify the other world
-   and existing duel behavior remain unchanged. Test CPU first, then CUDA.
+1. Coordinate arena size, overflow checks and memory-cap ownership across the
+  compiler, native and live paths before extending the scene limit. The first
+  two-world overlay slice is low-level only and does not expose Bridge setups.
+2. A static-arena match lifecycle may proceed independently against the
+  [versioned rules](bridge_mode_v1.md); keep unverified external rules and
+  the later setup/capability gate visible.
 
 Starting points: [`BlockWorldView`](../simulator/include/minecraft_sim/geometry.hpp),
 the native [scene loader](../simulator/apps/scene.hpp), [CUDA batch](../simulator/src/cuda_backend.cu),
@@ -125,23 +125,32 @@ conditions and distinguish compatible legacy duels from Bridge.
 ## 1. Rules And Setup Contract
 
 - [ ] P1-01-00: Complete this milestone only after P1-01-01 through P1-01-06.
-- [ ] P1-01-01: Write and review a versioned Bridge mode specification covering
+- [x] P1-01-01: Write and review a versioned Bridge mode specification covering
   teams/perspectives, coordinates, goals, cage regions, protected versus placed
   blocks, build limits, void depth, kits, timers and observability. Record each
   confirmed value, provisional value and unresolved external rule separately.
-- [ ] P1-01-02: Define tick phases and deterministic outcomes for death versus
+- [x] P1-01-02: Define tick phases and deterministic outcomes for death versus
   goal on one tick, both players scoring, simultaneous match-winning scores,
   goal reset, timeout and ties. Define whether timeout is termination or
   truncation and how PPO bootstraps it. Keep match end, goal/round reset and
   individual player death/respawn distinct.
-- [ ] P1-01-03: Define spawn, cage, refill and match-reset behavior, including
+- [x] P1-01-03: Define spawn, cage, refill and match-reset behavior, including
   which player, projectile, RNG, timer and terrain state is preserved or
   cleared. State explicitly whether and when blocks persist across goals.
-- [ ] P1-01-04: Specify the arena/environment/policy/curriculum fields and
+- [x] P1-01-04: Specify the arena/environment/policy/curriculum fields and
   version/capability negotiation, including checkpoint and replay identity.
   Review [compiler.py](../simulator/training/compiler.py),
   [plans.py](../simulator/training/plans.py), the
   [scenario contract](simulation_contract.md) and native scene parsing.
+  **Evidence, P1-01-01 through P1-01-04:** On 2026-11-13 GitHub Copilot
+  reviewed the four tasks against [Bridge mode v1](bridge_mode_v1.md), the
+  referenced compiler/plans/scenario/scene and current tick/GAE paths. The
+  match-cap result and provisional external rules were agreed with the user.
+  `python -B scripts/generate-contract.py --check` passed; proposed Bridge
+  fields remain unsupported and no Hypixel capture was made. Source baseline:
+  `951d573168851030f6d8ff8bcc13fab0b2dcdb16` plus this slice's changes;
+  Linux x86_64, GNU 13.3.0. No vanilla-derived mechanics were added in this
+  slice, so P1-01-05 and the positive setup gate remain open.
 - [ ] P1-01-05: Trace each vanilla-derived addition to the actual controlling
   Minecraft 26.3 source class, method and verified line numbers. Put concise
   citations at the implementation; cite custom Bridge rules to the new mode
@@ -158,13 +167,35 @@ conditions and distinguish compatible legacy duels from Bridge.
 the composite terrain interface before parallel physics or observation work.
 
 - [ ] P1-02-00: Complete this milestone only after P1-02-01 through P1-02-07.
-- [ ] P1-02-01: Define an immutable protected base plus an independently owned
+- [x] P1-02-01: Define an immutable protected base plus an independently owned
   per-world editable overlay, or document and benchmark an equivalent design.
   Specify air, placed-block/team identity, protected blocks, collision,
   out-of-bounds behavior and deterministic simultaneous edits.
-- [ ] P1-02-02: Implement the two-world first slice described in **Next Action**
+- [x] P1-02-02: Implement a two-world first slice sharing a protected base,
   with independently calculated expected collision and ray results. One world's
   mutation or selective match reset must never change another's state.
+  **Evidence, P1-02-01 and P1-02-02:** On 2026-11-13 GitHub Copilot added the
+  [overlay owner](../simulator/include/minecraft_sim/terrain.hpp), composite
+  lookups and selective CPU/CUDA resets. Independent ray expectations 0.5,
+  0.75 and 1.0, collision, ownership, protected cells and selected resets are
+  exercised in [CPU](../simulator/tests/core_checks.cpp) and
+  [CUDA](../simulator/tests/observation_cuda_checks.cu) fixtures. With CPU and
+  CUDA libraries built from native source hash
+  `5589e48fda1c2f5607f43b8bafd01a58b2b3c17c3cd42e98e099fcf2f8bd2261`
+  at baseline `951d57316885` plus this slice, `ctest --test-dir
+  simulator/build-bridge-reissmannc-cpu --output-on-failure` passed 6/6 on
+  Linux x86_64, GNU 13.3.0. On a Tesla T4 (driver 610.43.02, CUDA toolkit
+  12.9.86), `ctest --test-dir simulator/build-bridge-reissmannc-t4
+  --output-on-failure -R '^(shared_core_cuda_checks|training_api_cuda_checks|projectile_cuda_checks|observation_cuda_checks)$'`
+  passed 4/4. With those libraries selected via `MCSIM_TEST_CPU_LIBRARY` and
+  `MCSIM_TEST_CUDA_LIBRARY`, `.venv-rosie/bin/python -B -m unittest -v
+  simulator.training.test_cuda_observation
+  simulator.training.test_research.ResidentOpponentChecks` passed 29 checks;
+  one two-device check was skipped. PyTorch was 2.5.1+cu124. GPU builds warned
+  about cluster clock skew even after a clean target rebuild; the relevant
+  source and test targets were recompiled. H100 was not requested. This is
+  low-level isolation, not Bridge setup, building, replay, full-map support,
+  in-game conformance or a performance result.
 - [ ] P1-02-03: Extend arena dimensions and cell budget for an approximately
   32 x 48 x 96 map. Validate sizes, multiplication overflow, fill counts and a
   documented configurable memory cap across compiler, native and live paths.

@@ -43,6 +43,7 @@ struct Aabb {
 };
 
 enum class Block : std::uint8_t { air, solid };
+enum class PlacedBlock : std::uint8_t { empty, team0, team1 };
 
 struct BlockWorldView {
     const Block* cells = nullptr;
@@ -52,18 +53,39 @@ struct BlockWorldView {
     int origin_x = 0;
     int origin_y = 0;
     int origin_z = 0;
+    PlacedBlock* overlay = nullptr;
 
-    MCSIM_HD bool solid(int block_x, int block_y, int block_z) const {
-        const int local_x = block_x - origin_x;
-        const int local_y = block_y - origin_y;
-        const int local_z = block_z - origin_z;
+    MCSIM_HD std::int64_t cellIndex(int block_x, int block_y, int block_z) const {
+        const auto local_x = std::int64_t(block_x) - origin_x;
+        const auto local_y = std::int64_t(block_y) - origin_y;
+        const auto local_z = std::int64_t(block_z) - origin_z;
         if (!cells || local_x < 0 || local_y < 0 || local_z < 0
             || local_x >= size_x || local_y >= size_y || local_z >= size_z) {
+            return -1;
+        }
+        return (local_z * size_y + local_y) * size_x + local_x;
+    }
+
+    MCSIM_HD bool solid(int block_x, int block_y, int block_z) const {
+        const auto index = cellIndex(block_x, block_y, block_z);
+        return index >= 0 && (cells[index] == Block::solid
+            || (overlay && overlay[index] != PlacedBlock::empty));
+    }
+
+    MCSIM_HD bool setPlacedBlock(int block_x, int block_y, int block_z, PlacedBlock value) const {
+        const auto index = cellIndex(block_x, block_y, block_z);
+        if (index < 0 || !overlay || cells[index] != Block::air
+            || (value != PlacedBlock::empty && value != PlacedBlock::team0 && value != PlacedBlock::team1)) {
             return false;
         }
-        const auto index = (static_cast<std::int64_t>(local_z) * size_y + local_y)
-                         * size_x + local_x;
-        return cells[index] == Block::solid;
+        overlay[index] = value;
+        return true;
+    }
+
+    MCSIM_HD void clearPlacedBlocks() const {
+        if (!overlay) return;
+        const auto count = std::int64_t(size_x) * size_y * size_z;
+        for (std::int64_t index = 0; index < count; ++index) overlay[index] = PlacedBlock::empty;
     }
 };
 

@@ -344,6 +344,7 @@ struct TrainingBatch {
                 continue;
             }
             ids.push_back(environment);
+            blocks[environment].clearPlacedBlocks();
             worlds[environment] = {};
             worlds[environment].simulate_fall_damage = terrain.worlds[0].simulate_fall_damage;
             finished[environment] = 0;

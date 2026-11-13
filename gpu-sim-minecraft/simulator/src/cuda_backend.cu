@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace minecraft_sim {
@@ -83,6 +84,9 @@ std::size_t cellCount(BlockWorldView blocks) {
     const auto count = checkedProduct(checkedProduct(std::size_t(blocks.size_x),
                                                      std::size_t(blocks.size_y)),
                                       std::size_t(blocks.size_z));
+    if (count > std::size_t((std::numeric_limits<std::int64_t>::max)())) {
+        throw std::invalid_argument("Block world index overflow");
+    }
     if (count != 0 && !blocks.cells) {
         throw std::invalid_argument("Missing block storage");
     }
@@ -266,6 +270,7 @@ __global__ void resetFixedWorlds(BatchView batch, const std::uint8_t* mask,
                                  ArrowObservationSummary* summaries, const int* status) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(batch.environment_count) || *status != 0 || !mask[index]) return;
+    if (batch.block_worlds) batch.block_worlds[index].clearPlacedBlocks();
     const auto episode = episodes[index]++;
     const bool simulate_fall_damage = batch.worlds[index].simulate_fall_damage;
     batch.worlds[index] = {};
@@ -300,6 +305,7 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
         return;
     }
     const int destination = ids[index];
+    if (batch.block_worlds) batch.block_worlds[destination].clearPlacedBlocks();
     const bool simulate_fall_damage = batch.worlds[destination].simulate_fall_damage;
     batch.worlds[destination] = {};
     batch.worlds[destination].simulate_fall_damage = simulate_fall_damage;
@@ -371,6 +377,7 @@ struct CudaBatch::Storage {
     DeviceBuffer<int> reset_ids;
     DeviceBuffer<PlayerState> reset_players;
     DeviceBuffer<Block> cells;
+    DeviceBuffer<PlacedBlock> placed_blocks;
     DeviceBuffer<BlockWorldView> block_worlds;
     DeviceBuffer<float> sine;
     BatchView view;
@@ -501,22 +508,39 @@ CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows) : storage_(std::m
     }
 
     std::vector<Block> cells;
+    std::vector<PlacedBlock> placed_blocks;
     std::vector<BlockWorldView> worlds(initial.environment_count);
     std::vector<std::size_t> offsets(initial.environment_count);
+    std::vector<std::size_t> overlay_offsets(initial.environment_count);
+    std::unordered_map<const Block*, std::pair<std::size_t, std::size_t>> shared_bases;
     for (int index = 0; index < initial.environment_count; ++index) {
         auto blocks = initial.block_worlds ? initial.block_worlds[index] : BlockWorldView{};
         const auto count = cellCount(blocks);
         offsets[index] = cells.size();
-        if (count != 0) {
+        const auto shared = shared_bases.find(blocks.cells);
+        if (blocks.overlay && count == 0) {
+            throw std::invalid_argument("Terrain overlay requires a nonempty base");
+        }
+        if (blocks.overlay && shared != shared_bases.end() && shared->second.second == count) {
+            offsets[index] = shared->second.first;
+        } else if (count != 0) {
             cells.insert(cells.end(), blocks.cells, blocks.cells + count);
+            if (blocks.overlay) shared_bases.emplace(blocks.cells, std::make_pair(offsets[index], count));
+        }
+        if (blocks.overlay) {
+            overlay_offsets[index] = placed_blocks.size();
+            placed_blocks.insert(placed_blocks.end(), blocks.overlay, blocks.overlay + count);
         }
         worlds[index] = blocks;
     }
     storage.cells.allocate(cells.size());
     storage.cells.upload(cells.data());
+    storage.placed_blocks.allocate(placed_blocks.size());
+    storage.placed_blocks.upload(placed_blocks.data());
     for (int index = 0; index < initial.environment_count; ++index) {
         worlds[index].cells = cellCount(worlds[index]) != 0
             ? storage.cells.data + offsets[index] : nullptr;
+        if (worlds[index].overlay) worlds[index].overlay = storage.placed_blocks.data + overlay_offsets[index];
     }
     storage.block_worlds.allocate(worlds.size());
     storage.block_worlds.upload(worlds.data());

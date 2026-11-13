@@ -61,6 +61,27 @@ effects. Flight eligibility/movement attributes are supplied state, not the
 systems underlying them. Spawn states must be finite and collision-free; views
 need valid buffers/dimensions. Task rewards/resets belong in the training wrapper.
 
+## Experimental Terrain Overlays
+
+`TerrainOverlays` in `include/minecraft_sim/terrain.hpp` owns one dense
+placed-block overlay per world over a caller-owned immutable base. Base and
+views must outlive the batch; the owner cannot be copied or moved. Empty,
+team-0 and team-1 placed cells share `BlockWorldView::solid` with existing
+collision and ray logic. `setPlacedBlock` rejects protected base solids,
+out-of-bounds cells, invalid values and views without an overlay; placement
+support, occupied-space rules and simultaneous player arbitration are not
+implemented. `TerrainOverlays::reset` clears selected worlds; null selects all.
+
+`CudaBatch` copies enabled overlays to independent device storage and shares
+the corresponding base when host views share the same base. Selected host and
+fixed device resets clear only selected overlays. Raw device-view callers own
+stream ordering and may not mutate while another operation reads the view.
+Reset currently clears cells serially within each selected world; no full-map
+capacity or throughput claim is made. Host downloads and native captures do not
+serialize overlays. Setup JSON, the training adapter's public API, Bridge
+actions, replay and live integration do not expose mutable terrain yet; a
+successful low-level fixture is not a playable Bridge mode.
+
 ## CUDA Stream Execution
 
 `CudaBatch::step()` keeps its existing default-stream behavior.
