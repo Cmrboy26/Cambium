@@ -25,6 +25,8 @@ throughout the repository; component guides add local implementation references.
 
 Use the [contribution playbook](CONTRIBUTING.md) for source-derived mechanics,
 observations/actions, controllers, state lifecycle, rewards and verification.
+Use the [Phase 1 Bridge checklist](docs/BRIDGE_PHASE1_CHECKLIST.md) for the
+current implementation order, acceptance gates and agent handoffs.
 For setup-only authoring, load the workspace's
 [GPU simulator setup skill](../.github/skills/gpu-sim-setup/SKILL.md) before
 changing definitions. It is also available as `/gpu-sim-setup` in supporting clients.
@@ -63,9 +65,10 @@ instance names, usernames and checkout locations are not.
 	support `-DryRun`; they do not install external toolchains.
 - `recorded_sessions/`: captured sessions and comparison artifacts for validation.
 
-The current training path stages controls and state through host memory.
-Observations and rewards are computed on the CPU even with CUDA physics; this is
-not a fully GPU-resident PPO pipeline.
+The default training path stages CUDA controls and state through host memory.
+An opt-in GPU-resident PPO path supports a limited existing-duel workload; see
+the [training guide](simulator/training/AGENTS.md#training-architecture) for
+its supported configurations and fallback. It does not implement Bridge mode.
 
 ## Behavioral References
 
