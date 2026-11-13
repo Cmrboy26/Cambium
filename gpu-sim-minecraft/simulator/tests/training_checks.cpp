@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -281,6 +282,56 @@ void checkMaxTicks(int cuda) {
         && truncated == 1, "stage-boundary reset uses replacement timeout");
     require(scenario(handle.get(), 0)["blocks"] == terrain, "timeout changes never rebuild terrain");
     std::cout << "PASS: bounded additive episode timeout replacement without terrain rebuild\n";
+}
+
+void checkLargeArena(const char* environment, int cuda) {
+    auto definition = json::parse(std::ifstream(environment));
+    definition["bounds"]["size"] = {32, 48, 96};
+    const std::string path = cuda ? "training-large-arena-cuda.json" : "training-large-arena-cpu.json";
+    const std::array<float, 10> weights{};
+    const auto create = [&](const json& value) {
+        {
+            std::ofstream output(path);
+            require(static_cast<bool>(output), "open large-arena test environment");
+            output << value;
+        }
+        Handle handle(mcsim_create_schema(2, cuda, path.c_str(), 100, 1, weights.data(), 2), mcsim_destroy);
+        std::filesystem::remove(path);
+        return handle;
+    };
+    auto handle = create(definition);
+    require(handle != nullptr && scenario(handle.get(), 0)["bounds"]["size"] == json::array({32, 48, 96}),
+            "native batch accepts the Bridge-sized static arena");
+    struct BudgetSetting {
+        bool present = std::getenv("MCSIM_TERRAIN_BUDGET_BYTES") != nullptr;
+        std::string previous = present ? std::getenv("MCSIM_TERRAIN_BUDGET_BYTES") : "";
+        static void set(const char* value) {
+#if defined(_WIN32)
+            if (_putenv_s("MCSIM_TERRAIN_BUDGET_BYTES", value ? value : "") != 0)
+                throw std::runtime_error("Unable to set terrain budget");
+#else
+            if ((value ? setenv("MCSIM_TERRAIN_BUDGET_BYTES", value, 1)
+                       : unsetenv("MCSIM_TERRAIN_BUDGET_BYTES")) != 0)
+                throw std::runtime_error("Unable to set terrain budget");
+#endif
+        }
+        ~BudgetSetting() { set(present ? previous.c_str() : nullptr); }
+    } budget_setting;
+    BudgetSetting::set("1327104");
+    require(create(definition) != nullptr, "native scene accepts exact portable budget");
+    BudgetSetting::set("1327103");
+    require(create(definition) == nullptr, "native scene rejects budget one byte below portable requirement");
+    BudgetSetting::set("536870912");
+    for (const auto& size : {json::array({129, 1, 1}), json::array({128, 128, 17}),
+                             json::array({9223372036854775807LL, 1, 1})}) {
+        definition["bounds"]["size"] = size;
+        require(create(definition) == nullptr, "native batch rejects invalid or oversized dimensions");
+    }
+    definition["bounds"]["size"] = {32, 48, 96};
+    definition["blocks"] = json::array();
+    for (int index = 0; index < 257; ++index) definition["blocks"].push_back(json::object());
+    require(create(definition) == nullptr, "native batch rejects excessive fill count");
+    std::cout << "PASS: Bridge-sized arena and native dimension/fill limits\n";
 }
 
 void checkFallDamageReset(const char* environment, int cuda) {
@@ -770,6 +821,7 @@ int main(int argc, char** argv) {
             "Usage: training_checks <two-slot-environment.json> [--cuda]");
         const int cuda = argc == 3 ? 1 : 0;
         if (cuda && !mcsim_cuda_available()) return 77;
+        checkLargeArena(argv[1], cuda);
         checkResetPlayers(argv[1], cuda);
         checkFallDamageReset(argv[1], cuda);
         checkEmptySlots(argv[1], cuda);

@@ -7,11 +7,11 @@ features are foundations, not completed Bridge features.
 ## Next Action
 
 **Owner:** Unassigned for the next slice. **Blocked by:** None recorded.
-**First task:** P1-02-03.
+**First task:** P1-02-04.
 
-1. Coordinate arena size, overflow checks and memory-cap ownership across the
-  compiler, native and live paths before extending the scene limit. The first
-  two-world overlay slice is low-level only and does not expose Bridge setups.
+1. Connect the per-world composite terrain to every collision, ray, targeting
+  and observation path on CPU and CUDA, without full terrain transfers per tick.
+  The existing overlay remains low-level and does not expose Bridge setups.
 2. A static-arena match lifecycle may proceed independently against the
   [versioned rules](bridge_mode_v1.md); keep unverified external rules and
   the later setup/capability gate visible.
@@ -196,9 +196,28 @@ the composite terrain interface before parallel physics or observation work.
   source and test targets were recompiled. H100 was not requested. This is
   low-level isolation, not Bridge setup, building, replay, full-map support,
   in-game conformance or a performance result.
-- [ ] P1-02-03: Extend arena dimensions and cell budget for an approximately
+- [x] P1-02-03: Extend arena dimensions and cell budget for an approximately
   32 x 48 x 96 map. Validate sizes, multiplication overflow, fill counts and a
   documented configurable memory cap across compiler, native and live paths.
+  **Evidence:** On 2026-11-13 GitHub Copilot added a 262144-cell ceiling and
+  `MCSIM_TERRAIN_BUDGET_BYTES` preflight in the compiler, native scene/terrain,
+  CUDA batch and live/replay validator; see the
+  [budget contract](../simulator/AGENTS.md#json-environments). The 147456-cell
+  arena resolves and loads through CPU/CUDA; tests cover exact and insufficient
+  caps, dimensions, overflow, fills and shared CUDA static bases. CPU CTest
+  passed 6/6; `.venv-rosie/bin/python -B -m unittest -v
+  simulator.training.test_experiments` passed 36/36. T4 CUDA CTest passed 4/4;
+  the CUDA observation/resident-duel Python suites passed 29, with one
+  two-device test skipped. `JAVA_HOME=/tmp/cambium-jdk25 bash gradlew check
+  build --no-daemon --console=plain` passed in `cambiummod`; the mod was built
+  but not installed or tested in-game. The generated catalogue check passed.
+  CPU and CUDA libraries reported native source hash
+  `242c6e2b432fa2c156a0d2eac00cddace191701f3734a0910f34064d4a6eac7e`,
+  baseline `f45f9375ed49` plus this slice, on Linux x86_64, GNU 13.3.0,
+  Tesla T4/CUDA 12.9.86, PyTorch 2.5.1+cu124 and Temurin JDK 25.0.5.
+  CUDA builds reported cluster clock-skew warnings; affected targets were
+  compiled and tested. The cap bounds specified terrain payloads, not total
+  process/device memory; measured-memory and Bridge gameplay gates remain open.
 - [ ] P1-02-04: Make collision, raycasting, targeting and observations read the
   same per-world composite terrain on CPU and CUDA. Preserve old static-duel
   behavior and avoid full terrain transfers on each tick.

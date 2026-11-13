@@ -8,6 +8,7 @@ from copy import deepcopy
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 
@@ -30,6 +31,18 @@ CONDITION_FIELDS = ("environment", "spawns", "equipment", "task_override", "oppo
 RESOLVED_CONDITION_FIELDS = ("scenario", "opponents", "controls", "rewards",
                              "environment_name", "arena_names")
 EVALUATION_FIELDS = ("every_updates", "episodes", "seed", "worlds")
+MAX_ARENA_CELLS = 262144
+PORTABLE_ARENA_BYTES_PER_CELL = 9
+DEFAULT_TERRAIN_BUDGET_BYTES = 536870912
+
+
+def _terrain_budget_bytes():
+    value = os.environ.get("MCSIM_TERRAIN_BUDGET_BYTES")
+    if value is None:
+        return DEFAULT_TERRAIN_BUDGET_BYTES
+    if not re.fullmatch(r"[0-9]+", value) or not 1 <= int(value) <= 2**63 - 1:
+        raise ValueError("MCSIM_TERRAIN_BUDGET_BYTES must be a positive decimal integer in range")
+    return int(value)
 
 
 def _name(value, label):
@@ -94,8 +107,10 @@ def _geometry(value):
     bounds = fields(value.get("bounds"), ("min", "size"), "arena bounds")
     origin = _vector(bounds.get("min"), "arena origin", integer=True, limit=4096)
     size = _vector(bounds.get("size"), "arena dimensions", integer=True)
-    if any(not 1 <= extent <= 128 for extent in size) or math.prod(size) > 32768:
-        raise ValueError("Arena dimensions must be 1..128 and at most 32768 cells")
+    if any(not 1 <= extent <= 128 for extent in size) or math.prod(size) > MAX_ARENA_CELLS:
+        raise ValueError("Arena dimensions must be 1..128 and at most 262144 cells")
+    if math.prod(size) * PORTABLE_ARENA_BYTES_PER_CELL > _terrain_budget_bytes():
+        raise ValueError("Terrain buffers exceed MCSIM_TERRAIN_BUDGET_BYTES")
     blocks = value.get("blocks")
     if not isinstance(blocks, list) or len(blocks) > 256:
         raise ValueError("Arena blocks must be at most 256 fill regions")

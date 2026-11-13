@@ -65,12 +65,13 @@ int main(int argc, char** argv) {
         const auto cell_count = metadata.at("cell_count").get<std::size_t>();
         const auto sine_count = metadata.at("sine_count").get<std::size_t>();
         if (!world_count || world_count > 65536 || arrows_per_world != projectile_arrow_capacity
-            || wind_per_world > 128 || thrown_per_world > 96 || cell_count > 32768
+            || wind_per_world > 128 || thrown_per_world > 96 || cell_count > max_arena_cells
             || sine_count != sine_table_size || start < 0 || count < 1
             || static_cast<std::uint64_t>(start) >= world_count
             || static_cast<std::uint64_t>(count) > world_count - start) {
             throw std::invalid_argument("Invalid capture dimensions or world range");
         }
+        requireTerrainBudget(checkedTerrainProduct(cell_count, portable_arena_bytes_per_cell), terrainBudgetBytes());
         auto players = readValues<PlayerState>(input, world_count * 2);
         auto queued = readValues<Controls>(input, world_count * 2);
         auto held = readValues<Controls>(input, world_count * 2);
@@ -94,10 +95,20 @@ int main(int argc, char** argv) {
             state.thrown_items = thrown_per_world ? thrown.data() + index * thrown_per_world : nullptr;
         }
         const auto& bounds = metadata.at("terrain").at("bounds");
-        const auto size = bounds.at("size").get<std::array<int, 3>>();
-        const auto origin = bounds.at("min").get<std::array<int, 3>>();
-        if (size[0] < 1 || size[1] < 1 || size[2] < 1
-            || std::size_t(size[0]) * size[1] * size[2] != cell_count) {
+        std::array<int, 3> size{}, origin{};
+        std::size_t volume = 1;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const auto& extent = bounds.at("size").at(axis);
+            const auto& minimum = bounds.at("min").at(axis);
+            if (!extent.is_number_integer() || extent < 1 || extent > 128
+                || !minimum.is_number_integer() || minimum < -4096 || minimum > 4096) {
+                throw std::runtime_error("Invalid capture terrain bounds");
+            }
+            size[axis] = extent.get<int>();
+            origin[axis] = minimum.get<int>();
+            volume = checkedTerrainProduct(volume, std::size_t(size[axis]));
+        }
+        if (volume != cell_count) {
             throw std::runtime_error("Terrain dimensions do not match capture");
         }
         const BlockWorldView block{cells.data(), size[0], size[1], size[2], origin[0], origin[1], origin[2]};

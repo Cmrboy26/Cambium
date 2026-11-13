@@ -74,6 +74,7 @@ public final class ReplayAnalysisChecks {
 		checkLivePolicy();
 		checkDescriptiveContract();
 		checkBowContract();
+		checkArenaLimits();
 		checkBowReplay();
 		BoundaryContractChecks.check();
 		checkPolicyFixtures();
@@ -868,6 +869,41 @@ public final class ReplayAnalysisChecks {
 		require(shieldContract.decode(JsonParser.parseString("[1]").getAsJsonArray(), defaultLoadout).use_item(),
 				"Historical shield actions must remain an alias for held item use");
 		System.out.println("PASS: complete bow descriptors, finite arrows, capability gating and legacy shield alias");
+	}
+
+	private static void checkArenaLimits() throws Exception {
+		JsonObject environment = JsonParser.parseString("""
+			{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3",
+			 "bounds":{"min":[0,0,0],"size":[32,48,96]},"blocks":[],
+			 "players":[{"position":[2,1,2],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false},
+			            {"position":[8,1,2],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false}]}
+			""").getAsJsonObject();
+		require(new ReplayTrace.Environment(environment, 1327104).cells.length == 147456,
+				"Bridge-sized terrain fits the exact portable budget");
+		boolean rejected = false;
+		try { new ReplayTrace.Environment(environment, 1327103); } catch (java.io.IOException expected) { rejected = true; }
+		require(rejected, "Terrain above the portable budget must fail");
+		for (String size : new String[]{"[129,1,1]", "[128,128,17]", "[9223372036854775807,1,1]"}) {
+			environment.getAsJsonObject("bounds").add("size", JsonParser.parseString(size));
+			rejected = false;
+			try { new ReplayTrace.Environment(environment, Long.MAX_VALUE); } catch (java.io.IOException expected) { rejected = true; }
+			require(rejected, "Invalid arena dimensions must fail");
+		}
+		environment.getAsJsonObject("bounds").add("size", JsonParser.parseString("[32,48,96]"));
+		JsonArray fills = new JsonArray();
+		for (int index = 0; index < 257; index++) fills.add(new JsonObject());
+		environment.add("blocks", fills);
+		rejected = false;
+		try { new ReplayTrace.Environment(environment, Long.MAX_VALUE); } catch (java.io.IOException expected) { rejected = true; }
+		require(rejected, "More than 256 fill regions must fail");
+		require(ReplayTrace.Environment.terrainBudgetBytes(null) == 536870912L
+				&& ReplayTrace.Environment.terrainBudgetBytes("24") == 24, "Valid terrain budgets must parse");
+		for (String value : new String[]{"", "0", "-1", "+1", "1x", "9223372036854775808"}) {
+			rejected = false;
+			try { ReplayTrace.Environment.terrainBudgetBytes(value); } catch (java.io.IOException expected) { rejected = true; }
+			require(rejected, "Invalid terrain budgets must fail");
+		}
+		System.out.println("PASS: live arena dimensions, fill limit and terrain budget");
 	}
 
 	private static void checkBowReplay() throws Exception {

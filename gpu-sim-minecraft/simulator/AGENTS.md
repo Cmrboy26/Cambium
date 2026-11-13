@@ -73,7 +73,7 @@ support, occupied-space rules and simultaneous player arbitration are not
 implemented. `TerrainOverlays::reset` clears selected worlds; null selects all.
 
 `CudaBatch` copies enabled overlays to independent device storage and shares
-the corresponding base when host views share the same base. Selected host and
+identical immutable bases when host views share the same base. Selected host and
 fixed device resets clear only selected overlays. Raw device-view callers own
 stream ordering and may not mutate while another operation reads the view.
 Reset currently clears cells serially within each selected world; no full-map
@@ -562,7 +562,22 @@ Schema 1: `format: minecraft_sim_environment`, Minecraft `26.3`, legacy profile
 or `configured`, `bounds.min/size`, ordered inclusive `blocks` fills, two ordered
 players. Coordinates are origin-relative. Later fills override; unspecified
 cells are air. Only `minecraft:air`/`minecraft:stone` full cubes. Dimensions
-1..128, total volume <=32768, coordinates -4096..4096, <=256 fills.
+1..128, total volume <=262144, coordinates -4096..4096, <=256 fills.
+
+`MCSIM_TERRAIN_BUDGET_BYTES` is a positive decimal integer, default 536870912
+(512 MiB), set separately in each compiler, native or Minecraft process. The
+portable static-scene check reserves nine bytes per cell: one byte for the
+cell grid plus eight for each live restoration snapshot reference. Native
+overlay ownership checks one shared base plus one byte per cell per world;
+CUDA preflights three copies of its distinct bases and overlays (source, host
+staging and device), sharing identical bases. Explicit native C++ constructors
+can supply a different budget. Checked multiplication and addition reject
+overflow before allocation. This is a per-allocation terrain-payload budget,
+not a process-wide or GPU-memory limit: it excludes object/array overhead,
+other batches, state, projectiles, models, rollouts and allocator overhead.
+It does not guarantee that the host or GPU has enough available memory. Live
+arena construction still requires loaded chunks, safe height and world border,
+and may be slow for large arenas. See the [scenario contract](../docs/simulation_contract.md).
 
 Players declare position/velocity/yaw/pitch/on_ground; health/absorption/charge
 default 20/0/0. Optional `loadout` supplies Minecraft-ID weapon slots, selection,

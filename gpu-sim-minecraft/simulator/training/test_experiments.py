@@ -13,7 +13,7 @@ from uuid import uuid4
 import numpy as np
 
 from simulator.training._test_plans import TEST_SETUPS, example_plan
-from simulator.training.compiler import LEARNER_DEFAULTS, _learner, _opponents, _policy, _snapshots
+from simulator.training.compiler import LEARNER_DEFAULTS, _geometry, _learner, _opponents, _policy, _snapshots
 from simulator.training.contract import FEATURES, categorical_values, fingerprint, from_legacy, project_observations, validate_contract
 from simulator.training.environment import REWARD_NAMES, ROOT, SCHEMA, SCHEMA_V2
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
@@ -263,6 +263,26 @@ class ExperimentChecks(unittest.TestCase):
 
     def resolve(self):
         return resolve_plan(self.raw, base_dir=self.plan_path.parent)
+
+    def test_large_arena_geometry_limits(self):
+        self.arena["bounds"]["size"] = [32, 48, 96]
+        with patch.dict("os.environ", {"MCSIM_TERRAIN_BUDGET_BYTES": "1327104"}):
+            _geometry(self.arena)
+            self.write()
+            self.assertEqual(self.resolve()["scenario"]["arenas"][0]["environment"]["bounds"]["size"],
+                             [32, 48, 96])
+        for value in ("1327103", "", "0", "-1", "+1", "1x", "9223372036854775808"):
+            with self.subTest(budget=value), patch.dict("os.environ", {"MCSIM_TERRAIN_BUDGET_BYTES": value}):
+                with self.assertRaises(ValueError):
+                    _geometry(self.arena)
+        for size in ([129, 1, 1], [128, 128, 17], [2**63, 2**63, 2**63]):
+            self.arena["bounds"]["size"] = size
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                _geometry(self.arena)
+        self.arena["bounds"]["size"] = [32, 48, 96]
+        self.arena["blocks"] = [{}] * 257
+        with self.assertRaises(ValueError):
+            _geometry(self.arena)
 
     def test_arena_fall_damage_rule_roundtrip(self):
         self.arena["rules"] = {"simulate_fall_damage": True}

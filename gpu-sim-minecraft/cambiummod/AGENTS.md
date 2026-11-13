@@ -104,6 +104,9 @@ resolved policy descriptor. It does not parse split experiment authoring
 references, distributions, or training plans. Compiled loadouts have nine
 physical hotbar slots; repeated air is allowed, duplicate nonair is rejected.
 Historical concrete loadouts with fewer slots remain supported.
+Arena validation and live restoration use the per-process terrain budget described
+in the [scenario contract](../docs/simulation_contract.md#design). Large arenas
+still need loaded chunks and can take substantial time to build and restore.
 
 Optional `/info.experiment` deployment metadata supplies experiment name,
 stage name/index, environment and arena names, `controllers=shared_learner`,

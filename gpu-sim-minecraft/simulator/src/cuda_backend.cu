@@ -1,5 +1,6 @@
 #include "minecraft_sim/cuda_backend.hpp"
 #include "minecraft_sim/projectiles.hpp"
+#include "minecraft_sim/terrain_budget.hpp"
 #include "../apps/actions.hpp"
 #include "../apps/observation.hpp"
 #include "../apps/rewards.hpp"
@@ -410,7 +411,7 @@ bool CudaBatch::available() {
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
-CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows) : storage_(std::make_unique<Storage>()) {
+CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows, std::size_t terrain_budget) : storage_(std::make_unique<Storage>()) {
     validateHostBatch(initial);
     if (!initial.math.sine_table) {
         throw std::invalid_argument("A shared sine table is required");
@@ -507,31 +508,45 @@ CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows) : storage_(std::m
         }
     }
 
-    std::vector<Block> cells;
-    std::vector<PlacedBlock> placed_blocks;
     std::vector<BlockWorldView> worlds(initial.environment_count);
     std::vector<std::size_t> offsets(initial.environment_count);
     std::vector<std::size_t> overlay_offsets(initial.environment_count);
+    std::vector<std::uint8_t> copy_base(initial.environment_count);
     std::unordered_map<const Block*, std::pair<std::size_t, std::size_t>> shared_bases;
+    std::size_t base_count = 0;
+    std::size_t overlay_count = 0;
     for (int index = 0; index < initial.environment_count; ++index) {
         auto blocks = initial.block_worlds ? initial.block_worlds[index] : BlockWorldView{};
         const auto count = cellCount(blocks);
-        offsets[index] = cells.size();
+        offsets[index] = base_count;
         const auto shared = shared_bases.find(blocks.cells);
         if (blocks.overlay && count == 0) {
             throw std::invalid_argument("Terrain overlay requires a nonempty base");
         }
-        if (blocks.overlay && shared != shared_bases.end() && shared->second.second == count) {
+        if (shared != shared_bases.end() && shared->second.second == count) {
             offsets[index] = shared->second.first;
         } else if (count != 0) {
-            cells.insert(cells.end(), blocks.cells, blocks.cells + count);
-            if (blocks.overlay) shared_bases.emplace(blocks.cells, std::make_pair(offsets[index], count));
+            base_count = checkedTerrainSum(base_count, count);
+            copy_base[index] = 1;
+            shared_bases.emplace(blocks.cells, std::make_pair(offsets[index], count));
         }
         if (blocks.overlay) {
-            overlay_offsets[index] = placed_blocks.size();
-            placed_blocks.insert(placed_blocks.end(), blocks.overlay, blocks.overlay + count);
+            overlay_offsets[index] = overlay_count;
+            overlay_count = checkedTerrainSum(overlay_count, count);
         }
         worlds[index] = blocks;
+    }
+    const auto terrain_bytes = checkedTerrainSum(checkedTerrainProduct(base_count, sizeof(Block)),
+        checkedTerrainProduct(overlay_count, sizeof(PlacedBlock)));
+    requireTerrainBudget(checkedTerrainProduct(terrain_bytes, 3), terrain_budget);
+    std::vector<Block> cells(base_count);
+    std::vector<PlacedBlock> placed_blocks(overlay_count);
+    for (int index = 0; index < initial.environment_count; ++index) {
+        const auto count = cellCount(worlds[index]);
+        if (copy_base[index]) std::copy_n(worlds[index].cells, count, cells.data() + offsets[index]);
+        if (worlds[index].overlay) {
+            std::copy_n(worlds[index].overlay, count, placed_blocks.data() + overlay_offsets[index]);
+        }
     }
     storage.cells.allocate(cells.size());
     storage.cells.upload(cells.data());

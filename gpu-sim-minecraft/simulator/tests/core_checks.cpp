@@ -84,6 +84,21 @@ void checkMutableTerrain() {
         overflow_rejected = true;
     }
     require(overflow_rejected, "terrain index overflow rejected before allocation");
+    TerrainOverlays exact_budget(static_world, 2, 24);
+    bool budget_rejected = false;
+    try {
+        TerrainOverlays exceeds_budget(static_world, 2, 23);
+    } catch (const std::invalid_argument&) {
+        budget_rejected = true;
+    }
+    require(budget_rejected, "terrain budget rejects allocation over the limit");
+    require(parseTerrainBudget(nullptr) == default_terrain_budget_bytes && parseTerrainBudget("24") == 24,
+            "terrain budget accepts default and positive decimal values");
+    for (const char* value : {"", "0", "-1", "+1", "1x", "9223372036854775808"}) {
+        bool invalid_rejected = false;
+        try { (void)parseTerrainBudget(value); } catch (const std::invalid_argument&) { invalid_rejected = true; }
+        require(invalid_rejected, "invalid terrain budget rejected");
+    }
 }
 
 void checkPolicyFixtures() {

@@ -53,6 +53,10 @@ bool checkMutableTerrain() {
     const auto sine = makeSineTable();
     BatchView host{players.data(), queued.data(), held.data(), worlds.data(), 2, 2,
                    terrain.data(), {sine.data()}, nullptr};
+    bool budget_rejected = false;
+    try { CudaBatch too_large(host, false, 71); } catch (const std::invalid_argument&) { budget_rejected = true; }
+    if (!budget_rejected) return false;
+    CudaBatch exact_budget(host, false, 72);
     CudaBatch device(host);
     double* output = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&output), 11 * sizeof(double)) != cudaSuccess) return false;
@@ -79,6 +83,26 @@ bool checkMutableTerrain() {
     result = result && sample(0) && actual[0] == 1.0 && actual[1] == 1.0 && actual[6] == 0.0;
     cudaFree(output);
     return result;
+}
+
+bool checkStaticTerrainSharing() {
+    using namespace minecraft_sim;
+    std::array<Block, 8> base{};
+    std::array<BlockWorldView, 2> blocks{{{base.data(), 4, 2, 1}, {base.data(), 4, 2, 1}}};
+    std::array<PlayerState, 4> players{};
+    std::array<Controls, 4> queued{}, held{};
+    std::array<WorldState, 2> worlds{};
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), 2, 2,
+                   blocks.data(), {sine.data()}, nullptr};
+    bool budget_rejected = false;
+    try { CudaBatch too_large(host, false, 23); } catch (const std::invalid_argument&) { budget_rejected = true; }
+    if (!budget_rejected) return false;
+    CudaBatch device(host, false, 24);
+    std::array<BlockWorldView, 2> uploaded{};
+    return cudaMemcpy(uploaded.data(), device.deviceView().block_worlds, sizeof(uploaded),
+                      cudaMemcpyDeviceToHost) == cudaSuccess
+        && uploaded[0].cells == uploaded[1].cells && uploaded[0].cells != nullptr;
 }
 
 bool checkFixedTerrainReset() {
@@ -801,7 +825,7 @@ bool checkBatchedDeviceActions() {
 int main() {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) return 77;
-    if (!checkMutableTerrain()) {
+    if (!checkMutableTerrain() || !checkStaticTerrainSharing()) {
         std::cerr << "CUDA mutable terrain isolation check failed\n";
         return 1;
     }

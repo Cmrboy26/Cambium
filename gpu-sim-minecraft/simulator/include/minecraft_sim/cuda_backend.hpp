@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minecraft_sim/projectiles.hpp"
+#include "minecraft_sim/terrain_budget.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -20,7 +21,8 @@ class CudaBatch {
 public:
     static constexpr unsigned int threads_per_block = 128;
 
-    explicit CudaBatch(BatchView initial, bool summarize_arrows = false);
+    explicit CudaBatch(BatchView initial, bool summarize_arrows = false,
+                       std::size_t terrain_budget = terrainBudgetBytes());
     ~CudaBatch();
     CudaBatch(const CudaBatch&) = delete;
     CudaBatch& operator=(const CudaBatch&) = delete;

@@ -2,6 +2,7 @@
 
 #include "configuration.hpp"
 #include "minecraft_sim/projectiles.hpp"
+#include "minecraft_sim/terrain_budget.hpp"
 
 #include <array>
 #include <filesystem>
@@ -95,17 +96,18 @@ struct Scene {
             if (extent < 1 || extent > 128) {
                 throw std::invalid_argument("Environment dimensions must be in 1..128");
             }
-            volume *= extent;
+            volume = checkedTerrainProduct(volume, std::size_t(extent));
         }
-        if (volume > 32768) {
-            throw std::invalid_argument("Environment exceeds 32768 cells");
+        if (volume > max_arena_cells) {
+            throw std::invalid_argument("Environment exceeds 262144 cells");
         }
-        cells.resize(volume, Block::air);
-        blocks = {cells.data(), size[0], size[1], size[2], origin[0], origin[1], origin[2]};
+        requireTerrainBudget(checkedTerrainProduct(volume, portable_arena_bytes_per_cell), terrainBudgetBytes());
         const auto& fills = definition.at("blocks");
         if (!fills.is_array() || fills.size() > 256) {
             throw std::invalid_argument("Environment blocks must be at most 256 fill regions");
         }
+        cells.resize(volume, Block::air);
+        blocks = {cells.data(), size[0], size[1], size[2], origin[0], origin[1], origin[2]};
         for (const auto& fill : fills) {
             const auto lower = integer_vector(fill.at("from"));
             const auto upper = integer_vector(fill.at("to"));

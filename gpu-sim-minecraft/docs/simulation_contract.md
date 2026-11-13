@@ -32,6 +32,15 @@ references or execute curriculum schedules. Replays additionally carry semantic
 controls and resulting state, so playback needs neither weights nor source files.
 See the [training-plan reference](../simulator/training/AGENTS.md#research-training-plans).
 
+Concrete arenas allow dimensions 1..128, at most 262144 cells and 256 ordered
+fills. The compiler, native scene loader and live/replay adapter independently
+apply `MCSIM_TERRAIN_BUDGET_BYTES` before allocating terrain; set it in every
+process that consumes the scenario. The default is 512 MiB. The portable scene
+check reserves nine bytes per cell, and native mutable/CUDA paths additionally
+check their terrain payloads. This budget is not a total-memory limit. See
+[native terrain budgeting](../simulator/AGENTS.md#json-environments) for
+accounting, limitations and live-world requirements.
+
 In the [example environment](../simulator/setups/environments/example/sword-duel.json),
 `players.shared` holds constant initialization and `players.overrides` contains
 only each actor's spawn differences. To add gear sampling, use `equipment`:

@@ -99,6 +99,10 @@ final class ReplayTrace {
 		final List<JsonObject> loadouts = new ArrayList<>();
 
 		Environment(JsonObject definition) throws IOException {
+			this(definition, terrainBudgetBytes(System.getenv("MCSIM_TERRAIN_BUDGET_BYTES")));
+		}
+
+		Environment(JsonObject definition, long terrainBudget) throws IOException {
 			this.definition = definition;
 			if (!definition.get("format").getAsString().equals("minecraft_sim_environment")
 					|| definition.get("version").getAsInt() != 1
@@ -124,15 +128,18 @@ final class ReplayTrace {
 					&& definition.getAsJsonObject("rules").get("simulate_fall_damage").getAsBoolean();
 			min = integerVector(definition.getAsJsonObject("bounds").get("min"));
 			size = integerVector(definition.getAsJsonObject("bounds").get("size"));
-			int volume = 1;
+			long volume = 1;
 			for (int extent : size) {
 				if (extent < 1 || extent > 128) throw new IOException("Environment dimensions must be in 1..128");
-				volume *= extent;
+				volume = Math.multiplyExact(volume, extent);
 			}
-			if (volume > 32768) throw new IOException("Environment exceeds 32768 cells");
-			cells = new byte[volume];
+			if (volume > 262144) throw new IOException("Environment exceeds 262144 cells");
+			if (terrainBudget <= 0 || Math.multiplyExact(volume, 9L) > terrainBudget) {
+				throw new IOException("Terrain buffers exceed MCSIM_TERRAIN_BUDGET_BYTES");
+			}
 			var fills = definition.getAsJsonArray("blocks");
 			if (fills.size() > 256) throw new IOException("Environment exceeds 256 fill regions");
+			cells = new byte[(int) volume];
 			for (JsonElement element : fills) {
 				JsonObject fill = element.getAsJsonObject();
 				int[] from = integerVector(fill.get("from"));
@@ -205,12 +212,28 @@ final class ReplayTrace {
 			}
 		}
 
+		static long terrainBudgetBytes(String value) throws IOException {
+			if (value == null) return 536870912L;
+			try {
+				if (!value.matches("[0-9]+")) throw new NumberFormatException();
+				long parsed = Long.parseLong(value);
+				if (parsed <= 0) throw new NumberFormatException();
+				return parsed;
+			} catch (NumberFormatException error) {
+				throw new IOException("MCSIM_TERRAIN_BUDGET_BYTES must be a positive decimal integer in range", error);
+			}
+		}
+
 		private static int[] integerVector(JsonElement element) throws IOException {
 			var values = element.getAsJsonArray();
 			if (values.size() != 3) throw new IOException("Environment coordinates need three integers");
 			int[] result = new int[3];
 			for (int axis = 0; axis < 3; axis++) {
-				result[axis] = values.get(axis).getAsBigDecimal().intValueExact();
+				try {
+					result[axis] = values.get(axis).getAsBigDecimal().intValueExact();
+				} catch (ArithmeticException | NumberFormatException error) {
+					throw new IOException("Environment coordinates must be bounded integers", error);
+				}
 				if (Math.abs((long) result[axis]) > 4096) throw new IOException("Environment coordinates exceed -4096..4096");
 			}
 			return result;
