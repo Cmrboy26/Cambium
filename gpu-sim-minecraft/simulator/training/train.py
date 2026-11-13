@@ -22,6 +22,8 @@ def arguments(argv=None):
     parser.add_argument("--initialize", help="Initialize compatible weights for a new experiment")
     parser.add_argument("--start-stage", help="Start a new plan at this stage; may be combined with --initialize")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--rollout-backend", choices=("host", "cuda-resident", "auto"), default="host",
+                        help="Collection backend; auto falls back to host for unsupported plans")
     parser.add_argument("--envs", type=positive, help="Worlds: default 16 CPU / 8192 CUDA; restored on resume")
     parser.add_argument("--updates", type=positive, default=100, help="Maximum additional PPO updates")
     parser.add_argument("--rollout-steps", type=positive, help="Ticks per rollout: default 128; restored on resume")

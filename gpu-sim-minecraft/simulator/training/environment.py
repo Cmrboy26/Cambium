@@ -223,6 +223,12 @@ class Environment:
         self._cuda_observation_pointer = None
         self._cuda_observation_device = None
         self._cuda_observation_thread = None
+        self._cuda_actions = None
+        self._cuda_action_pointer = None
+        self._cuda_action_device = None
+        self._cuda_resident_buffers = None
+        self._cuda_resident_pointers = None
+        self._cuda_resident_ready = False
 
     def _check(self, result):
         if result != 0:
@@ -352,6 +358,220 @@ class Environment:
         function.restype = ctypes.c_int
         with torch.cuda.device(self._cuda_observation_device):
             self._check(function(self._handle))
+
+    def register_cuda_actions(self, actions=None):
+        """Register a reusable int32 CUDA tensor for asynchronous action decoding."""
+        self._require_open()
+        if self.device != "cuda":
+            raise ValueError("CUDA actions require a CUDA environment")
+        if self._cuda_observations is None:
+            raise RuntimeError("Register a CUDA observation buffer before CUDA actions")
+        function = getattr(self.native, "mcsim_register_cuda_actions", None)
+        if function is None or self.build_info.get("cuda_action_decode_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for CUDA action decoding")
+        import torch
+
+        if actions is None:
+            actions = torch.empty((self.count, 2, self.action_count), dtype=torch.int32,
+                                  device=self._cuda_observation_device)
+        if (not isinstance(actions, torch.Tensor) or actions.device != self._cuda_observation_device
+                or actions.dtype != torch.int32 or actions.shape != (self.count, 2, self.action_count)
+                or not actions.is_contiguous()):
+            raise ValueError("CUDA action buffer must be a contiguous int32 tensor with the configured shape and device")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        with torch.cuda.device(actions.device):
+            self._check(function(self._handle, actions.data_ptr(), actions.numel()))
+        self._cuda_actions = actions
+        self._cuda_action_pointer = actions.data_ptr()
+        self._cuda_action_device = actions.device
+        return actions
+
+    def decode_cuda_actions_async(self):
+        """Enqueue batch-atomic action validation and decoding on the current stream."""
+        self._require_open()
+        actions = self._cuda_actions
+        if actions is None:
+            raise RuntimeError("Register a CUDA action buffer before use")
+        import torch
+
+        if (actions.data_ptr() != self._cuda_action_pointer or actions.device != self._cuda_action_device
+                or actions.dtype != torch.int32 or actions.shape != (self.count, 2, self.action_count)
+                or not actions.is_contiguous()):
+            raise RuntimeError("Registered CUDA action buffer changed; register it again")
+        function = self.native.mcsim_decode_cuda_actions_async
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        with torch.cuda.device(actions.device):
+            stream = torch.cuda.current_stream(actions.device)
+            actions.record_stream(stream)
+            self._check(function(self._handle, stream.cuda_stream))
+
+    def wait_cuda_actions(self):
+        """Wait for CUDA action decoding and raise if the sticky status is invalid."""
+        self._require_open()
+        if self._cuda_actions is None:
+            raise RuntimeError("Register a CUDA action buffer before use")
+        import torch
+
+        function = self.native.mcsim_cuda_action_status
+        function.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+        function.restype = ctypes.c_int
+        status = ctypes.c_int()
+        with torch.cuda.device(self._cuda_action_device):
+            self._check(function(self._handle, ctypes.byref(status)))
+        if status.value & 1:
+            raise ValueError("Invalid CUDA action index or selected slot; clear the action status before reuse")
+        if status.value & 2:
+            raise ValueError("CUDA batch contains a finished world; clear the action status and reset it before reuse")
+        if status.value & 4:
+            raise ValueError("Invalid CUDA reset mask; clear the action status before reuse")
+
+    def clear_cuda_action_status(self):
+        """Clear the sticky CUDA action error after it has been inspected."""
+        self._require_open()
+        if self._cuda_actions is None:
+            raise RuntimeError("Register a CUDA action buffer before use")
+        import torch
+
+        function = self.native.mcsim_clear_cuda_action_status
+        function.argtypes = [ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        with torch.cuda.device(self._cuda_action_device):
+            self._check(function(self._handle))
+
+    def register_cuda_resident(self):
+        """Register fixed-reset CUDA step outputs; host-state operations become unavailable."""
+        self._require_open()
+        if self.device != "cuda":
+            raise ValueError("CUDA resident stepping requires a CUDA environment")
+        if self._cuda_observations is None or self._cuda_actions is None:
+            raise RuntimeError("Register CUDA observation and action buffers before resident stepping")
+        if self.build_info.get("cuda_resident_step_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for CUDA resident stepping")
+        import torch
+
+        device = self._cuda_observation_device
+        buffers = {
+            "rewards": torch.empty((self.count, 2), dtype=torch.float32, device=device),
+            "terminated": torch.empty((self.count,), dtype=torch.uint8, device=device),
+            "truncated": torch.empty((self.count,), dtype=torch.uint8, device=device),
+            "losses": torch.empty((self.count, 2), dtype=torch.uint8, device=device),
+            "contributions": torch.empty((self.count, 2, len(REWARD_NAMES)), dtype=torch.float64, device=device),
+            "reset_mask": torch.empty((self.count,), dtype=torch.uint8, device=device),
+        }
+        self._cuda_resident_buffers = buffers
+        self._cuda_resident_pointers = {name: output.data_ptr() for name, output in buffers.items()}
+        self._cuda_resident_ready = False
+        register = self.native.mcsim_register_cuda_step_outputs
+        register.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_size_t]
+        register.restype = ctypes.c_int
+        reset = self.native.mcsim_register_cuda_reset_mask
+        reset.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        reset.restype = ctypes.c_int
+        with torch.cuda.device(device):
+            self._check(register(self._handle, buffers["rewards"].data_ptr(), buffers["terminated"].data_ptr(),
+                                 buffers["truncated"].data_ptr(), buffers["losses"].data_ptr(),
+                                 buffers["contributions"].data_ptr(), self.count))
+            self._check(reset(self._handle, buffers["reset_mask"].data_ptr(), self.count))
+        self._cuda_resident_ready = True
+        return buffers
+
+    def _resident_stream(self):
+        self._require_open()
+        if not self._cuda_resident_ready:
+            raise RuntimeError("Register CUDA resident buffers before use")
+        import torch
+
+        buffers = self._cuda_resident_buffers
+        shapes = {"rewards": (self.count, 2), "terminated": (self.count,), "truncated": (self.count,),
+                  "losses": (self.count, 2), "contributions": (self.count, 2, len(REWARD_NAMES)),
+                  "reset_mask": (self.count,)}
+        dtypes = {"rewards": torch.float32, "terminated": torch.uint8, "truncated": torch.uint8,
+                  "losses": torch.uint8, "contributions": torch.float64, "reset_mask": torch.uint8}
+        if set(buffers) != set(shapes):
+            raise RuntimeError("Registered CUDA resident buffers changed; recreate the environment")
+        for name, output in buffers.items():
+            if (not isinstance(output, torch.Tensor) or output.data_ptr() != self._cuda_resident_pointers[name]
+                    or output.device != self._cuda_observation_device or output.dtype != dtypes[name]
+                    or output.shape != shapes[name] or not output.is_contiguous()):
+                raise RuntimeError("Registered CUDA resident buffer changed; recreate the environment")
+        if (self._cuda_actions.data_ptr() != self._cuda_action_pointer
+                or self._cuda_actions.device != self._cuda_action_device or self._cuda_actions.dtype != torch.int32
+                or self._cuda_actions.shape != (self.count, 2, self.action_count) or not self._cuda_actions.is_contiguous()
+                or self._cuda_observations.data_ptr() != self._cuda_observation_pointer
+                or self._cuda_observations.device != self._cuda_observation_device
+                or self._cuda_observations.dtype != torch.float32
+                or self._cuda_observations.shape != (self.count, 2, self.observation_dim)
+                or not self._cuda_observations.is_contiguous() or self._cuda_observations.requires_grad):
+            raise RuntimeError("Registered CUDA action or observation buffer changed; register it again")
+        stream = torch.cuda.current_stream(self._cuda_observation_device)
+        for output in buffers.values():
+            output.record_stream(stream)
+        self._cuda_actions.record_stream(stream)
+        self._cuda_observations.record_stream(stream)
+        return stream
+
+    def step_cuda_resident_async(self):
+        """Enqueue one fixed-reset resident step into the registered CUDA buffers."""
+        self._require_open()
+        if not self._cuda_resident_ready:
+            raise RuntimeError("Register CUDA resident buffers before use")
+        import torch
+
+        with torch.cuda.device(self._cuda_observation_device):
+            stream = self._resident_stream()
+            function = self.native.mcsim_step_cuda_resident_async
+            function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            function.restype = ctypes.c_int
+            self._check(function(self._handle, stream.cuda_stream))
+        return self._cuda_observations, self._cuda_resident_buffers
+
+    def reset_cuda_resident_async(self):
+        """Reset worlds selected by the registered CUDA reset mask."""
+        self._require_open()
+        if not self._cuda_resident_ready:
+            raise RuntimeError("Register CUDA resident buffers before use")
+        import torch
+
+        with torch.cuda.device(self._cuda_observation_device):
+            stream = self._resident_stream()
+            function = self.native.mcsim_reset_cuda_resident_async
+            function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            function.restype = ctypes.c_int
+            self._check(function(self._handle, stream.cuda_stream))
+        return self._cuda_observations
+
+    def cuda_reset_episodes(self):
+        """Read fixed-reset episode counters at a checkpoint boundary."""
+        self._require_open()
+        if not self._cuda_resident_ready or self.build_info.get("cuda_resident_episode_version") != 1:
+            raise RuntimeError("CUDA resident episode counters are unavailable")
+        import torch
+
+        episodes = np.empty(self.count, dtype=np.uint64)
+        function = self.native.mcsim_cuda_reset_episodes
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        with torch.cuda.device(self._cuda_observation_device):
+            self._check(function(self._handle, episodes.ctypes.data, self.count))
+        return torch.from_numpy(episodes.view(np.int64))
+
+    def set_cuda_reset_episodes(self, episodes):
+        """Restore fixed-reset episode counters at a checkpoint boundary."""
+        self._require_open()
+        if not self._cuda_resident_ready or self.build_info.get("cuda_resident_episode_version") != 1:
+            raise RuntimeError("CUDA resident episode counters are unavailable")
+        import torch
+
+        if not isinstance(episodes, torch.Tensor) or episodes.dtype != torch.int64 or episodes.shape != (self.count,):
+            raise ValueError("CUDA reset episodes must be an int64 tensor with one entry per world")
+        values = episodes.cpu().contiguous().numpy().view(np.uint64)
+        function = self.native.mcsim_set_cuda_reset_episodes
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        with torch.cuda.device(self._cuda_observation_device):
+            self._check(function(self._handle, values.ctypes.data, self.count))
 
     def reward_totals(self):
         self._require_open()
@@ -538,6 +758,8 @@ class Environment:
                     with torch.cuda.device(device):
                         try:
                             self.wait_cuda_observations()
+                            if self._cuda_actions is not None:
+                                self.wait_cuda_actions()
                         finally:
                             self.native.mcsim_destroy(self._handle)
         finally:
@@ -546,6 +768,12 @@ class Environment:
             self._cuda_observation_pointer = None
             self._cuda_observation_device = None
             self._cuda_observation_thread = None
+            self._cuda_actions = None
+            self._cuda_action_pointer = None
+            self._cuda_action_device = None
+            self._cuda_resident_buffers = None
+            self._cuda_resident_pointers = None
+            self._cuda_resident_ready = False
             directory = getattr(self.native, "_dll_directory", None)
             if directory is not None:
                 directory.close()

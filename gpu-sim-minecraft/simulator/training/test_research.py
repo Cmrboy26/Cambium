@@ -19,8 +19,10 @@ from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
-from simulator.training.policies import fixed_indices, policy_actions
-from simulator.training.research import BehaviorEvaluation, EpisodeMetrics, OpponentPool, SampledWorlds, collect, evaluate
+from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
+from simulator.training.research import (BehaviorEvaluation, EpisodeMetrics, OpponentPool,
+                                         ResidentOpponentPool, SampledWorlds, collect, evaluate,
+                                         resident_unsupported)
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
 from simulator.training.timing import CollectionTimer
@@ -32,6 +34,127 @@ def short_plan():
     for stage in value["stages"]:
         stage["advance"] = {"updates": 2}
     return value
+
+
+class ResidentPolicyChecks(unittest.TestCase):
+    def test_device_sampling_matches_policy_log_probabilities_and_fixed_controls(self):
+        torch.manual_seed(7)
+        model = ActorCritic(4, 8, action_sizes={"jump": 2, "yaw": 3})
+        observations = torch.randn(32, 4)
+        fixed = {"jump": 1}
+        first = torch.Generator().manual_seed(19)
+        second = torch.Generator().manual_seed(19)
+        actions, log_probs, values, valid = resident_policy_actions(
+            model, observations, model.action_names, fixed, first)
+        repeated, _, _, _ = resident_policy_actions(model, observations, model.action_names, fixed, second)
+        _, expected_log_probs, expected_values, _ = policy_actions(model, observations, model.action_names,
+                                                                  fixed, actions)
+        torch.testing.assert_close(actions, repeated)
+        torch.testing.assert_close(actions[:, 0], torch.ones(32, dtype=torch.long))
+        torch.testing.assert_close(log_probs, expected_log_probs)
+        torch.testing.assert_close(values, expected_values)
+        self.assertTrue(valid.all())
+
+    def test_nonfinite_policy_outputs_are_reported_without_invalid_indices(self):
+        class InvalidPolicy(torch.nn.Module):
+            def forward(self, observations):
+                return {"jump": torch.tensor([[float("nan"), 0.0]])}, torch.tensor([float("nan")])
+
+        actions, log_probs, values, valid = resident_policy_actions(
+            InvalidPolicy(), torch.zeros((1, 1)), ("jump",), generator=torch.Generator().manual_seed(1))
+        self.assertFalse(valid.item())
+        self.assertTrue(torch.isfinite(log_probs).all())
+        self.assertTrue(torch.isfinite(values).all())
+        self.assertTrue(0 <= actions.item() < 2)
+
+
+class ResidentOpponentChecks(unittest.TestCase):
+    def test_backend_selection_rejects_unsupported_plans(self):
+        plan = resolve_plan(short_plan())
+        self.assertIn("requires --device cuda", resident_unsupported(plan, "cpu"))
+        self.assertIn("per-episode spawns", resident_unsupported(plan, "cuda"))
+        for stage in plan["stages"]:
+            stage["scenario"].pop("spawns", None)
+        self.assertIn("unsupported opponent", resident_unsupported(plan, "cuda"))
+        plan["stages"] = plan["stages"][:1]
+        self.assertIsNone(resident_unsupported(plan, "cuda"))
+        self.assertEqual(arguments(["--rollout-backend", "auto"]).rollout_backend, "auto")
+
+    def test_stationary_and_self_play_assembly_and_rng_restore(self):
+        contract = resolve_plan(short_plan())["policy"]
+        model = ActorCritic(contract["observation_dim"], 16,
+                            action_sizes=dict(zip(contract["action_names"], contract["action_sizes"])))
+        definitions = {"target": {"type": "scripted", "controller": "stationary_target"},
+                       "self": {"type": "self_play", "deterministic": True}}
+        pool = OpponentPool(definitions, contract, 256, "cpu", 17, learner=model)
+        fixed = {"jump": False}
+        pool.configure([{"id": "target", "weight": 1}, {"id": "self", "weight": 1}], {"fixed": fixed})
+        resident = ResidentOpponentPool(pool, "cpu", 17)
+        resident.reset(torch.ones(256, dtype=torch.bool))
+        self.assertTrue(70 < int((resident.assignments == 0).sum()) < 186)
+        self.assertTrue(70 < int(resident.learner_slots.sum()) < 186)
+        observations = torch.randn(256, 2, contract["observation_dim"])
+        fixed = fixed_indices(contract, {"fixed": fixed})
+        current, learner, _, _, joint, valid = resident.act(model, observations, contract["action_names"], fixed)
+        indices = torch.arange(256)
+        torch.testing.assert_close(current, observations[indices, resident.learner_slots])
+        torch.testing.assert_close(joint[indices, resident.learner_slots], learner)
+        target = resident.assignments == pool.names.index("target")
+        expected = torch.as_tensor(pool.controllers["target"]._neutral).expand(int(target.sum()), -1)
+        torch.testing.assert_close(joint[indices[target], 1 - resident.learner_slots[target]], expected)
+        self_play = ~target
+        other = observations[indices[self_play], 1 - resident.learner_slots[self_play]]
+        expected_self, _, _, _ = resident_policy_actions(model, other, contract["action_names"], fixed,
+                                 deterministic=True)
+        torch.testing.assert_close(joint[indices[self_play], 1 - resident.learner_slots[self_play]], expected_self)
+        self.assertTrue(valid.all())
+        state = resident.state_dict()
+        resident.reset(torch.ones(256, dtype=torch.bool))
+        expected_assignments, expected_slots = resident.assignments.clone(), resident.learner_slots.clone()
+        resident.load_state_dict(state)
+        resident.reset(torch.ones(256, dtype=torch.bool))
+        torch.testing.assert_close(resident.assignments, expected_assignments)
+        torch.testing.assert_close(resident.learner_slots, expected_slots)
+        state = resident.state_dict()
+        selected = torch.zeros(256, dtype=torch.bool)
+        selected[0] = True
+        resident.reset(selected)
+        after = resident.state_dict()
+        torch.testing.assert_close(after["episodes"][1:], state["episodes"][1:])
+        self.assertEqual(after["episodes"][0], state["episodes"][0] + 1)
+        reference = ResidentOpponentPool(pool, "cpu", 17)
+        reference.load_state_dict(state)
+        other_worlds = ~selected
+        for _ in range(5):
+            reference.reset(other_worlds)
+        reference.reset(selected)
+        self.assertEqual(reference.assignments[0], resident.assignments[0])
+        self.assertEqual(reference.learner_slots[0], resident.learner_slots[0])
+
+    def test_unsupported_opponent_rejected(self):
+        plan = resolve_plan(short_plan())
+        pool = OpponentPool(plan["opponents"], plan["policy"], 1, "cpu", 1)
+        pool.configure([{"id": "fighter", "weight": 1}])
+        with self.assertRaisesRegex(ValueError, "does not support"):
+            ResidentOpponentPool(pool, "cpu", 1)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_unspecified_cuda_device_accepts_cuda_zero_mask(self):
+        contract = resolve_plan(short_plan())["policy"]
+        model = ActorCritic(contract["observation_dim"], 16,
+                            action_sizes=dict(zip(contract["action_names"], contract["action_sizes"]))).cuda()
+        pool = OpponentPool({"target": {"type": "scripted", "controller": "stationary_target"}},
+                            contract, 8, "cuda", 3, learner=model)
+        pool.configure([{"id": "target", "weight": 1}])
+        resident = ResidentOpponentPool(pool, "cuda", 3)
+        resident.reset(torch.ones(8, dtype=torch.bool, device="cuda"))
+        reference = ResidentOpponentPool(pool, "cpu", 3)
+        reference.reset(torch.ones(8, dtype=torch.bool))
+        torch.testing.assert_close(resident.assignments.cpu(), reference.assignments)
+        torch.testing.assert_close(resident.learner_slots.cpu(), reference.learner_slots)
+        result = resident.act(model, torch.zeros((8, 2, contract["observation_dim"]), device="cuda"),
+                              contract["action_names"], {})
+        self.assertTrue(result[-1].all().item())
 
 
 class EpisodeMetricChecks(unittest.TestCase):
@@ -349,6 +472,19 @@ class SnapshotChecks(unittest.TestCase):
         self.library = str(load_library()._name)
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4", "--hidden-dim", "8",
                       "--rollout-steps", "3", "--epochs", "1", "--minibatch-size", "8", "--save-every", "1"]
+
+    def test_auto_backend_records_host_fallback_and_strict_backend_rejects(self):
+        output = self.directory / "fallback"
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertEqual(main([*self.flags, "--updates", "1", "--output", str(output),
+                                   "--rollout-backend", "auto"]), 0)
+        config = json.loads((output / "config.json").read_text())
+        self.assertEqual(config["options"]["effective_rollout_backend"], "host")
+        self.assertIn("requires --device cuda", config["options"]["rollout_fallback_reason"])
+        self.assertIn("using host collection", log.getvalue())
+        with self.assertRaisesRegex(ValueError, "requires --device cuda"):
+            main([*self.flags, "--updates", "1", "--output", str(self.directory / "strict"),
+                  "--rollout-backend", "cuda-resident"])
 
     def test_sampler_validation_keeps_cache_and_template_ownership(self):
         scenario = resolve_plan(self.raw, self.directory)["scenario"]

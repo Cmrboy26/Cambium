@@ -50,6 +50,16 @@ Set `-Updates 1500` to allow the entire four-stage schedule to run.
 For direct combat with guaranteed sword/axe/shield, use
 [axe-shield-fighting.json](../setups/curricula/axe-shield-fighting.json) (`-Updates 1500`).
 
+### CUDA Resident Rollouts
+
+The Python trainer defaults to host-staged collection. For a compatible plan,
+add `--device cuda --rollout-backend cuda-resident`; use `--rollout-backend auto`
+to record a host fallback when the plan is unsupported. The resident path supports
+one arena per stage, fixed/world-sampled spawns and loadouts, and stationary or
+current-policy self-play opponents. Existing bundled curricula may need a
+compatible plan before strict resident mode can be used. It does not implement Bridge mode. See the
+[resident interface and limits](AGENTS.md#training-architecture).
+
 ## Checkpoints
 
 Runs under `simulator/training/runs` contain configuration, metrics, and the
@@ -64,6 +74,8 @@ This adds up to 100 updates and starts fresh episodes; a completed curriculum
 stops early. Research resumes restore the embedded plan, world assignments and
 stage progress. `latest` means newest-modified, not strongest. Use `-Initialize`
 with a new `-Plan` to transfer compatible weights without resuming the old task.
+Resume must use the checkpoint's rollout backend; a backend change starts a new
+experiment via initialization.
 
 ## Training Dashboard
 
@@ -109,5 +121,6 @@ curriculum schedules and opponent pools run only in the trainer.
 
 [AGENTS.md](AGENTS.md) holds observation/action schemas, reward semantics,
 checkpoint compatibility, dashboard internals, replay contracts and test commands.
-CUDA physics still uses host-staged observations/rewards; physics benchmarks
-are not full training throughput, and training success does not prove game parity.
+The default CUDA path stages observations/rewards through the host; physics
+benchmarks are not full training throughput, and training success does not prove
+game parity.

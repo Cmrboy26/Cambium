@@ -38,6 +38,26 @@ int mcsim_register_cuda_observations(void* handle, float* observations, size_t c
 int mcsim_observe_cuda_async(void* handle, void* stream);
 /* Wait for the most recent configured observation and report asynchronous errors. */
 int mcsim_wait_cuda_observations(void* handle);
+/* Register caller-owned int32 CUDA actions [worlds, 2, action_heads]. The
+   caller retains the allocation until replacement or batch destruction. */
+int mcsim_register_cuda_actions(void* handle, const int32_t* actions, size_t count);
+/* Enqueue batch-atomic action validation and decoding. Invalid input sets a
+   sticky status and leaves all queued controls unchanged. */
+int mcsim_decode_cuda_actions_async(void* handle, void* stream);
+/* Wait for queued decoding, then report or explicitly clear the sticky status. */
+int mcsim_cuda_action_status(void* handle, int* status);
+int mcsim_clear_cuda_action_status(void* handle);
+/* Register caller-owned CUDA buffers for fixed-reset resident stepping.
+   Shapes: rewards/losses [worlds,2], terminated/truncated [worlds],
+   contributions [worlds,2,18]. Activating this mode disables host-state APIs. */
+int mcsim_register_cuda_step_outputs(void* handle, float* rewards, uint8_t* terminated,
+                                     uint8_t* truncated, uint8_t* losses, double* contributions, size_t worlds);
+int mcsim_register_cuda_reset_mask(void* handle, const uint8_t* mask, size_t worlds);
+int mcsim_step_cuda_resident_async(void* handle, void* stream);
+int mcsim_reset_cuda_resident_async(void* handle, void* stream);
+/* Blocking checkpoint-boundary access to the next per-world reset counters. */
+int mcsim_cuda_reset_episodes(void* handle, uint64_t* episodes, size_t worlds);
+int mcsim_set_cuda_reset_episodes(void* handle, const uint64_t* episodes, size_t worlds);
 int mcsim_reset(void* handle, const uint8_t* mask, float* observations);
 int mcsim_step(void* handle, const int32_t* actions, float* observations, float* rewards,
                uint8_t* terminated, uint8_t* truncated);

@@ -17,10 +17,11 @@ import torch
 from backend.fast_rl_model import ActorCritic
 from simulator.training.compiler import LEARNER_DEFAULTS
 from simulator.training.contract import fingerprint
-from simulator.training.controllers import FrozenSelfPlayController, SelfPlayController, create_controller
+from simulator.training.controllers import (FrozenSelfPlayController, SelfPlayController,
+                                            StationaryTargetController, create_controller)
 from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, actor_lost as _lost
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
-from simulator.training.policies import fixed_indices, policy_actions
+from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
 from simulator.training.ppo import compute_gae, metadata, optimize
 from simulator.training.timing import CollectionTimer, OptimizationTimer
 
@@ -34,6 +35,24 @@ def deployment_summary(plan, stage, stage_index):
     return {"name": plan.get("name", "Experiment"), "stage": stage["name"], "stage_index": stage_index,
             "environment": stage.get("environment_name", stage["name"]), "arenas": stage.get("arena_names", []),
             "controllers": "shared_learner", "sampling": "fixed_checkpoint_episode"}
+
+
+def resident_unsupported(plan, device):
+    if device != "cuda":
+        return "CUDA resident collection requires --device cuda"
+    for stage in plan["stages"]:
+        scenario = stage["scenario"]
+        if len(scenario["arenas"]) != 1:
+            return f"Stage {stage['name']!r} has multiple arenas"
+        for component in ("spawns", "equipment"):
+            if scenario.get(component, {}).get("sample") == "episode":
+                return f"Stage {stage['name']!r} has per-episode {component} sampling"
+        for entry in stage["opponents"]:
+            definition = plan["opponents"][entry["id"]]
+            if not (definition["type"] == "self_play" or
+                    definition["type"] == "scripted" and definition.get("controller") == "stationary_target"):
+                return f"Stage {stage['name']!r} has unsupported opponent {entry['id']!r}"
+    return None
 
 
 class EpisodeMetrics:
@@ -237,6 +256,13 @@ class SampledWorlds:
                 return environment.episode_scenario(local), environment.replay_frame(local)
         raise ValueError("Unknown world")
 
+    def episode_scenario(self, world):
+        for ids, environment in self.groups:
+            found = np.flatnonzero(ids == world)
+            if len(found):
+                return environment.episode_scenario(int(found[0]))
+        raise ValueError("Unknown world")
+
     def close(self):
         self.resources.close()
 
@@ -316,6 +342,211 @@ class OpponentPool:
             raise ValueError("Checkpoint opponent pool differs")
         for name, saved in state["controllers"].items():
             self.controllers[name].load_state_dict(saved)
+
+
+class ResidentOpponentPool:
+    def __init__(self, pool, device, seed):
+        if not pool.mixture:
+            raise ValueError("Configure the opponent mixture before enabling resident opponents")
+        self.pool = pool
+        self.device = torch.device(device)
+        if self.device.type == "cuda" and self.device.index is None:
+            self.device = torch.device("cuda", torch.cuda.current_device())
+        self.count = pool.count
+        self.names = pool.names
+        self.controllers = []
+        for entry in pool.mixture:
+            name = entry["id"]
+            controller = pool.controllers[name]
+            if type(controller) is StationaryTargetController:
+                neutral = torch.as_tensor(controller._neutral, device=self.device)
+            elif type(controller) is SelfPlayController:
+                neutral = None
+            else:
+                raise ValueError(f"Resident rollout does not support opponent {name!r}")
+            self.controllers.append((self.names.index(name), controller, neutral))
+        cumulative = np.cumsum(weights(pool.mixture))
+        cumulative[-1] = 1.0
+        self.cumulative = torch.as_tensor(cumulative, device=self.device)
+        self.choices = torch.tensor([self.names.index(entry["id"]) for entry in pool.mixture],
+                                    dtype=torch.long, device=self.device)
+        self.assignments = torch.zeros(self.count, dtype=torch.long, device=self.device)
+        self.learner_slots = torch.zeros(self.count, dtype=torch.long, device=self.device)
+        self.indices = torch.arange(self.count, device=self.device)
+        self.seed = seed % 2**63
+        self.episodes = torch.zeros(self.count, dtype=torch.long, device=self.device)
+        self.learner_rng = torch.Generator(device=self.device).manual_seed((seed + 2) % 2**63)
+
+    def _uniform(self, stream):
+        value = self.indices * 6364136223846793005 + self.episodes * 1442695040888963407
+        value = value + ((self.seed + stream * 2862933555777941757) % 2**63)
+        value = (value ^ ((value >> 30) & ((1 << 34) - 1))) * -4658895280553007687
+        value = (value ^ ((value >> 27) & ((1 << 37) - 1))) * -7723592293110705685
+        value = value ^ ((value >> 31) & ((1 << 33) - 1))
+        return (value & ((1 << 53) - 1)).to(torch.float64) * (1.0 / (1 << 53))
+
+    def reset(self, mask):
+        if mask.shape != (self.count,) or mask.dtype != torch.bool or mask.device != self.device:
+            raise ValueError("Resident opponent reset mask must be a device boolean vector")
+        selected = self.choices[torch.searchsorted(self.cumulative, self._uniform(0))]
+        sides = (self._uniform(1) >= 0.5).to(torch.long)
+        self.assignments = torch.where(mask, selected, self.assignments)
+        self.learner_slots = torch.where(mask, sides, self.learner_slots)
+        self.episodes += mask.to(torch.long)
+
+    def act(self, model, observations, action_names, fixed):
+        slots = self.learner_slots
+        current = observations[self.indices, slots]
+        other = observations[self.indices, 1 - slots]
+        learner, log_probs, values, valid = resident_policy_actions(
+            model, current, action_names, fixed, self.learner_rng)
+        valid = valid & torch.isfinite(observations).all(dim=(1, 2))
+        opponent = torch.zeros_like(learner)
+        for index, controller, neutral in self.controllers:
+            selected = self.assignments == index
+            if neutral is None:
+                actions, _, _, opponent_valid = resident_policy_actions(
+                    model, other, action_names, controller._fixed, controller._generator, controller.deterministic)
+                valid = valid & (~selected | opponent_valid)
+            else:
+                actions = neutral.expand_as(learner)
+            opponent = torch.where(selected.unsqueeze(-1), actions, opponent)
+        first = torch.where((slots == 0).unsqueeze(-1), learner, opponent)
+        second = torch.where((slots == 1).unsqueeze(-1), learner, opponent)
+        return current, learner, log_probs, values, torch.stack((first, second), dim=1), valid
+
+    def state_dict(self):
+        return {"episodes": self.episodes.cpu().clone(), "learner_rng": self.learner_rng.get_state()}
+
+    def load_state_dict(self, state):
+        if (not isinstance(state, dict) or set(state) != {"episodes", "learner_rng"}
+                or not isinstance(state["episodes"], torch.Tensor)
+                or state["episodes"].dtype != torch.long or state["episodes"].shape != (self.count,)
+                or (state["episodes"] < 0).any().item()):
+            raise ValueError("Invalid resident opponent RNG state")
+        self.episodes.copy_(state["episodes"])
+        try:
+            self.learner_rng.set_state(state["learner_rng"].cpu())
+        except (AttributeError, RuntimeError, TypeError) as error:
+            raise ValueError("Invalid resident opponent RNG state") from error
+
+
+class ResidentCollector:
+    def __init__(self, worlds, pool, seed):
+        if worlds.device != "cuda" or len(worlds.groups) != 1 or len(worlds.sampler.scenario["arenas"]) != 1:
+            raise ValueError("Resident rollout requires one CUDA arena batch")
+        for component in ("spawns", "equipment"):
+            if worlds.sampler.scenario.get(component, {}).get("sample") == "episode":
+                raise ValueError(f"Resident rollout does not support per-episode {component} sampling")
+        ids, environment = worlds.groups[0]
+        if not np.array_equal(ids, np.arange(worlds.count)):
+            raise ValueError("Resident rollout requires a contiguous world batch")
+        self.worlds = worlds
+        self.environment = environment
+        self.pool = ResidentOpponentPool(pool, "cuda", seed)
+        self.device = self.pool.device
+        self.returns = torch.zeros(worlds.count, dtype=torch.float64, device=self.device)
+        self.lengths = torch.zeros(worlds.count, dtype=torch.int64, device=self.device)
+        environment.register_cuda_observations()
+        self.actions = environment.register_cuda_actions()
+        self.buffers = environment.register_cuda_resident()
+        self.observations = environment.observe_cuda_async()
+        self.pool.reset(torch.ones(worlds.count, dtype=torch.bool, device=self.device))
+
+    @torch.no_grad()
+    def collect(self, model, steps, fixed, learner=None, profile=False):
+        learner = LEARNER_DEFAULTS if learner is None else learner
+        worlds, pool = self.worlds, self.pool
+        timer = CollectionTimer(self.device, profile)
+        timer.count("worlds", worlds.count)
+        timer.count("steps", steps)
+        worlds.episode_metrics.begin_rollout()
+        shape = (steps, worlds.count)
+        rollout = {name: torch.empty(shape, dtype=torch.bool if name in ("terminated", "truncated")
+                                    else torch.float32, device=self.device)
+                   for name in ("log_probs", "values", "next_values", "rewards", "terminated", "truncated")}
+        rollout["observations"] = torch.empty((*shape, worlds.observation_dim), device=self.device)
+        rollout["actions"] = torch.empty((*shape, worlds.action_count), dtype=torch.long, device=self.device)
+        rollout["fixed_actions"] = fixed.copy()
+        event_returns = torch.empty(shape, dtype=torch.float64, device=self.device)
+        event_lengths = torch.empty(shape, dtype=torch.int64, device=self.device)
+        event_losses = torch.empty((*shape, 2), dtype=torch.uint8, device=self.device)
+        event_opponents = torch.empty(shape, dtype=torch.long, device=self.device)
+        event_slots = torch.empty(shape, dtype=torch.long, device=self.device)
+        reward_totals = torch.zeros(len(REWARD_NAMES), dtype=torch.float64, device=self.device)
+        valid = torch.ones((), dtype=torch.bool, device=self.device)
+        for step in range(steps):
+            with timer.phase("learner_opponent_inference", cuda=True):
+                current, actions, log_probs, values, combined, finite = pool.act(
+                    model, self.observations, worlds.action_names, fixed)
+                valid &= finite.all() & torch.isfinite(log_probs).all()
+                rollout["observations"][step].copy_(current)
+                rollout["actions"][step].copy_(actions)
+                rollout["log_probs"][step].copy_(log_probs)
+                rollout["values"][step].copy_(values)
+                self.actions.copy_(combined)
+            with timer.phase("environment_step", cuda=True):
+                final, outputs = self.environment.step_cuda_resident_async()
+                slots = pool.learner_slots
+                rewards = outputs["rewards"][pool.indices, slots]
+                terminated = outputs["terminated"].bool()
+                truncated = outputs["truncated"].bool()
+                done = terminated | truncated
+                _, next_values = model(final[pool.indices, slots])
+                next_finite = torch.isfinite(next_values)
+                valid &= (next_finite.all() & torch.isfinite(final).all() & torch.isfinite(rewards).all()
+                          & torch.isfinite(outputs["contributions"]).all())
+                rollout["next_values"][step].copy_(torch.where(next_finite, next_values, 0))
+                rollout["rewards"][step].copy_(rewards)
+                rollout["terminated"][step].copy_(terminated)
+                rollout["truncated"][step].copy_(truncated)
+                reward_totals += outputs["contributions"][pool.indices, slots].sum(dim=0)
+            with timer.phase("episode_bookkeeping", cuda=True):
+                self.returns += rewards.to(torch.float64)
+                self.lengths += 1
+                event_returns[step].copy_(self.returns)
+                event_lengths[step].copy_(self.lengths)
+                event_losses[step].copy_(outputs["losses"])
+                event_opponents[step].copy_(pool.assignments)
+                event_slots[step].copy_(slots)
+                self.returns = torch.where(done, 0, self.returns)
+                self.lengths = torch.where(done, 0, self.lengths)
+                outputs["reset_mask"].copy_(done)
+                self.observations = self.environment.reset_cuda_resident_async()
+                pool.reset(done)
+        with timer.phase("gae", cuda=True):
+            rollout["advantages"], rollout["returns"] = compute_gae(
+                rollout["rewards"], rollout["values"], rollout["next_values"], rollout["terminated"],
+                rollout["truncated"], learner["gamma"], learner["gae_lambda"])
+            valid &= torch.isfinite(rollout["advantages"]).all() & torch.isfinite(rollout["returns"]).all()
+        self.environment.wait_cuda_actions()
+        if not valid.item():
+            raise ValueError("Resident rollout encountered nonfinite observations, rewards or policy outputs")
+        terminated = rollout["terminated"].cpu().numpy()
+        truncated = rollout["truncated"].cpu().numpy()
+        returns, lengths = event_returns.cpu().numpy(), event_lengths.cpu().numpy()
+        losses, opponents, slots = event_losses.cpu().numpy(), event_opponents.cpu().numpy(), event_slots.cpu().numpy()
+        for step, world in zip(*np.nonzero(terminated | truncated), strict=True):
+            loss = losses[step, world]
+            slot = slots[step, world]
+            outcome = ("timeout" if truncated[step, world] else "draw" if loss[0] == loss[1]
+                       else "loss" if loss[slot] else "win")
+            episode = {"return": float(returns[step, world]), "length": int(lengths[step, world]),
+                       "outcome": outcome, "opponent": pool.names[int(opponents[step, world])]}
+            metrics = worlds.episode_metrics
+            metrics.history.append(episode)
+            metrics.accumulate(metrics.rollout_totals, episode)
+            metrics.accumulate(metrics.opponent_totals.setdefault(episode["opponent"], {}), episode)
+        rollout["reward_types"] = dict(zip(REWARD_NAMES, reward_totals.cpu().tolist()))
+        rollout["episode_metrics"] = {**worlds.episode_metrics.snapshot(),
+                                      "training_rollout": worlds.episode_metrics.rollout_snapshot()}
+        pool.pool.assignments[:] = pool.assignments.cpu().numpy()
+        pool.pool.learner_slots[:] = pool.learner_slots.cpu().numpy()
+        if timer.enabled:
+            timer.count("reset_calls", np.any(terminated | truncated, axis=1).sum())
+            timer.count("reset_worlds", (terminated | truncated).sum())
+            rollout["collection_profile"] = timer.finish()
+        return rollout, self.observations, int(terminated.sum()), int(truncated.sum())
 
 
 @torch.no_grad()
@@ -597,6 +828,11 @@ def run(options, checkpoint=None):
         setattr(options, name, plan["learner"][name])
     plan = resolve_plan(plan)
     saved = {} if checkpoint is None else checkpoint.get("research", {})
+    requested_backend = getattr(options, "rollout_backend", "host")
+    reason = resident_unsupported(plan, options.device) if requested_backend != "host" else None
+    if requested_backend == "cuda-resident" and reason is not None:
+        raise ValueError(f"CUDA resident rollout unavailable: {reason}")
+    rollout_backend = "host" if requested_backend == "host" or reason is not None else "cuda-resident"
     if options.envs is None:
         options.envs = saved.get("world_count", 16 if options.device == "cpu" else 8192)
     if options.rollout_steps is None:
@@ -639,6 +875,17 @@ def run(options, checkpoint=None):
     worlds = SampledWorlds(stage["scenario"], plan["policy"], options.envs, options.device, options.library,
                           options.max_ticks, plan["seed"], saved.get("sampler"))
     try:
+        if rollout_backend == "cuda-resident" and any(worlds.build_info.get(name) != 1 for name in (
+            "cuda_async_observation_version", "cuda_action_decode_version", "cuda_resident_step_version",
+            "cuda_resident_episode_version")):
+            reason = "Native library lacks the required resident CUDA capabilities"
+            if requested_backend == "cuda-resident":
+                raise ValueError(f"CUDA resident rollout unavailable: {reason}")
+            rollout_backend = "host"
+        if checkpoint is not None and saved.get("rollout_backend", "host") != rollout_backend:
+            raise ValueError("Checkpoint rollout backend differs; use --initialize for a new experiment")
+        if requested_backend == "auto" and reason is not None:
+            print(f"CUDA resident rollout unavailable; using host collection: {reason}")
         model = ActorCritic(worlds.observation_dim, options.hidden_dim, movement_bins=9,
                             action_sizes=dict(zip(worlds.action_names, plan["policy"]["action_sizes"]))).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=options.lr, eps=1e-5)
@@ -671,26 +918,43 @@ def run(options, checkpoint=None):
             pool.capture(model, 0, stage["controls"], force=True)
         worlds.configure(stage)
         worlds.episode_metrics = EpisodeMetrics(options.envs, saved.get("episode_history", ()))
-        observations = worlds.observe()
-        pool.reset(np.ones(options.envs, dtype=bool))
-        if worlds.step_reward_totals(pool.learner_slots) is None:
-            print("Reward breakdown unavailable: rebuild minecraft_sim_training and restart/resume training "
-                  "to record learner-only per-type rewards. Total rewards are still recorded.")
+        resident = None
+        if rollout_backend == "cuda-resident":
+            resident = ResidentCollector(worlds, pool, plan["seed"] + stage_index)
+            if checkpoint is not None:
+                if "resident_rng" not in saved or "resident_episodes" not in saved:
+                    raise ValueError("Resident checkpoint is missing sampler or native episode state")
+                resident.pool.load_state_dict(saved["resident_rng"])
+                resident.environment.set_cuda_reset_episodes(saved["resident_episodes"])
+                resident.buffers["reset_mask"].fill_(1)
+                resident.observations = resident.environment.reset_cuda_resident_async()
+                resident.pool.reset(torch.ones(options.envs, dtype=torch.bool, device=resident.device))
+            observations = resident.observations
+        else:
+            observations = worlds.observe()
+            pool.reset(np.ones(options.envs, dtype=bool))
+            if worlds.step_reward_totals(pool.learner_slots) is None:
+                print("Reward breakdown unavailable: rebuild minecraft_sim_training and restart/resume training "
+                      "to record learner-only per-type rewards. Total rewards are still recorded.")
         output.mkdir(parents=True, exist_ok=True)
         base_update = 0 if checkpoint is None else checkpoint["update"]
         samples = 0 if checkpoint is None else checkpoint["samples"]
         rounds = 0 if checkpoint is None else checkpoint.get("completed_rounds", 0)
         evaluations = saved.get("evaluations", {})
         config = vars(options).copy()
+        config["effective_rollout_backend"] = rollout_backend
+        if reason is not None:
+            config["rollout_fallback_reason"] = reason
         config["dashboard_replay_requests"] = True
         config["dashboard_analytics_requests"] = True
         run_metadata = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
-        run_metadata.update(learner="opponent_pool", controls=stage["controls"],
+        run_metadata.update(learner="opponent_pool", controls=stage["controls"], rollout_backend=rollout_backend,
                             experiment=deployment_summary(plan, stage, stage_index))
         (output / "config.json").write_text(json.dumps({"options": config, "metadata": run_metadata,
             "experiment": plan, "training": {"start_update": base_update, "target_update": base_update + options.updates}},
             indent=2), encoding="utf-8")
-        print(f"Research training: {options.envs} worlds; {worlds.observation_dim} observations; stage {stage['name']}")
+        print(f"Research training: {options.envs} worlds; {worlds.observation_dim} observations; "
+              f"stage {stage['name']}; rollout {rollout_backend}")
         if checkpoint is not None:
             print("Resumed schedule, samplers and weights; starting fresh episodes (not mid-episode continuation).")
         for update in range(base_update + 1, base_update + options.updates + 1):
@@ -711,11 +975,16 @@ def run(options, checkpoint=None):
             except (OSError, ValueError) as error:
                 print(f"Dashboard analytics request could not be read: {error}")
             try:
-                rollout, observations, endings, timeouts = collect(
-                    model, worlds, pool, observations, options.rollout_steps, device, fixed,
-                    profile=periodic_profile or analytics_request is not None, learner=plan["learner"])
+                if resident is None:
+                    rollout, observations, endings, timeouts = collect(
+                        model, worlds, pool, observations, options.rollout_steps, device, fixed,
+                        profile=periodic_profile or analytics_request is not None, learner=plan["learner"])
+                else:
+                    rollout, observations, endings, timeouts = resident.collect(
+                        model, options.rollout_steps, fixed, learner=plan["learner"],
+                        profile=periodic_profile or analytics_request is not None)
             except RuntimeError as error:
-                if (analytics_request is None or periodic_profile
+                if (resident is not None or analytics_request is None or periodic_profile
                         or "collection profiling" not in str(error)):
                     raise
                 finish_analytics_request(output, analytics_request["request_id"], "failed",
@@ -788,7 +1057,7 @@ def run(options, checkpoint=None):
                 if replay_rounds:
                     replay_start = time.perf_counter()
                     for replay_round in replay_rounds:
-                        scenario, _ = worlds.episode(0)
+                        scenario = worlds.episode_scenario(0)
                         replay_seed = (update if replay_every_updates or not options.replay_every
                                        else replay_round // options.replay_every)
                         torch.manual_seed(plan["seed"] + replay_seed)
@@ -814,7 +1083,7 @@ def run(options, checkpoint=None):
                 for rule in rules:
                     if rule.get("at_updates") != counter and not (rule.get("on_completion") and complete):
                         continue
-                    scenario, _ = worlds.episode(0)
+                    scenario = worlds.episode_scenario(0)
                     manifest = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
                     manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario,
                                     scenario=scenario, learner="opponent_pool", controls=stage["controls"],
@@ -833,6 +1102,7 @@ def run(options, checkpoint=None):
             iteration_seconds = time.perf_counter() - start
             statistics.update(update=update, samples=samples, stage=stage["name"], stage_index=stage_index,
                 stage_progress=progress.copy(), completed_rounds=rounds, terminated_duels=endings, timeouts=timeouts,
+                rollout_backend=rollout_backend,
                 reward_mean=rollout["rewards"].mean().item(), reward_total=rollout["rewards"].sum(dtype=torch.float64).item(),
                 collection_seconds=collection_seconds, update_seconds=optimization_seconds,
                 evaluation_seconds=evaluation_seconds, evaluation_episodes=evaluation_episodes,
@@ -851,7 +1121,7 @@ def run(options, checkpoint=None):
                     next_stage = plan["stages"][stage_index]
                     statistics["curriculum_boundary"] = {"reset_worlds": options.envs, "next_stage": next_stage["name"]}
                     statistics["next_stage_index"] = stage_index
-                    if scene_key(next_stage["scenario"]) != scene_key(stage["scenario"]):
+                    if resident is not None or scene_key(next_stage["scenario"]) != scene_key(stage["scenario"]):
                         worlds.close()
                         worlds = SampledWorlds(next_stage["scenario"], plan["policy"], options.envs, options.device,
                             options.library, options.max_ticks, plan["seed"] + stage_index)
@@ -860,9 +1130,13 @@ def run(options, checkpoint=None):
                         worlds.configure(next_stage)
                         worlds.reset()
                     stage = next_stage
-                    observations = worlds.observe()
                     pool.configure(stage["opponents"], stage["controls"])
-                    pool.reset(np.ones(options.envs, dtype=bool))
+                    if resident is not None:
+                        resident = ResidentCollector(worlds, pool, plan["seed"] + stage_index)
+                        observations = resident.observations
+                    else:
+                        observations = worlds.observe()
+                        pool.reset(np.ones(options.envs, dtype=bool))
                     progress = {"updates": 0, "episodes": 0, "transitions": 0}
                     evaluations = {}
             statistics["completed_curriculum"] = completed
@@ -879,9 +1153,10 @@ def run(options, checkpoint=None):
                 except (OSError, ValueError) as error:
                     print(f"Dashboard analytics request could not be completed: {error}")
             if update % options.save_every == 0 or update == base_update + options.updates or completed:
-                scenario, _ = worlds.episode(0)
+                scenario = worlds.episode_scenario(0)
                 manifest = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
                 manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario, scenario=scenario,
+                                rollout_backend=rollout_backend,
                                 learner="opponent_pool", controls=stage["controls"],
                                 experiment=deployment_summary(plan, stage, stage_index))
                 research = {"plan": plan, "plan_hash": plan_hash(plan), "stage_index": stage_index,
@@ -890,8 +1165,12 @@ def run(options, checkpoint=None):
                             "world_count": options.envs, "rollout_steps": options.rollout_steps,
                             "max_ticks_override": options.max_ticks,
                             "resume_mode": "fresh_episodes",
+                            "rollout_backend": rollout_backend,
                             "episode_history": list(worlds.episode_metrics.history),
                             "elapsed_seconds": saved.get("elapsed_seconds", 0.0) + time.perf_counter() - run_started}
+                if resident is not None:
+                    research["resident_rng"] = resident.pool.state_dict()
+                    research["resident_episodes"] = resident.environment.cuda_reset_episodes()
                 temporary = output / "latest.tmp"
                 torch.save({"format": "minecraft_sim_ppo", "version": 1, "metadata": manifest,
                     "model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": config,

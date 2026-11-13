@@ -1,5 +1,6 @@
 #pragma once
 
+#include "actions.hpp"
 #include "observation.hpp"
 #include "minecraft_sim/core.hpp"
 #include "policy_catalogue.generated.hpp"
@@ -155,6 +156,7 @@ struct PolicyLayout {
     std::vector<float> lower_bounds;
     std::vector<float> upper_bounds;
     std::vector<Head> actions;
+    std::vector<ActionHead> packed_actions;
 
     PolicyLayout(const nlohmann::json& value, const std::array<std::vector<WeaponItem>, 2>& slots) {
         if (value.at("format") != "minecraft_sim_policy" || value.at("version") != 1
@@ -270,6 +272,14 @@ struct PolicyLayout {
         if (has_shield_action && has_use_item_action) {
             throw std::invalid_argument("Policy cannot declare both shield and use_item action aliases");
         }
+        static_assert(max_action_choices == policy_max_choices);
+        for (const auto& head : actions) {
+            ActionHead packed;
+            packed.kind = head.kind;
+            packed.count = static_cast<int>(head.values.size());
+            std::copy(head.values.begin(), head.values.end(), packed.values);
+            packed_actions.push_back(packed);
+        }
     }
 
     ObservationProjection projection(std::size_t index) const {
@@ -284,33 +294,10 @@ struct PolicyLayout {
     }
 
     Controls decode(const std::int32_t* indices, const std::vector<WeaponItem>& slots) const {
-        constexpr int forward[] = {0, 1, 1, 0, -1, -1, -1, 0, 1};
-        constexpr int strafe[] = {0, 0, -1, -1, -1, 0, 1, 1, 1};
         Controls result;
-        for (std::size_t index = 0; index < actions.size(); ++index) {
-            const auto& head = actions[index];
-            const auto value = head.values[indices[index]];
-            switch (head.kind) {
-            case 0: {
-                const auto move = static_cast<int>(value);
-                result.forward = forward[move] > 0; result.backward = forward[move] < 0;
-                result.left = strafe[move] > 0; result.right = strafe[move] < 0;
-                break;
-            }
-            case 1: result.jump = value != 0; break;
-            case 2: result.sprint = value != 0; break;
-            case 3: result.attack = value != 0; break;
-            case 4: result.yaw_delta = value; break;
-            case 5: result.pitch_delta = value; break;
-            case 6:
-                result.select_weapon = true;
-                result.weapon = slots[static_cast<int>(value)];
-                result.selected_slot = static_cast<int>(value);
-                break;
-            case 7: result.use_item = value != 0; break;
-            case 8: result.sneak = value != 0; break;
-            case 9: result.use_item = value != 0; break;
-            }
+        if (!decodeAction(packed_actions.data(), static_cast<int>(packed_actions.size()), indices,
+                          slots.data(), static_cast<int>(slots.size()), result)) {
+            throw std::invalid_argument("Action index or selected slot outside declared policy");
         }
         return result;
     }

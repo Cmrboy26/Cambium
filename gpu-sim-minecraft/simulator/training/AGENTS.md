@@ -17,8 +17,8 @@ it is not the public training entry point. Common PPO/GAE lives in [ppo.py](ppo.
 
 The native library exposes a small C ABI through `ctypes`, without pybind11 or
 Python development headers. CPU worlds use OpenMP when available, sequential
-execution otherwise. CUDA training still stages controls/state through host
-memory; observations/rays/rewards run on CPU. Do not present physics benchmark
+execution otherwise. Host collection stages CUDA controls/state through host
+memory; the opt-in resident path keeps supported duel rollouts on CUDA. Do not present physics benchmark
 rates as full PPO rates. Research collection covers rollout setup, decisions,
 physics, rewards, episode resets and GAE; replay is timed separately.
 
@@ -46,9 +46,51 @@ allocator lifetime, and complete before another observation overwrites the
 buffer. Closing waits for pending native observation work, not arbitrary
 downstream consumer operations. `wait_cuda_observations()` waits for the latest
 native observation and reports errors without a device-wide synchronization.
-CUDA graph capture is rejected. This interface
-does not migrate actions, rewards, reset sampling or PPO collection, so normal
-training remains host-staged and no end-to-end speedup is implied.
+CUDA graph capture is rejected. Normal training remains host-staged by default;
+the resident path described below explicitly opts into the additional APIs.
+
+After registering observations, `Environment.register_cuda_actions()` accepts
+or allocates a contiguous int32 CUDA tensor `[worlds, 2, action_heads]` on the
+same device. Fill it on the stream used by `decode_cuda_actions_async()` or
+explicitly order the producer stream first. The tensor is retained and cannot
+be resized or moved while registered. `wait_cuda_actions()` checks the sticky
+invalid-action status; after handling an error, call
+clear_cuda_action_status()` before reuse. These methods alone only validate and
+decode actions.
+
+`Environment.register_cuda_resident()` registers rewards, termination,
+truncation, losses, contribution and reset-mask tensors after registering
+observations and actions. `step_cuda_resident_async()` advances one tick and
+returns the registered observations and outputs; `reset_cuda_resident_async()`
+resets the worlds selected by the uint8 mask and overwrites observations.
+Outputs are reusable aliases: consume or copy final observations and rewards
+before stepping or resetting again. All buffers must remain unchanged, on the
+registered device and alive until the environment closes; same-stream ordering
+and cross-stream consumer obligations are the same as for observations.
+The reset snapshots the initial per-world spawn/loadout and does not resample.
+Once activated, host state-dependent operations are rejected. The sticky status
+also reports finished-world and invalid-reset-mask errors via
+`wait_cuda_actions()`. Check errors before using a rollout; setup, boundary
+checks, and close may synchronize. Graph capture is not supported.
+
+Use `--rollout-backend cuda-resident` with `--device cuda` for the opt-in PPO
+path. It requires one arena per stage, fixed or world-sampled spawns/loadouts,
+and only `stationary_target` and current-policy `self_play` opponents in every
+stage. Other opponents, multi-arena stages, and per-episode spawn/equipment
+sampling remain on the host path. `--rollout-backend auto` selects the resident
+path only when supported and otherwise logs and records its fallback reason;
+`host` is the default. Eligibility is checked before activation, not as a
+mid-rollout recovery mechanism. Rollouts retain final observations for timeout
+bootstrap and materialize episode/reward summaries at update boundaries.
+Seat and opponent selection use deterministic per-world episode counters;
+learner and self-play sampling use separate checkpointed PyTorch generators.
+Sequences are reproducible for a given backend and seed but differ from the host
+sampler. Checkpoints record the effective backend and cannot resume under another
+backend; `--initialize` starts a new run instead. Resume starts fresh episodes.
+Native per-world reset counters are saved and restored at checkpoint boundaries
+so those fresh episodes use the next device-side physics seeds.
+Resident collection profiles do not include host-native physics breakdowns.
+No throughput improvement is implied without a matched benchmark.
 
 ## Learner Configuration
 

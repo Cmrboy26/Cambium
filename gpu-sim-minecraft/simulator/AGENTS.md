@@ -70,8 +70,8 @@ the default stream. The caller must use a stream on the batch's CUDA device,
 order preceding device writes on that stream, and ensure the work completes
 before host downloads, resets, cross-stream use or batch destruction. Existing
 upload, download and reset methods do not provide non-default-stream ordering.
-The Python trainer still uses the host-staged path; this API alone does not make
-rollout collection GPU-resident.
+The legacy trainer path remains host-staged; the opt-in resident trainer uses
+the registered interfaces below.
 
 `observeBaseOnStream(output, count, stream)` writes the unprojected 22 base
 features in `[worlds, 2, 22]` order to caller-owned CUDA memory. It is an
@@ -98,6 +98,40 @@ valid same-device stream, retain the registered allocation until replacement or
 destruction, and ensure its actual capacity; pointer checks cannot prove size.
 The async path rejects CUDA graph capture. Cross-stream consumers must wait on
 the producer stream and finish before the registered buffer is overwritten.
+
+`mcsim_register_cuda_actions` registers caller-owned int32 device actions in
+`[worlds, 2, action_heads]` order after preparing the configured policy table.
+`mcsim_decode_cuda_actions_async` validates the complete batch and decodes it
+on the requested stream. Invalid indices or slots set a sticky status without
+changing any queued controls; `mcsim_cuda_action_status` waits for decoding and
+returns that status, and `mcsim_clear_cuda_action_status` explicitly resets it.
+The caller must retain and correctly order the input buffer until decoding
+finishes. `CudaBatch::stepDecodedOnStream` skips physics while the status is
+invalid; it is not by itself a complete training step.
+
+`mcsim_register_cuda_step_outputs` and `mcsim_register_cuda_reset_mask` register
+caller-owned buffers for the experimental resident step. Outputs are float32
+rewards `[worlds,2]`, uint8 terminated and truncated `[worlds]`, uint8 losses
+`[worlds,2]`, and float64 contributions `[worlds,2,18]`; the uint8 reset mask is
+`[worlds]`. `mcsim_step_cuda_resident_async` enqueues validation, one tick,
+reward/endings computation and configured observations on the supplied stream.
+`mcsim_reset_cuda_resident_async` restores selected worlds to their registered
+fixed initial player states and writes post-reset observations. Final step
+observations and outputs must be consumed or copied before their next overwrite.
+
+Action status is sticky: bit 1 means invalid action/slot, bit 2 an unreset
+finished world, and bit 4 an invalid reset mask. Check it at an explicit
+boundary before consuming a rollout and clear it before reuse after errors.
+Registration snapshots fixed per-world initial states and reward settings;
+after activation, host state reads, host stepping and host resets are rejected.
+Device pointer checks cannot establish allocation capacity or lifetime: raw C
+callers must retain every correctly sized allocation and order producers and
+cross-stream consumers. Calls must be serialized and graph capture is rejected.
+Setup, status checks and teardown may synchronize; the async step/reset calls do
+not perform host transfers or device-wide synchronization. The blocking
+`mcsim_cuda_reset_episodes` and `mcsim_set_cuda_reset_episodes` calls transfer
+the per-world next-reset counters at checkpoint boundaries; callers own the
+host uint64 buffers and must start fresh episodes after restoring them.
 
 ## Native Equipment Mechanics
 

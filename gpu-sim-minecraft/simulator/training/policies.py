@@ -40,3 +40,29 @@ def policy_actions(model, observations, action_names, fixed=None, actions=None):
             entropy = entropy + distribution.entropy()
         chosen.append(action)
     return torch.stack(chosen, dim=-1), log_probs, values, entropy
+
+
+def resident_policy_actions(model, observations, action_names, fixed=None, generator=None, deterministic=False):
+    logits, values = model(observations)
+    fixed = {} if fixed is None else fixed
+    valid = torch.isfinite(values)
+    values = torch.where(valid, values, torch.zeros_like(values))
+    log_probs = torch.zeros_like(values)
+    chosen = []
+    for name in action_names:
+        head = logits[name]
+        finite = torch.isfinite(head)
+        valid = valid & finite.all(dim=-1)
+        head = torch.where(finite, head, torch.zeros_like(head))
+        if name in fixed:
+            action = torch.full_like(values, fixed[name], dtype=torch.long)
+        else:
+            if deterministic:
+                action = head.argmax(dim=-1)
+            else:
+                uniform = torch.rand(head.shape, dtype=head.dtype, device=head.device, generator=generator)
+                uniform = uniform.clamp_min(torch.finfo(head.dtype).tiny)
+                action = (head - torch.log(-torch.log(uniform))).argmax(dim=-1)
+            log_probs = log_probs + head.log_softmax(dim=-1).gather(-1, action.unsqueeze(-1)).squeeze(-1)
+        chosen.append(action)
+    return torch.stack(chosen, dim=-1), log_probs, values, valid

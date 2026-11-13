@@ -1,6 +1,7 @@
 #include "scene.hpp"
 #include "replay.hpp"
 #include "observation.hpp"
+#include "rewards.hpp"
 #include "minecraft_sim/cuda_backend.hpp"
 
 #include <algorithm>
@@ -24,11 +25,8 @@
 namespace {
 using namespace minecraft_sim;
 thread_local std::string last_error;
-constexpr double radians = 0.017453292519943295;
 constexpr std::array<float, 9> yaw_bins{-20, -10, -5, -2, 0, 2, 5, 10, 20};
 constexpr std::array<float, 5> pitch_bins{-5, -2, 0, 2, 5};
-constexpr std::array<int, 9> forward{0, 1, 1, 0, -1, -1, -1, 0, 1};
-constexpr std::array<int, 9> strafe{0, 0, -1, -1, -1, 0, 1, 1, 1};
 
 void traceNative(bool enabled, const char* phase) {
     if (enabled) {
@@ -46,15 +44,12 @@ constexpr std::array<const char*, ProfilePhaseCount> profile_names{
     "reset_json", "reset_validate", "reset_apply", "reset_observe", "observe"
 };
 
-double wrapYaw(double angle) {
-    return angle - 360.0 * std::floor((angle + 180.0) / 360.0);
-}
-
 struct TrainingBatch {
     app::Scene terrain;
     std::string definition = terrain.definition.dump();
     std::string scenario;
     std::unique_ptr<app::PolicyLayout> layout;
+    std::vector<app::ActionHead> action_heads;
     std::vector<app::Scene::PlayerDefinitions> episode_players;
     std::vector<PlayerState> players;
     std::vector<Controls> queued;
@@ -89,6 +84,8 @@ struct TrainingBatch {
 #if defined(MCSIM_HAS_CUDA)
     std::unique_ptr<CudaBatch> gpu;
     bool gpu_observations_configured = false;
+    bool gpu_actions_configured = false;
+    bool gpu_resident_configured = false;
 #endif
 
     static app::Scene loadTerrain(const char* path, int version) {
@@ -127,6 +124,21 @@ struct TrainingBatch {
             layout = std::make_unique<app::PolicyLayout>(nlohmann::json::parse(contract), terrain.weapon_slots);
             features = static_cast<int>(layout->observations.size());
             heads = static_cast<int>(layout->actions.size());
+        }
+        if (layout) {
+            action_heads = layout->packed_actions;
+        } else {
+            constexpr int sizes[] = {9, 2, 2, 2, 9, 5, 2, 2};
+            for (int index = 0; index < heads; ++index) {
+                app::ActionHead head;
+                head.kind = index;
+                head.count = sizes[index];
+                for (int choice = 0; choice < head.count; ++choice) {
+                    head.values[choice] = index == 4 ? yaw_bins[choice]
+                        : (index == 5 ? pitch_bins[choice] : static_cast<float>(choice));
+                }
+                action_heads.push_back(head);
+            }
         }
         scenario = terrain.resolvedDefinition().dump();
         std::copy_n(reward_weights, weights.size(), weights.begin());
@@ -181,6 +193,12 @@ struct TrainingBatch {
                 static_cast<int>(worlds.size()), 2, blocks.data(), {terrain.sine.data()}, projectile_states.data()};
     }
 
+    void requireHostState() const {
+#if defined(MCSIM_HAS_CUDA)
+        if (gpu_resident_configured) throw std::invalid_argument("Host state is unavailable after CUDA resident mode activation");
+#endif
+    }
+
 #if defined(MCSIM_HAS_CUDA)
     app::ObservationActorMetadata observationActor(int environment, int player) const {
         const auto index = std::size_t(environment) * 2 + player;
@@ -210,6 +228,43 @@ struct TrainingBatch {
         }
         gpu->configureObservations(projection.data(), projection.size(), actors.data(), actors.size());
         gpu_observations_configured = true;
+    }
+
+    void prepareCudaActions() {
+        if (gpu_actions_configured) return;
+        prepareCudaObservations();
+        gpu->configureActions(action_heads.data(), action_heads.size());
+        gpu_actions_configured = true;
+    }
+
+    void prepareCudaResident() {
+        if (gpu_resident_configured) return;
+        prepareCudaActions();
+        app::DuelRewardSettings settings;
+        std::copy(weights.begin(), weights.end(), settings.weights);
+        settings.block_weight = block_weight;
+        std::copy(event_weights.begin(), event_weights.end(), settings.event_weights);
+        std::copy(shaping_weights.begin(), shaping_weights.end(), settings.shaping_weights);
+        settings.max_ticks = max_ticks;
+        std::vector<app::DuelRewardState> states(worlds.size());
+        std::vector<PlayerState> initial_players;
+        std::vector<app::ObservationActorMetadata> initial_actors;
+        initial_players.reserve(players.size());
+        initial_actors.reserve(players.size());
+        for (int environment = 0; environment < static_cast<int>(worlds.size()); ++environment) {
+            for (int player = 0; player < 2; ++player) {
+                const auto index = std::size_t(environment) * 2 + player;
+                states[environment].dealt_damage[player] = dealt_damage[index] != 0;
+                initial_players.push_back(episode_players[environment].players[player]);
+                auto metadata = observationActor(environment, player);
+                metadata.selected_slot = episode_players[environment].resolved[player]["loadout"]["selected"].get<int>();
+                metadata.observed_opponent_disable = 0;
+                initial_actors.push_back(metadata);
+            }
+        }
+        gpu->configureRewards(settings, states.data(), states.size(), finished.data());
+        gpu->configureFixedResets(initial_players.data(), initial_actors.data(), episodes.data(), episodes.size(), seed);
+        gpu_resident_configured = true;
     }
 #endif
 
@@ -276,6 +331,7 @@ struct TrainingBatch {
     }
 
     void reset(const std::uint8_t* mask) {
+        requireHostState();
         const auto start = profileStart();
         std::vector<int> ids;
         std::vector<PlayerState> initial;
@@ -325,6 +381,7 @@ struct TrainingBatch {
     }
 
     void resetPlayers(const std::uint8_t* mask, const nlohmann::json& definitions) {
+        requireHostState();
         const auto start = profileStart();
         if (!definitions.is_array() || definitions.size() != worlds.size()) {
             throw std::invalid_argument("Reset players must be an array with one entry per world");
@@ -385,14 +442,11 @@ struct TrainingBatch {
     }
 
     bool outside(const PlayerState& player) const {
-        const auto& position = player.position;
-        const auto& bounds = terrain.blocks;
-        return position.x < bounds.origin_x || position.x >= bounds.origin_x + bounds.size_x
-            || position.z < bounds.origin_z || position.z >= bounds.origin_z + bounds.size_z
-            || position.y < bounds.origin_y - 4;
+        return app::duelOutside(player, terrain.blocks);
     }
 
     void observe(float* output, const ArrowObservationSummary* summaries = nullptr) const {
+        requireHostState();
 #if defined(_OPENMP)
 #pragma omp parallel for
 #endif
@@ -434,110 +488,37 @@ struct TrainingBatch {
         }
     }
 
-    // Training-only full-draw intercept heuristic, not vanilla reward logic or a change to projectile physics/RNG.
-    // Sources: minecraft-26.3-src/net/minecraft/world/item/BowItem.java, releaseUsing (26-51);
-    // minecraft-26.3-src/net/minecraft/world/entity/projectile/Projectile.java, shootFromRotation (183-194);
-    // minecraft-26.3-src/net/minecraft/world/entity/projectile/arrow/AbstractArrow.java, tick (222-266).
-    void addShapingReward(std::size_t index, float* rewards) {
-        const auto& source = players[index];
-        const auto& target = players[index ^ 1];
-        const Vec3 relative{target.position.x - source.position.x,
-                            target.position.y - source.position.y,
-                            target.position.z - source.position.z};
-        const double distance = std::sqrt(relative.lengthSquared());
-        const double pitch_error = std::abs(source.pitch);
-        std::array<double, 5> amounts{0.0, std::clamp((10.0 - distance) / 7.0, 0.0, 1.0),
-            std::max(0.0, 1.0 - pitch_error / 90.0), 0.0, pitch_error > 60.0 ? 1.0 : 0.0};
-        const auto source_eye = source.eyePosition();
-        const auto target_eye = target.eyePosition();
-        Vec3 aim{target_eye.x - source_eye.x, target_eye.y - source_eye.y,
-                 target_eye.z - source_eye.z};
-        const bool bow_equipped = source.weapon == WeaponItem::bow;
-        const bool can_aim = !bow_equipped || projectile_states[index / 2].bows[index % 2].ordinary_arrows > 0;
-        if ((shaping_weights[0] != 0.0F || shaping_weights[3] != 0.0F) && can_aim
-            && aim.lengthSquared() > 0.0001 && blockRayFraction(terrain.blocks, source_eye, aim) >= 1.0) {
-            if (bow_equipped) {
-                const auto target_bounds = target.bounds();
-                const Vec3 target_center{(target_bounds.lower.x + target_bounds.upper.x) * 0.5,
-                                         (target_bounds.lower.y + target_bounds.upper.y) * 0.5,
-                                         (target_bounds.lower.z + target_bounds.upper.z) * 0.5};
-                const Vec3 target_motion{target.velocity.x, target.on_ground ? 0.0 : target.velocity.y,
-                                         target.velocity.z};
-                const Vec3 inherited{source.velocity.x, source.on_ground ? 0.0 : source.velocity.y,
-                                     source.velocity.z};
-                double flight_ticks = std::clamp(std::hypot(aim.x, aim.z) / 3.0, 1.0, 60.0);
-                for (int iteration = 0; iteration < 4; ++iteration) {
-                    const double drag = double(0.99F);
-                    const double travel = (1.0 - std::pow(drag, flight_ticks)) / (1.0 - drag);
-                    const double drop = 0.05 * (flight_ticks - travel) / (1.0 - drag);
-                    aim = {(target_center.x - source_eye.x + target_motion.x * flight_ticks) / travel - inherited.x,
-                           (target_center.y - source_eye.y + double(0.1F) + target_motion.y * flight_ticks + drop)
-                               / travel - inherited.y,
-                           (target_center.z - source_eye.z + target_motion.z * flight_ticks) / travel - inherited.z};
-                    flight_ticks = std::clamp(flight_ticks * std::sqrt(aim.lengthSquared()) / 3.0, 1.0, 60.0);
-                }
-            }
-            const double yaw_error = std::abs(wrapYaw(std::atan2(-aim.x, aim.z) / radians - source.yaw));
-            const double aim_pitch = -std::atan2(aim.y, std::hypot(aim.x, aim.z)) / radians;
-            const double aim_error = std::max(yaw_error, std::abs(aim_pitch - source.pitch));
-            amounts[0] = std::max(0.0, 1.0 - aim_error / 30.0);
-            amounts[3] = aim_error < 20.0 ? 1.0 : 0.0;
-        }
-        for (std::size_t term = 0; term < amounts.size(); ++term) {
-            const float amount = static_cast<float>(amounts[term] * shaping_weights[term]);
-            rewards[index] += amount;
-            recordReward(index, reward_totals.size() + term, amount);
-        }
-    }
-
     void step(const std::int32_t* actions, float* observations, float* rewards,
               std::uint8_t* terminated, std::uint8_t* truncated) {
+        requireHostState();
         const char* trace_value = std::getenv("MCSIM_TRACE_NATIVE");
         const bool trace = trace_value && trace_value[0] == '1' && trace_value[1] == '\0';
         const auto decode_start = profileStart();
         if (std::any_of(finished.begin(), finished.end(), [](auto value) { return value != 0; })) {
             throw std::invalid_argument("Reset finished environments before the next step");
         }
-        constexpr std::array<int, 8> dimensions{9, 2, 2, 2, 9, 5, 2, 2};
         for (std::size_t index = 0; index < players.size(); ++index) {
             const auto* action = actions + index * heads;
             for (int head = 0; head < heads; ++head) {
-                const auto size = layout ? static_cast<int>(layout->actions[head].values.size()) : dimensions[head];
-                if (action[head] < 0 || action[head] >= size) {
+                const auto& descriptor = action_heads[head];
+                if (action[head] < 0 || action[head] >= descriptor.count) {
                     throw std::invalid_argument("Action index outside declared policy head");
+                }
+                if (descriptor.kind == 6 && static_cast<std::size_t>(descriptor.values[action[head]])
+                    >= episode_players[index / 2].weapon_slots[index % 2].size()) {
+                    throw std::invalid_argument("Weapon action outside loadout");
                 }
             }
         }
         for (std::size_t index = 0; index < players.size(); ++index) {
             const auto* action = actions + index * heads;
-            if (layout) {
-                queued[index] = layout->decode(action, episode_players[index / 2].weapon_slots[index % 2]);
-                for (std::size_t head = 0; head < layout->actions.size(); ++head) {
-                    if (layout->actions[head].kind == 6) {
-                        selected_slots[index] = static_cast<int>(layout->actions[head].values[action[head]]);
-                    }
-                }
-                continue;
-            }
             Controls controls;
-            controls.forward = forward[action[0]] > 0;
-            controls.backward = forward[action[0]] < 0;
-            controls.left = strafe[action[0]] > 0;
-            controls.right = strafe[action[0]] < 0;
-            controls.jump = action[1] != 0;
-            controls.sprint = action[2] != 0;
-            controls.attack = action[3] != 0;
-            controls.yaw_delta = yaw_bins[action[4]];
-            controls.pitch_delta = pitch_bins[action[5]];
-            if (schema_version == 2) {
-                controls.select_weapon = true;
-                const auto& slots = episode_players[index / 2].weapon_slots[index % 2];
-                if (action[6] >= static_cast<int>(slots.size())) throw std::invalid_argument("Weapon action outside loadout");
-                controls.weapon = slots[action[6]];
-                controls.selected_slot = action[6];
-                selected_slots[index] = action[6];
-                controls.use_item = action[7] != 0;
+            const auto& slots = episode_players[index / 2].weapon_slots[index % 2];
+            if (!app::decodeAction(action_heads.data(), heads, action, slots.data(),
+                                   static_cast<int>(slots.size()), controls)) {
+                throw std::invalid_argument("Action index or selected slot outside declared policy");
             }
+            if (controls.select_weapon) selected_slots[index] = controls.selected_slot;
             queued[index] = controls;
         }
             profileEnd(StepDecode, decode_start);
@@ -596,9 +577,15 @@ struct TrainingBatch {
         const auto rewards_start = profileStart();
         std::fill_n(rewards, players.size(), 0.0F);
         for (auto& totals : step_reward_totals) totals.fill(0.0);
+        app::DuelRewardSettings reward_settings;
+        std::copy(weights.begin(), weights.end(), reward_settings.weights);
+        reward_settings.block_weight = block_weight;
+        std::copy(event_weights.begin(), event_weights.end(), reward_settings.event_weights);
+        std::copy(shaping_weights.begin(), shaping_weights.end(), reward_settings.shaping_weights);
+        reward_settings.max_ticks = max_ticks;
         for (std::size_t environment = 0; environment < worlds.size(); ++environment) {
             const auto offset = environment * 2;
-            bool lost[2]{};
+            app::DuelRewardState reward_state{{dealt_damage[offset] != 0, dealt_damage[offset + 1] != 0}};
             for (int player = 0; player < 2; ++player) {
                 const auto index = offset + player;
                 const auto& state = players[index];
@@ -606,66 +593,18 @@ struct TrainingBatch {
                     if (observed_opponent_disable[index] > 0) --observed_opponent_disable[index];
                     if (state.last_attack.shield_disabled) observed_opponent_disable[index] = 99;
                 }
-                const auto& opponent = players[offset + (1 - player)];
-                const float health_dealt = state.last_attack.health_lost
-                    + worlds[environment].projectile_health_dealt[player];
-                const float health_taken = opponent.last_attack.health_lost
-                    + worlds[environment].projectile_health_taken[player];
-                if (health_dealt > 0.0F) {
-                    const float health_fraction = health_dealt / 20.0F;
-                    rewards[index] += weights[0] * health_fraction;
-                    recordReward(index, 0, weights[0] * health_fraction);
-                    dealt_damage[index] = 1;
-                }
-                if (health_taken > 0.0F) {
-                    const float health_fraction = health_taken / 20.0F;
-                    rewards[index] += weights[1] * health_fraction;
-                    recordReward(index, 1, weights[1] * health_fraction);
-                }
-                const float arrow_progress_reward = weights[9] * worlds[environment].projectile_arrow_progress[player];
-                rewards[index] += arrow_progress_reward;
-                recordReward(index, 9, arrow_progress_reward);
-                if (state.last_attack.attempted && state.last_attack.target < 0) {
-                    rewards[index] += weights[6];
-                    recordReward(index, 6, weights[6]);
-                    const double speed = state.last_attack.attack_speed;
-                    const float penalty = speed > 0.0 ? static_cast<float>(event_weights[1] / speed) : 0.0F;
-                    rewards[index] += penalty;
-                    recordReward(index, 12, penalty);
-                }
-                const float launch_reward = static_cast<float>(event_weights[0] * worlds[environment].wind_self_launch[player]);
-                rewards[index] += launch_reward;
-                recordReward(index, 11, launch_reward);
-                if (state.last_attack.shield_disabled) {
-                    rewards[index] += weights[7];
-                    recordReward(index, 7, weights[7]);
-                }
-                if (state.last_attack.blocked_damage > 0.0F
-                    && weaponAttributes(state.weapon).disable_shield_seconds == 0.0F) {
-                    rewards[offset + (1 - player)] += block_weight;
-                    recordReward(offset + (1 - player), 10, block_weight);
-                }
-                lost[player] = !state.alive() || outside(state);
             }
-            terminated[environment] = lost[0] || lost[1];
-            truncated[environment] = !terminated[environment] && worlds[environment].tick >= std::uint64_t(max_ticks);
+            const auto outcome = app::duelRewards(players.data() + offset, worlds[environment], terrain.blocks,
+                                                   projectile_states[environment], reward_settings, reward_state);
+            terminated[environment] = outcome.terminated;
+            truncated[environment] = outcome.truncated;
             finished[environment] = terminated[environment] || truncated[environment];
             for (int player = 0; player < 2; ++player) {
                 const auto index = offset + player;
-                if (!terminated[environment]) addShapingReward(index, rewards);
-                if (terminated[environment]) {
-                    rewards[index] += lost[player] ? weights[3] : weights[2];
-                    recordReward(index, lost[player] ? 3 : 2, lost[player] ? weights[3] : weights[2]);
-                    if (!lost[player]) {
-                        const float speed_bonus = static_cast<float>(weights[8] * std::clamp(
-                            1.0 - static_cast<double>(worlds[environment].tick) / max_ticks, 0.0, 1.0));
-                        rewards[index] += speed_bonus;
-                        recordReward(index, 8, speed_bonus);
-                    }
-                } else if (truncated[environment]) {
-                    rewards[index] += weights[4] + (dealt_damage[index] ? 0.0F : weights[5]);
-                    recordReward(index, 4, weights[4]);
-                    if (!dealt_damage[index]) recordReward(index, 5, weights[5]);
+                rewards[index] = outcome.rewards[player];
+                dealt_damage[index] = reward_state.dealt_damage[player];
+                for (std::size_t term = 0; term < step_reward_totals[index].size(); ++term) {
+                    recordReward(index, term, outcome.contributions[player][term]);
                 }
             }
         }
@@ -701,6 +640,9 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"cuda_base_observation_version", 1},
         {"cuda_configured_observation_version", 1},
         {"cuda_async_observation_version", 1},
+        {"cuda_action_decode_version", 1},
+        {"cuda_resident_step_version", 1},
+        {"cuda_resident_episode_version", 1},
         {"behavior_events_version", 1},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
@@ -811,13 +753,16 @@ MCSIM_EXPORT int mcsim_set_max_ticks(void* handle, int max_ticks) {
         if (!handle || max_ticks < 1 || max_ticks > 1000000) {
             throw std::invalid_argument("Episode timeout must be in 1..1000000 with a valid handle");
         }
-        static_cast<TrainingBatch*>(handle)->max_ticks = max_ticks;
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        batch.max_ticks = max_ticks;
     });
 }
 MCSIM_EXPORT int mcsim_set_reward_weights(void* handle, const float* weights) {
     return protect([&] {
         if (!handle || !weights) throw std::invalid_argument("Null base reward argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         for (std::size_t index = 0; index < batch.weights.size(); ++index) {
             if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         }
@@ -828,13 +773,16 @@ MCSIM_EXPORT int mcsim_set_block_reward(void* handle, float weight) {
     return protect([&] {
         if (!handle) throw std::invalid_argument("Null block reward argument");
         if (!std::isfinite(weight)) throw std::invalid_argument("Reward weights must be finite");
-        static_cast<TrainingBatch*>(handle)->block_weight = weight;
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        batch.block_weight = weight;
     });
 }
 MCSIM_EXPORT int mcsim_set_event_rewards(void* handle, const float* weights) {
     return protect([&] {
         if (!handle || !weights) throw std::invalid_argument("Null event reward argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         for (std::size_t index = 0; index < batch.event_weights.size(); ++index) {
             if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         }
@@ -845,6 +793,7 @@ MCSIM_EXPORT int mcsim_set_shaping_rewards(void* handle, const float* weights) {
     return protect([&] {
         if (!handle || !weights) throw std::invalid_argument("Null shaping reward argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         for (std::size_t index = 0; index < batch.shaping_weights.size(); ++index) {
             if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         }
@@ -958,10 +907,161 @@ MCSIM_EXPORT int mcsim_wait_cuda_observations(void* handle) {
 #endif
     });
 }
+MCSIM_EXPORT int mcsim_register_cuda_actions(void* handle, const std::int32_t* actions, std::size_t count) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null action handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.prepareCudaActions();
+        batch.gpu->registerActionBuffer(actions, count);
+#else
+        static_cast<void>(actions);
+        static_cast<void>(count);
+        throw std::invalid_argument("CUDA action decoding requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_decode_cuda_actions_async(void* handle, void* stream) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null action handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_actions_configured) {
+            throw std::invalid_argument("Register a CUDA action buffer before use");
+        }
+        batch.gpu->decodeRegisteredActionsOnStream(stream);
+#else
+        static_cast<void>(stream);
+        throw std::invalid_argument("CUDA action decoding requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_cuda_action_status(void* handle, int* status) {
+    return protect([&] {
+        if (!handle || !status) throw std::invalid_argument("Null action status argument");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_actions_configured) {
+            throw std::invalid_argument("Register a CUDA action buffer before use");
+        }
+        *status = batch.gpu->actionStatus();
+#else
+        throw std::invalid_argument("CUDA action decoding requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_clear_cuda_action_status(void* handle) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null action handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_actions_configured) {
+            throw std::invalid_argument("Register a CUDA action buffer before use");
+        }
+        batch.gpu->clearActionStatus();
+#else
+        throw std::invalid_argument("CUDA action decoding requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_register_cuda_step_outputs(void* handle, float* rewards, std::uint8_t* terminated,
+                                                  std::uint8_t* truncated, std::uint8_t* losses,
+                                                  double* contributions, std::size_t worlds) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null resident step handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !rewards || !terminated || !truncated || !losses || !contributions
+            || worlds != batch.worlds.size()) throw std::invalid_argument("Invalid CUDA resident output buffers");
+        batch.gpu->validateDeviceBuffer(rewards);
+        batch.gpu->validateDeviceBuffer(terminated);
+        batch.gpu->validateDeviceBuffer(truncated);
+        batch.gpu->validateDeviceBuffer(losses);
+        batch.gpu->validateDeviceBuffer(contributions);
+        batch.prepareCudaResident();
+        batch.gpu->registerRewardBuffers(rewards, terminated, truncated, losses, contributions, worlds);
+#else
+        static_cast<void>(rewards);
+        static_cast<void>(terminated);
+        static_cast<void>(truncated);
+        static_cast<void>(losses);
+        static_cast<void>(contributions);
+        static_cast<void>(worlds);
+        throw std::invalid_argument("CUDA resident stepping requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_register_cuda_reset_mask(void* handle, const std::uint8_t* mask, std::size_t worlds) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null resident reset handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_resident_configured) throw std::invalid_argument("Prepare CUDA resident stepping first");
+        batch.gpu->registerResetMask(mask, worlds);
+#else
+        static_cast<void>(mask);
+        static_cast<void>(worlds);
+        throw std::invalid_argument("CUDA resident stepping requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_step_cuda_resident_async(void* handle, void* stream) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null resident step handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_resident_configured) throw std::invalid_argument("Prepare CUDA resident stepping first");
+        batch.gpu->stepRegisteredOnStream(stream);
+#else
+        static_cast<void>(stream);
+        throw std::invalid_argument("CUDA resident stepping requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_reset_cuda_resident_async(void* handle, void* stream) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null resident reset handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_resident_configured) throw std::invalid_argument("Prepare CUDA resident stepping first");
+        batch.gpu->resetRegisteredOnStream(stream);
+#else
+        static_cast<void>(stream);
+        throw std::invalid_argument("CUDA resident stepping requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_cuda_reset_episodes(void* handle, std::uint64_t* episodes, std::size_t worlds) {
+    return protect([&] {
+        if (!handle || !episodes) throw std::invalid_argument("Null CUDA reset episode argument");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_resident_configured) throw std::invalid_argument("Prepare CUDA resident stepping first");
+        batch.gpu->downloadFixedResetEpisodes(episodes, worlds);
+#else
+        static_cast<void>(worlds);
+        throw std::invalid_argument("CUDA resident stepping requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_set_cuda_reset_episodes(void* handle, const std::uint64_t* episodes, std::size_t worlds) {
+    return protect([&] {
+        if (!handle || !episodes) throw std::invalid_argument("Null CUDA reset episode argument");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_resident_configured) throw std::invalid_argument("Prepare CUDA resident stepping first");
+        batch.gpu->uploadFixedResetEpisodes(episodes, worlds);
+#else
+        static_cast<void>(worlds);
+        throw std::invalid_argument("CUDA resident stepping requires a CUDA-enabled library");
+#endif
+    });
+}
 MCSIM_EXPORT int mcsim_reward_totals(void* handle, double* totals) {
     return protect([&] {
         if (!handle || !totals) throw std::invalid_argument("Null reward totals argument");
         const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         std::copy(batch.reward_totals.begin(), batch.reward_totals.end(), totals);
     });
 }
@@ -969,6 +1069,7 @@ MCSIM_EXPORT int mcsim_step_reward_totals(void* handle, const std::uint8_t* mask
     return protect([&] {
         if (!handle || !totals) throw std::invalid_argument("Null step reward totals argument");
         const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         if (mask && std::any_of(mask, mask + batch.players.size(), [](auto value) { return value > 1; })) {
             throw std::invalid_argument("Step reward mask must contain one boolean per player");
         }
@@ -986,6 +1087,7 @@ MCSIM_EXPORT int mcsim_step_behavior_events(void* handle, float* events) {
     return protect([&] {
         if (!handle || !events) throw std::invalid_argument("Null behavior events argument");
         const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         for (std::size_t index = 0; index < batch.players.size(); ++index) {
             const auto& player = batch.players[index];
             events[index * 3] = static_cast<float>(batch.worlds[index / 2].wind_self_launch[index % 2]);
@@ -998,6 +1100,7 @@ MCSIM_EXPORT int mcsim_losses(void* handle, std::uint8_t* losses) {
     return protect([&] {
         if (!handle || !losses) throw std::invalid_argument("Null losses argument");
         const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         for (std::size_t index = 0; index < batch.players.size(); ++index) {
             const auto& state = batch.players[index];
             losses[index] = !state.alive() || batch.outside(state);
@@ -1008,6 +1111,7 @@ MCSIM_EXPORT int mcsim_shaping_reward_totals(void* handle, double* totals) {
     return protect([&] {
         if (!handle || !totals) throw std::invalid_argument("Null shaping totals argument");
         const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         std::copy(batch.shaping_totals.begin(), batch.shaping_totals.end(), totals);
     });
 }
@@ -1016,6 +1120,7 @@ MCSIM_EXPORT const char* mcsim_replay_frame(void* handle, int environment) {
     const auto result = protect([&] {
         if (!handle) { throw std::invalid_argument("Null replay handle"); }
         auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
         if (environment < 0 || environment >= static_cast<int>(batch.worlds.size())) {
             throw std::invalid_argument("Replay environment index outside batch");
         }

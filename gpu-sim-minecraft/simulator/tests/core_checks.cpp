@@ -3,6 +3,7 @@
 #include "minecraft_sim/constants_mace.hpp"
 #include "../apps/configuration.hpp"
 #include "../apps/observation.hpp"
+#include "../apps/rewards.hpp"
 #include "../apps/replay.hpp"
 #include <fstream>
 
@@ -121,6 +122,18 @@ void checkPolicyFixtures() {
     const std::array<Controls, 2> controls{control, control};
     const auto decoded = app::replayFrame(0, actors.data(), controls.data(), true).at("actors").at(0).at("controls");
     require(decoded == fixture.at("controls"), "shared semantic action decoding");
+    Controls unchanged;
+    unchanged.jump = true;
+    auto invalid_action = action;
+    invalid_action[0] = -1;
+    require(!app::decodeAction(layout.packed_actions.data(), static_cast<int>(layout.packed_actions.size()),
+        invalid_action.data(), slots[0].data(), static_cast<int>(slots[0].size()), unchanged)
+        && unchanged.jump, "invalid action leaves controls unchanged");
+    invalid_action = action;
+    invalid_action[0] = static_cast<std::int32_t>(layout.packed_actions[0].count);
+    require(!app::decodeAction(layout.packed_actions.data(), static_cast<int>(layout.packed_actions.size()),
+        invalid_action.data(), slots[0].data(), static_cast<int>(slots[0].size()), unchanged)
+        && unchanged.jump, "out-of-range action leaves controls unchanged");
     for (const auto& invalid : fixture.at("invalid")) {
         auto descriptor = fixture.at("policy");
         descriptor[nlohmann::json::json_pointer(invalid.at("pointer").get<std::string>())] = invalid.at("value");
@@ -200,6 +213,73 @@ void checkEquipmentObservation() {
         && catalogue[25] == 1.0F && catalogue[26] == 0.0F && catalogue[27] == 0.0F
         && catalogue[30] == 0.0F, "legacy equipment observation follows actor perspective");
     std::cout << "PASS: descriptor equipment fractions, own hotbar, empty slots and legacy isolation\n";
+}
+
+void checkShapingReward() {
+    using namespace minecraft_sim;
+    PlayerState source, target;
+    source.position = {0.0, 0.0, 0.0};
+    target.position = {0.0, 0.0, 5.0};
+    const std::array<float, 5> weights{2.0F, 3.0F, 4.0F, 5.0F, 6.0F};
+    std::array<float, 5> actual{};
+    app::shapingRewards(source, target, 0, {}, weights.data(), actual.data());
+    near(actual[0], 2.0, 1e-6, "aim reward for centered target");
+    near(actual[1], 15.0 / 7.0, 1e-6, "proximity reward for five-block distance");
+    near(actual[2], 4.0, 1e-6, "pitch reward for horizontal aim");
+    near(actual[3], 5.0, 1e-6, "aim-hold reward for centered target");
+    near(actual[4], 0.0, 0.0, "no extreme-pitch reward below threshold");
+    source.pitch = 61.0F;
+    target.position = source.position;
+    app::shapingRewards(source, target, 0, {}, weights.data(), actual.data());
+    near(actual[0], 0.0, 0.0, "coincident targets do not produce aim reward");
+    near(actual[1], 3.0, 0.0, "proximity reward clamps at one");
+    near(actual[2], 4.0 * 29.0 / 90.0, 1e-6, "pitch reward follows pitch magnitude");
+    near(actual[3], 0.0, 0.0, "coincident targets do not produce aim-hold reward");
+    near(actual[4], 6.0, 0.0, "extreme-pitch threshold uses a strict comparison");
+}
+
+void checkDuelRewards() {
+    using namespace minecraft_sim;
+    std::array<PlayerState, 2> players{};
+    players[0].position = {0.5, 1.0, 0.5};
+    players[1].position = {0.5, 1.0, 2.5};
+    WorldState world;
+    world.tick = 25;
+    ProjectileWorldState projectiles;
+    const BlockWorldView bounds{nullptr, 8, 8, 8, -4, 0, -4};
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 100;
+    settings.weights[0] = 20.0F;
+    settings.weights[1] = -10.0F;
+    settings.weights[2] = 2.0F;
+    settings.weights[3] = -3.0F;
+    settings.weights[4] = -0.5F;
+    settings.weights[5] = -0.25F;
+    settings.weights[8] = 4.0F;
+    players[0].last_attack.health_lost = 5.0F;
+    players[1].health = 0.0F;
+    app::DuelRewardState state;
+    const auto win = app::duelRewards(players.data(), world, bounds, projectiles, settings, state);
+    require(win.terminated && !win.truncated && !win.lost[0] && win.lost[1], "duel loss ends the episode");
+    near(win.rewards[0], 10.0, 0.0, "damage, win and speed rewards combine");
+    near(win.rewards[1], -5.5, 0.0, "damage taken and loss rewards combine");
+    near(win.contributions[0][0], 5.0, 0.0, "damage contribution uses health removed");
+    near(win.contributions[0][8], 3.0, 0.0, "speed contribution uses elapsed ticks");
+    require(state.dealt_damage[0] && !state.dealt_damage[1], "damage history updates for the attacker only");
+    players[1].health = 20.0F;
+    players[0].last_attack = {};
+    world.tick = 100;
+    const auto timeout = app::duelRewards(players.data(), world, bounds, projectiles, settings, state);
+    require(!timeout.terminated && timeout.truncated, "timeout truncates a surviving duel");
+    near(timeout.rewards[0], -0.5, 0.0, "timeout preserves prior damage history");
+    near(timeout.rewards[1], -0.75, 0.0, "timeout adds the no-damage penalty");
+    players[0].position.y = -4.01;
+    players[1].position.x = 4.0;
+    const auto draw = app::duelRewards(players.data(), world, bounds, projectiles, settings, state);
+    require(draw.terminated && !draw.truncated && draw.lost[0] && draw.lost[1],
+            "simultaneous exits terminate as a double loss, not a timeout");
+    near(draw.rewards[0], -3.0, 0.0, "first actor receives loss reward");
+    near(draw.rewards[1], -3.0, 0.0, "second actor receives loss reward");
 }
 
 void checkComparisonStatistics() {
@@ -1941,6 +2021,8 @@ int main(int argc, char** argv) {
         }
         checkPolicyFixtures();
         checkEquipmentObservation();
+        checkShapingReward();
+        checkDuelRewards();
         checkComparisonStatistics();
         checkMeleeTargeting();
         checkWindExplosion();

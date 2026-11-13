@@ -1,4 +1,6 @@
 #include "../apps/observation.hpp"
+#include "../apps/actions.hpp"
+#include "../apps/rewards.hpp"
 #include "minecraft_sim/cuda_backend.hpp"
 
 #include <cuda_runtime.h>
@@ -59,6 +61,307 @@ MCSIM_HD void encodeScenarios(float* output) {
 
 __global__ void encodeScenariosOnDevice(float* output) {
     encodeScenarios(output);
+}
+
+MCSIM_HD void rewardScenarios(float* output) {
+    using namespace minecraft_sim;
+    PlayerState source, target;
+    source.position = {0.5, 0.0, 0.5};
+    target.position = {0.5, 0.0, 5.5};
+    const float weights[] = {2.0F, 3.0F, 4.0F, 5.0F, 6.0F};
+    app::shapingRewards(source, target, 0, {}, weights, output);
+    source.pitch = 61.0F;
+    target.position = source.position;
+    app::shapingRewards(source, target, 0, {}, weights, output + 5);
+    source.pitch = -10.0F;
+    source.weapon = WeaponItem::bow;
+    source.velocity = {0.1, 0.0, 0.0};
+    target.position = {0.5, 0.0, 5.5};
+    target.velocity = {0.2, 0.0, 0.0};
+    app::shapingRewards(source, target, 1, {}, weights, output + 10);
+    app::shapingRewards(source, target, 0, {}, weights, output + 15);
+    Block block = Block::solid;
+    BlockWorldView obstruction{&block, 1, 1, 1, 0, 1, 2};
+    app::shapingRewards(source, target, 1, obstruction, weights, output + 20);
+}
+
+__global__ void rewardScenariosOnDevice(float* output) {
+    rewardScenarios(output);
+}
+
+bool checkShapingRewardParity() {
+    std::array<float, 25> expected{}, actual{};
+    rewardScenarios(expected.data());
+    float* device_output = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_output), sizeof(actual)) != cudaSuccess) return false;
+    rewardScenariosOnDevice<<<1, 1>>>(device_output);
+    const auto result = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess
+        && cudaMemcpy(actual.data(), device_output, sizeof(actual), cudaMemcpyDeviceToHost) == cudaSuccess;
+    cudaFree(device_output);
+    if (!result || actual[0] != 2.0F || actual[3] != 5.0F || actual[4] != 0.0F
+        || actual[5] != 0.0F || actual[6] != 3.0F || actual[8] != 0.0F || actual[9] != 6.0F
+        || actual[15] != 0.0F || actual[18] != 0.0F || actual[20] != 0.0F || actual[23] != 0.0F) return false;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        if (!std::isfinite(actual[index]) || std::abs(actual[index] - expected[index]) > 1.0e-5F) {
+            std::cerr << "CPU/CUDA shaping reward mismatch at index " << index << '\n';
+            return false;
+        }
+    }
+    return true;
+}
+
+bool checkBatchedDuelRewardParity() {
+    using namespace minecraft_sim;
+    constexpr int environments = 137;
+    std::array<PlayerState, environments * 2> players{};
+    std::array<Controls, environments * 2> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<ProjectileWorldState, environments> projectiles{};
+    std::array<ArrowState, environments * projectile_arrow_capacity> arrows{};
+    std::array<Block, 8 * 8 * 8> cells{};
+    std::array<BlockWorldView, environments> blocks{};
+    std::array<app::ObservationActorMetadata, environments * 2> actors{};
+    std::array<app::DuelRewardState, environments> states{};
+    std::array<app::DuelRewardStep, environments> expected{}, actual{};
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 1;
+    for (int term = 0; term < 10; ++term) settings.weights[term] = static_cast<float>(term + 1) * 0.25F;
+    settings.block_weight = 2.5F;
+    settings.event_weights[0] = 0.75F;
+    settings.event_weights[1] = -0.5F;
+    for (int term = 0; term < 5; ++term) settings.shaping_weights[term] = static_cast<float>(term + 1) * 0.2F;
+    for (int environment = 0; environment < environments; ++environment) {
+        blocks[environment] = {cells.data(), 8, 8, 8, -4, 0, -4};
+        projectiles[environment].arrows = arrows.data() + environment * projectile_arrow_capacity;
+        projectiles[environment].arrow_capacity = projectile_arrow_capacity;
+        worlds[environment].tick = 1;
+        players[environment * 2].position = {0.5, 1.0, -1.0};
+        players[environment * 2 + 1].position = {0.5, 1.0, 1.0};
+        actors[environment * 2].slot_count = 1;
+        actors[environment * 2 + 1].slot_count = 1;
+        actors[environment * 2].slots[0] = WeaponItem::diamond_sword;
+        actors[environment * 2 + 1].slots[0] = WeaponItem::diamond_sword;
+        states[environment].dealt_damage[0] = environment % 2 == 0;
+        switch (environment % 5) {
+        case 0:
+            players[environment * 2].last_attack.health_lost = 5.0F;
+            players[environment * 2 + 1].health = 0.0F;
+            break;
+        case 1:
+            players[environment * 2].last_attack.attempted = true;
+            players[environment * 2].last_attack.target = -1;
+            players[environment * 2].last_attack.attack_speed = 4.0;
+            break;
+        case 2:
+            players[environment * 2].last_attack.blocked_damage = 2.0F;
+            worlds[environment].wind_self_launch[0] = 0.5;
+            break;
+        case 3:
+            players[environment * 2].position.x = 4.0;
+            players[environment * 2 + 1].health = 0.0F;
+            break;
+        }
+    }
+    auto expected_states = states;
+    for (int environment = 0; environment < environments; ++environment) {
+        expected[environment] = app::duelRewards(players.data() + environment * 2, worlds[environment],
+            blocks[environment], projectiles[environment], settings, expected_states[environment]);
+    }
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                   blocks.data(), {sine.data()}, projectiles.data()};
+    CudaBatch device(host);
+    const app::ObservationProjection projection{0, 1.0F, 0.0F, -1.0F, 1.0F, false};
+    device.configureObservations(&projection, 1, actors.data(), actors.size());
+    device.configureRewards(settings, states.data(), states.size());
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) return false;
+    const auto matches = [&]() {
+        device.evaluateRewardsOnStream(stream);
+        device.downloadRewardResults(actual.data(), actual.size());
+        for (int environment = 0; environment < environments; ++environment) {
+            const auto& wanted = expected[environment];
+            const auto& received = actual[environment];
+            if (wanted.terminated != received.terminated || wanted.truncated != received.truncated) return false;
+            for (int player = 0; player < 2; ++player) {
+                if (wanted.lost[player] != received.lost[player]
+                    || std::abs(wanted.rewards[player] - received.rewards[player]) > 1.0e-5F) return false;
+                for (int term = 0; term < 18; ++term) {
+                    if (std::abs(wanted.contributions[player][term] - received.contributions[player][term]) > 1.0e-5) {
+                        std::cerr << "CUDA reward mismatch at world " << environment << " player " << player
+                                  << " term " << term << '\n';
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    };
+    bool result = matches();
+    const int reset_id = 0;
+    std::array<PlayerState, 2> reset_players{players[0], players[1]};
+    reset_players[0].last_attack = {};
+    reset_players[1].health = 20.0F;
+    const std::array<app::ObservationActorMetadata, 2> reset_actors{actors[0], actors[1]};
+    device.resetEnvironments(&reset_id, 1, reset_players.data(), projectiles.data(), reset_actors.data());
+    device.download(host);
+    expected_states[0] = {};
+    for (int environment = 0; environment < environments; ++environment) {
+        expected[environment] = app::duelRewards(players.data() + environment * 2, worlds[environment],
+            blocks[environment], projectiles[environment], settings, expected_states[environment]);
+    }
+    result = result && matches();
+    cudaStreamDestroy(stream);
+    return result;
+}
+
+bool checkFinishedWorldProtection() {
+    using namespace minecraft_sim;
+    constexpr int environments = 2;
+    std::array<PlayerState, environments * 2> players{};
+    std::array<Controls, environments * 2> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<ProjectileWorldState, environments> projectiles{};
+    std::array<ArrowState, environments * projectile_arrow_capacity> arrows{};
+    std::array<Block, 8 * 8 * 8> cells{};
+    std::array<BlockWorldView, environments> blocks{};
+    std::array<app::ObservationActorMetadata, environments * 2> actors{};
+    std::array<app::DuelRewardState, environments> states{};
+    std::array<app::DuelRewardStep, environments> results{};
+    for (int environment = 0; environment < environments; ++environment) {
+        blocks[environment] = {cells.data(), 8, 8, 8, -4, 0, -4};
+        projectiles[environment].arrows = arrows.data() + environment * projectile_arrow_capacity;
+        projectiles[environment].arrow_capacity = projectile_arrow_capacity;
+        for (int player = 0; player < 2; ++player) {
+            const int index = environment * 2 + player;
+            players[index].position = {0.5, 1.0, player == 0 ? -1.0 : 1.0};
+            actors[index].slot_count = 1;
+            actors[index].slots[0] = WeaponItem::diamond_sword;
+        }
+    }
+    players[0].ordinary_arrow_count = 3;
+    const auto initial_players = players;
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                   blocks.data(), {sine.data()}, projectiles.data()};
+    CudaBatch device(host);
+    const app::ObservationProjection projection{0, 1.0F, 0.0F, -1.0F, 1.0F, false};
+    device.configureObservations(&projection, 1, actors.data(), actors.size());
+    app::ActionHead head;
+    head.kind = 0;
+    head.count = 1;
+    head.values[0] = 0.0F;
+    device.configureActions(&head, 1);
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 1;
+    settings.weights[4] = -2.0F;
+    device.configureRewards(settings, states.data(), states.size());
+    const std::array<std::uint64_t, environments> episodes{1, 1};
+    constexpr std::uint64_t seed = 123;
+    device.configureFixedResets(initial_players.data(), actors.data(), episodes.data(), episodes.size(), seed);
+    std::int32_t* actions = nullptr;
+    std::uint8_t* device_mask = nullptr;
+    float* device_observations = nullptr;
+    float* device_rewards = nullptr;
+    std::uint8_t* device_terminated = nullptr;
+    std::uint8_t* device_truncated = nullptr;
+    std::uint8_t* device_losses = nullptr;
+    double* device_contributions = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&actions), environments * 2 * sizeof(std::int32_t)) != cudaSuccess
+        || cudaMemset(actions, 0, environments * 2 * sizeof(std::int32_t)) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_mask), environments) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_observations), environments * 2 * sizeof(float)) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_rewards), environments * 2 * sizeof(float)) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_terminated), environments) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_truncated), environments) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_losses), environments * 2) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_contributions), environments * 2 * 18 * sizeof(double)) != cudaSuccess) return false;
+    device.registerActionBuffer(actions, environments * 2);
+    device.registerConfiguredObservationBuffer(device_observations, environments * 2);
+    device.registerRewardBuffers(device_rewards, device_terminated, device_truncated, device_losses,
+                                 device_contributions, environments);
+    device.registerResetMask(device_mask, environments);
+    device.stepRegisteredOnStream(nullptr);
+    device.downloadRewardResults(results.data(), results.size());
+    bool result = device.actionStatus() == 0 && results[0].truncated && results[1].truncated
+        && results[0].rewards[0] == -2.0F;
+    device.exportRewardResultsOnStream(device_rewards, device_terminated, device_truncated, device_losses,
+                                       device_contributions, environments, nullptr);
+    std::array<float, environments * 2> exported_rewards{};
+    std::array<std::uint8_t, environments> exported_terminated{}, exported_truncated{};
+    std::array<std::uint8_t, environments * 2> exported_losses{};
+    std::array<double, environments * 2 * 18> exported_contributions{};
+    result = result && cudaDeviceSynchronize() == cudaSuccess
+        && cudaMemcpy(exported_rewards.data(), device_rewards, sizeof(exported_rewards), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(exported_terminated.data(), device_terminated, sizeof(exported_terminated), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(exported_truncated.data(), device_truncated, sizeof(exported_truncated), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(exported_losses.data(), device_losses, sizeof(exported_losses), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(exported_contributions.data(), device_contributions, sizeof(exported_contributions), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int environment = 0; environment < environments; ++environment) {
+        result = result && exported_terminated[environment] == results[environment].terminated
+            && exported_truncated[environment] == results[environment].truncated;
+        for (int player = 0; player < 2; ++player) {
+            const int actor = environment * 2 + player;
+            result = result && exported_rewards[actor] == results[environment].rewards[player]
+                && exported_losses[actor] == results[environment].lost[player];
+            for (int term = 0; term < 18; ++term) {
+                result = result && exported_contributions[actor * 18 + term] == results[environment].contributions[player][term];
+            }
+        }
+    }
+    device.stepRegisteredOnStream(nullptr);
+    result = result && device.actionStatus() == 2;
+    device.download(host);
+    result = result && worlds[0].tick == 1 && worlds[1].tick == 1;
+    device.clearActionStatus();
+    std::array<std::uint8_t, environments> mask{1, 2};
+    if (cudaMemcpy(device_mask, mask.data(), mask.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    device.resetRegisteredOnStream(nullptr);
+    result = result && device.actionStatus() == 4;
+    device.download(host);
+    result = result && worlds[0].tick == 1 && worlds[1].tick == 1;
+    device.clearActionStatus();
+    mask = {1, 0};
+    if (cudaMemcpy(device_mask, mask.data(), mask.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    device.resetRegisteredOnStream(nullptr);
+    device.downloadRewardResults(results.data(), results.size());
+    result = result && results[0].truncated && results[1].truncated;
+    device.download(host);
+    LegacyRandom expected_player_random;
+    expected_player_random.setSeed(seed + 1000033ULL);
+    LegacyRandom expected_projectile_random;
+    expected_projectile_random.setSeed(seed + 1000033ULL);
+    result = result && worlds[0].tick == 0 && worlds[1].tick == 1
+        && players[0].random.state == expected_player_random.state
+        && projectiles[0].random.state == expected_projectile_random.state
+        && projectiles[0].bows[0].ordinary_arrows == 3;
+    device.stepRegisteredOnStream(nullptr);
+    result = result && device.actionStatus() == 2;
+    device.download(host);
+    result = result && worlds[0].tick == 0 && worlds[1].tick == 1;
+    device.clearActionStatus();
+    mask = {0, 1};
+    if (cudaMemcpy(device_mask, mask.data(), mask.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    device.resetRegisteredOnStream(nullptr);
+    device.stepRegisteredOnStream(nullptr);
+    result = result && device.actionStatus() == 0;
+    device.download(host);
+    result = result && worlds[0].tick == 1 && worlds[1].tick == 1;
+    mask = {1, 0};
+    if (cudaMemcpy(device_mask, mask.data(), mask.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    device.resetRegisteredOnStream(nullptr);
+    device.download(host);
+    expected_player_random.setSeed(seed + 2 * 1000033ULL);
+    result = result && players[0].random.state == expected_player_random.state && worlds[1].tick == 1;
+    cudaFree(device_mask);
+    cudaFree(device_observations);
+    cudaFree(actions);
+    cudaFree(device_rewards);
+    cudaFree(device_terminated);
+    cudaFree(device_truncated);
+    cudaFree(device_losses);
+    cudaFree(device_contributions);
+    return result;
 }
 
 bool checkBatchedWorldObservations() {
@@ -237,6 +540,127 @@ bool checkConfiguredObservations() {
     return result;
 }
 
+bool sameControls(const minecraft_sim::Controls& left, const minecraft_sim::Controls& right) {
+    return left.forward == right.forward && left.backward == right.backward && left.left == right.left
+        && left.right == right.right && left.jump == right.jump && left.yaw_delta == right.yaw_delta
+        && left.pitch_delta == right.pitch_delta && left.sprint == right.sprint && left.sneak == right.sneak
+        && left.attack == right.attack && left.use_item == right.use_item
+        && left.select_weapon == right.select_weapon && left.weapon == right.weapon
+        && left.selected_slot == right.selected_slot;
+}
+
+bool checkBatchedDeviceActions() {
+    using namespace minecraft_sim;
+    constexpr int environments = 137;
+    constexpr int head_count = 9;
+    constexpr int actor_count = environments * 2;
+    std::array<PlayerState, actor_count> players{};
+    std::array<Controls, actor_count> queued{}, held{}, expected{};
+    std::array<WorldState, environments> worlds{};
+    std::array<app::ObservationActorMetadata, actor_count> actors{};
+    std::array<app::ActionHead, head_count> heads{};
+    std::array<std::int32_t, actor_count * head_count> actions{};
+    const int kinds[] = {0, 4, 6, 1, 2, 3, 7, 8, 5};
+    for (int head = 0; head < head_count; ++head) {
+        heads[head].kind = kinds[head];
+        heads[head].count = kinds[head] == 0 ? 9 : (kinds[head] == 4 || kinds[head] == 5 ? 3 : 2);
+        for (int choice = 0; choice < heads[head].count; ++choice) {
+            heads[head].values[choice] = kinds[head] == 4 || kinds[head] == 5
+                ? static_cast<float>((choice - 1) * 5) : static_cast<float>(choice);
+        }
+    }
+    for (int actor = 0; actor < actor_count; ++actor) {
+        players[actor].position = {0.0, 3.0, actor % 2 == 0 ? 0.0 : 2.0};
+        actors[actor].slot_count = actor == actor_count - 1 ? 1 : 2;
+        actors[actor].slots[0] = actor % 2 == 0 ? WeaponItem::iron_sword : WeaponItem::diamond_axe;
+        actors[actor].slots[1] = WeaponItem::unarmed;
+        for (int head = 0; head < head_count; ++head) {
+            actions[actor * head_count + head] = (actor + head) % heads[head].count;
+        }
+        if (actor == actor_count - 1) actions[actor * head_count + 2] = 0;
+        if (!app::decodeAction(heads.data(), head_count, actions.data() + actor * head_count,
+                               actors[actor].slots, actors[actor].slot_count, expected[actor])) return false;
+    }
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2, nullptr, {sine.data()}};
+    CudaBatch device(host);
+    const app::ObservationProjection projection{0, 1.0F, 0.0F, -1.0F, 1.0F, false};
+    device.configureObservations(&projection, 1, actors.data(), actors.size());
+    auto invalid_heads = heads;
+    invalid_heads[0].values[0] = std::numeric_limits<float>::quiet_NaN();
+    bool rejected_layout = false;
+    try { device.configureActions(invalid_heads.data(), invalid_heads.size()); }
+    catch (const std::invalid_argument&) { rejected_layout = true; }
+    if (!rejected_layout) return false;
+    device.configureActions(heads.data(), heads.size());
+    std::int32_t* device_actions = nullptr;
+    cudaStream_t stream = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_actions), sizeof(actions)) != cudaSuccess
+        || cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) return false;
+    const auto upload = [&]() {
+        return cudaMemcpy(device_actions, actions.data(), sizeof(actions), cudaMemcpyHostToDevice) == cudaSuccess;
+    };
+    bool result = upload();
+    device.decodeActionsOnStream(device_actions, actions.size(), stream);
+    result = result && device.actionStatus() == 0;
+    device.download(host);
+    for (int actor = 0; actor < actor_count; ++actor) result = result && sameControls(queued[actor], expected[actor]);
+
+    actions[0] = -1;
+    result = result && upload();
+    device.decodeActionsOnStream(device_actions, actions.size(), stream);
+    device.stepDecodedOnStream(1, stream);
+    result = result && device.actionStatus() == 1;
+    device.download(host);
+    for (int actor = 0; actor < actor_count; ++actor) result = result && sameControls(queued[actor], expected[actor]);
+    for (const auto& world : worlds) result = result && world.tick == 0;
+    actions[0] = 0;
+    result = result && upload();
+    device.decodeActionsOnStream(device_actions, actions.size(), stream);
+    device.stepDecodedOnStream(1, stream);
+    result = result && device.actionStatus() == 1;
+    device.download(host);
+    for (const auto& world : worlds) result = result && world.tick == 0;
+
+    device.clearActionStatus();
+    actions[(actor_count - 1) * head_count + 2] = 1;
+    result = result && upload();
+    device.decodeActionsOnStream(device_actions, actions.size(), stream);
+    device.stepDecodedOnStream(1, stream);
+    result = result && device.actionStatus() == 1;
+    device.download(host);
+    for (const auto& world : worlds) result = result && world.tick == 0;
+    for (int actor = 0; actor < actor_count; ++actor) result = result && sameControls(queued[actor], expected[actor]);
+
+    device.clearActionStatus();
+    actions[(actor_count - 1) * head_count + 2] = 0;
+    auto reference_players = players;
+    auto reference_queued = expected;
+    auto reference_held = held;
+    auto reference_worlds = worlds;
+    BatchView reference{reference_players.data(), reference_queued.data(), reference_held.data(),
+                        reference_worlds.data(), environments, 2, nullptr, {sine.data()}};
+    result = result && upload();
+    device.decodeActionsOnStream(device_actions, actions.size(), stream);
+    device.stepDecodedOnStream(1, stream);
+    result = result && device.actionStatus() == 0;
+    device.download(host);
+    for (int environment = 0; environment < environments; ++environment) {
+        reference.world(environment).processTick();
+        result = result && worlds[environment].tick == reference_worlds[environment].tick;
+    }
+    for (int actor = 0; actor < actor_count; ++actor) {
+        result = result && std::abs(players[actor].position.x - reference_players[actor].position.x) < 1.0e-12
+            && std::abs(players[actor].position.y - reference_players[actor].position.y) < 1.0e-12
+            && std::abs(players[actor].position.z - reference_players[actor].position.z) < 1.0e-12
+            && players[actor].yaw == reference_players[actor].yaw
+            && sameControls(held[actor], reference_held[actor]);
+    }
+    cudaStreamDestroy(stream);
+    cudaFree(device_actions);
+    return result;
+}
+
 }
 
 int main() {
@@ -285,8 +709,24 @@ int main() {
         std::cerr << "CUDA batched world observation check failed\n";
         return 1;
     }
+    if (!checkShapingRewardParity()) {
+        std::cerr << "CUDA shaping reward check failed\n";
+        return 1;
+    }
+    if (!checkBatchedDuelRewardParity()) {
+        std::cerr << "CUDA batched duel reward check failed\n";
+        return 1;
+    }
+    if (!checkFinishedWorldProtection()) {
+        std::cerr << "CUDA finished-world protection check failed\n";
+        return 1;
+    }
     if (!checkConfiguredObservations()) {
         std::cerr << "CUDA configured observation check failed\n";
+        return 1;
+    }
+    if (!checkBatchedDeviceActions()) {
+        std::cerr << "CUDA batched action check failed\n";
         return 1;
     }
     return 0;
