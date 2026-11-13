@@ -30,6 +30,26 @@ used by PPO or a throughput optimization. Set `MCSIM_TEST_CUDA_LIBRARY` to the f
 library when running `python -B -m unittest simulator.training.test_cuda_observation -v`
 on a GPU. The CUDA cases are skipped without that explicit library selection.
 
+`Environment.register_cuda_observations(output=None)` registers a reusable
+contiguous CUDA float32 tensor `[worlds, 2, observation_dim]` for the configured
+policy. Registration validates shape, dtype, device and storage and may block;
+the environment retains the tensor. `observe_cuda_async()` writes the same
+tensor on PyTorch's current stream without a device-wide synchronization or a
+host transfer in that call. It supports legacy and descriptive policy layouts,
+including clipping and one-hot projection. Do not resize, move or change the
+registered tensor; register a replacement instead. All environment calls after
+registration, including close, must occur on the registration thread.
+
+Same-stream consumers are ordered automatically. A different consumer stream
+must wait for the producer stream, record the tensor on the consumer stream for
+allocator lifetime, and complete before another observation overwrites the
+buffer. Closing waits for pending native observation work, not arbitrary
+downstream consumer operations. `wait_cuda_observations()` waits for the latest
+native observation and reports errors without a device-wide synchronization.
+CUDA graph capture is rejected. This interface
+does not migrate actions, rewards, reset sampling or PPO collection, so normal
+training remains host-staged and no end-to-end speedup is implied.
+
 ## Learner Configuration
 
 The plan's `learner` object owns all effective PPO settings. The compiler fills

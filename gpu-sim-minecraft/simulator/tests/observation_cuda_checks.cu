@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -156,6 +157,86 @@ bool checkBatchedWorldObservations() {
     return true;
 }
 
+bool checkConfiguredObservations() {
+    using namespace minecraft_sim;
+    constexpr int environments = 3;
+    constexpr int features = 105;
+    constexpr int values = environments * 2 * features;
+    std::array<PlayerState, environments * 2> players{};
+    std::array<Controls, environments * 2> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<app::ObservationActorMetadata, environments * 2> actors{};
+    std::array<app::ObservationProjection, features> projection{};
+    const float infinity = std::numeric_limits<float>::infinity();
+    for (int feature = 0; feature < 102; ++feature) {
+        projection[feature] = {feature, 1.0F, 0.0F, -infinity, infinity, false};
+    }
+    projection[102] = {0, 2.0F, 0.0F, 0.25F, 0.5F, false};
+    projection[103] = {31, 1.0F, 1.0F, -infinity, infinity, true};
+    projection[104] = {31, -1.0F, 0.0F, -infinity, infinity, true};
+    for (std::size_t index = 0; index < players.size(); ++index) {
+        players[index].position = {static_cast<double>(index) * 2.0, 2.0, 0.0};
+        players[index].health = index % 2 == 0 ? 15.0F : 8.0F;
+        players[index].weapon = index % 2 == 0 ? WeaponItem::iron_axe : WeaponItem::diamond_sword;
+        actors[index].slot_count = 2;
+        actors[index].slots[0] = players[index].weapon;
+        actors[index].slots[1] = WeaponItem::unarmed;
+    }
+    actors[0].observed_opponent_disable = 2;
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2, nullptr, {sine.data()}};
+    CudaBatch device(host);
+    device.configureObservations(projection.data(), projection.size(), actors.data(), actors.size());
+    float* device_output = nullptr;
+    std::array<float, values> actual{};
+    if (cudaMalloc(reinterpret_cast<void**>(&device_output), sizeof(actual)) != cudaSuccess) return false;
+    const auto matches = [&]() {
+        device.observeConfiguredOnStream(device_output, values, nullptr);
+        if (cudaDeviceSynchronize() != cudaSuccess
+            || cudaMemcpy(actual.data(), device_output, sizeof(actual), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        for (std::size_t index = 0; index < players.size(); ++index) {
+            float catalogue[102]{};
+            const auto& source = players[index];
+            const auto& target = players[index ^ 1U];
+            const auto& metadata = actors[index];
+            app::baseWorldObservation(source, target, {}, catalogue);
+            app::legacyEquipmentObservation(catalogue, source, target, metadata.observed_opponent_disable);
+            catalogue[31] = static_cast<float>(metadata.selected_slot);
+            catalogue[32] = static_cast<float>(actors[index ^ 1U].selected_slot);
+            app::velocityObservation(catalogue, source, target);
+            app::movementObservation(catalogue, source, target);
+            app::equipmentObservation(catalogue, source, target, metadata.slots, metadata.slot_count);
+            for (int feature = 0; feature < features; ++feature) {
+                const float expected = app::projectObservation(catalogue, projection[feature]);
+                if (!std::isfinite(actual[index * features + feature])
+                    || std::abs(actual[index * features + feature] - expected) > 1.0e-6F) return false;
+            }
+        }
+        return true;
+    };
+    bool result = matches() && actual[102] == 1.0F && actual[103] == 0.0F && actual[104] == -1.0F;
+    queued[0].select_weapon = true;
+    queued[0].selected_slot = 1;
+    queued[0].weapon = WeaponItem::unarmed;
+    device.uploadControls(queued.data(), queued.size());
+    device.step();
+    device.download(host);
+    actors[0].selected_slot = 1;
+    actors[0].observed_opponent_disable = 1;
+    result = result && matches() && actual[103] == 1.0F && actual[104] == 0.0F;
+    const int reset_id = 1;
+    std::array<PlayerState, 2> reset_players{players[2], players[3]};
+    std::array<app::ObservationActorMetadata, 2> reset_actors{actors[2], actors[3]};
+    reset_actors[0].selected_slot = 1;
+    device.resetEnvironments(&reset_id, 1, reset_players.data(), nullptr, reset_actors.data());
+    actors[2].selected_slot = 1;
+    device.download(host);
+    result = result && matches() && actual[2 * features + 103] == 1.0F
+        && actual[103] == 1.0F && actual[27] == 1.0F;
+    cudaFree(device_output);
+    return result;
+}
+
 }
 
 int main() {
@@ -202,6 +283,10 @@ int main() {
     }
     if (!checkBatchedWorldObservations()) {
         std::cerr << "CUDA batched world observation check failed\n";
+        return 1;
+    }
+    if (!checkConfiguredObservations()) {
+        std::cerr << "CUDA configured observation check failed\n";
         return 1;
     }
     return 0;

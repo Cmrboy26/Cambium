@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cmath>
+#include <type_traits>
 #include <vector>
 
 namespace minecraft_sim::app {
@@ -16,6 +17,16 @@ struct ObservationProjection {
     float upper;
     bool one_hot;
 };
+
+struct ObservationActorMetadata {
+    WeaponItem slots[9]{};
+    int slot_count = 0;
+    int selected_slot = 0;
+    int observed_opponent_disable = 0;
+};
+
+static_assert(std::is_trivially_copyable_v<ObservationProjection>);
+static_assert(std::is_trivially_copyable_v<ObservationActorMetadata>);
 
 MCSIM_HD inline float projectObservation(const float* catalogue, const ObservationProjection& projection) {
     const float value = catalogue[projection.source];

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -87,6 +88,7 @@ struct TrainingBatch {
     std::array<double, ProfilePhaseCount> profiling_seconds{};
 #if defined(MCSIM_HAS_CUDA)
     std::unique_ptr<CudaBatch> gpu;
+    bool gpu_observations_configured = false;
 #endif
 
     static app::Scene loadTerrain(const char* path, int version) {
@@ -179,6 +181,38 @@ struct TrainingBatch {
                 static_cast<int>(worlds.size()), 2, blocks.data(), {terrain.sine.data()}, projectile_states.data()};
     }
 
+#if defined(MCSIM_HAS_CUDA)
+    app::ObservationActorMetadata observationActor(int environment, int player) const {
+        const auto index = std::size_t(environment) * 2 + player;
+        app::ObservationActorMetadata result;
+        const auto& slots = episode_players[environment].weapon_slots[player];
+        result.slot_count = static_cast<int>(slots.size());
+        std::copy(slots.begin(), slots.end(), result.slots);
+        result.selected_slot = selected_slots[index];
+        result.observed_opponent_disable = observed_opponent_disable[index];
+        return result;
+    }
+
+    void prepareCudaObservations() {
+        if (!gpu) throw std::invalid_argument("Configured CUDA observations require a CUDA batch");
+        if (gpu_observations_configured) return;
+        std::vector<app::ObservationProjection> projection;
+        projection.reserve(features);
+        const float infinity = std::numeric_limits<float>::infinity();
+        for (int feature = 0; feature < features; ++feature) {
+            projection.push_back(layout ? layout->projection(feature)
+                : app::ObservationProjection{feature, 1.0F, 0.0F, -infinity, infinity, false});
+        }
+        std::vector<app::ObservationActorMetadata> actors;
+        actors.reserve(players.size());
+        for (int environment = 0; environment < static_cast<int>(worlds.size()); ++environment) {
+            for (int player = 0; player < 2; ++player) actors.push_back(observationActor(environment, player));
+        }
+        gpu->configureObservations(projection.data(), projection.size(), actors.data(), actors.size());
+        gpu_observations_configured = true;
+    }
+#endif
+
     std::uint64_t captureTarget() const {
         const char* target = std::getenv("MCSIM_CAPTURE_STEP");
         if (!target || !*target) return 0;
@@ -246,6 +280,9 @@ struct TrainingBatch {
         std::vector<int> ids;
         std::vector<PlayerState> initial;
         std::vector<ProjectileWorldState> initial_projectiles;
+    #if defined(MCSIM_HAS_CUDA)
+        std::vector<app::ObservationActorMetadata> initial_observation_actors;
+    #endif
         for (int environment = 0; environment < static_cast<int>(worlds.size()); ++environment) {
             if (mask && !mask[environment]) {
                 continue;
@@ -271,12 +308,16 @@ struct TrainingBatch {
                 observed_opponent_disable[index] = 0;
                 step_reward_totals[index].fill(0.0);
                 initial.push_back(players[index]);
+#if defined(MCSIM_HAS_CUDA)
+                if (gpu_observations_configured) initial_observation_actors.push_back(observationActor(environment, player));
+#endif
             }
             initial_projectiles.push_back(projectile_states[environment]);
         }
 #if defined(MCSIM_HAS_CUDA)
         if (gpu) {
-            gpu->resetEnvironments(ids.data(), ids.size(), initial.data(), initial_projectiles.data());
+            gpu->resetEnvironments(ids.data(), ids.size(), initial.data(), initial_projectiles.data(),
+                gpu_observations_configured ? initial_observation_actors.data() : nullptr);
             if (profiling) gpu->synchronize();
         }
 #endif
@@ -658,6 +699,8 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"catalogue_hash", app::catalogue_hash}, {"capabilities", app::capability_names},
         {"observation_projection_version", 1},
         {"cuda_base_observation_version", 1},
+        {"cuda_configured_observation_version", 1},
+        {"cuda_async_observation_version", 1},
         {"behavior_events_version", 1},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
@@ -842,6 +885,76 @@ MCSIM_EXPORT int mcsim_observe_base_cuda_sync(void* handle, float* observations,
         static_cast<void>(count);
         static_cast<void>(stream);
         throw std::invalid_argument("Base CUDA observations require a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_prepare_cuda_observations(void* handle) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null observation handle");
+#if defined(MCSIM_HAS_CUDA)
+        static_cast<TrainingBatch*>(handle)->prepareCudaObservations();
+#else
+        throw std::invalid_argument("Configured CUDA observations require a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_observe_cuda_sync(void* handle, float* observations, std::size_t count, void* stream) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null observation handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_observations_configured) {
+            throw std::invalid_argument("Prepare configured CUDA observations before use");
+        }
+        batch.gpu->observeConfiguredSynchronized(observations, count, stream);
+#else
+        static_cast<void>(observations);
+        static_cast<void>(count);
+        static_cast<void>(stream);
+        throw std::invalid_argument("Configured CUDA observations require a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_register_cuda_observations(void* handle, float* observations, std::size_t count) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null observation handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.prepareCudaObservations();
+        batch.gpu->registerConfiguredObservationBuffer(observations, count);
+#else
+        static_cast<void>(observations);
+        static_cast<void>(count);
+        throw std::invalid_argument("Configured CUDA observations require a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_observe_cuda_async(void* handle, void* stream) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null observation handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_observations_configured) {
+            throw std::invalid_argument("Register a CUDA observation buffer before use");
+        }
+        batch.gpu->observeRegisteredOnStream(stream);
+#else
+        static_cast<void>(stream);
+        throw std::invalid_argument("Configured CUDA observations require a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_wait_cuda_observations(void* handle) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null observation handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu || !batch.gpu_observations_configured) {
+            throw std::invalid_argument("Register a CUDA observation buffer before use");
+        }
+        batch.gpu->waitForConfiguredObservations();
+#else
+        throw std::invalid_argument("Configured CUDA observations require a CUDA-enabled library");
 #endif
     });
 }

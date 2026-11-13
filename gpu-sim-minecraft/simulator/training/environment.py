@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 
 import numpy as np
 from simulator.training.contract import CATALOGUE_HASH, from_legacy, validate_contract
@@ -218,6 +219,10 @@ class Environment:
         self._rewards = np.empty((environments, 2), dtype=np.float32)
         self._terminated = np.empty(environments, dtype=np.uint8)
         self._truncated = np.empty(environments, dtype=np.uint8)
+        self._cuda_observations = None
+        self._cuda_observation_pointer = None
+        self._cuda_observation_device = None
+        self._cuda_observation_thread = None
 
     def _check(self, result):
         if result != 0:
@@ -226,6 +231,9 @@ class Environment:
     def _require_open(self):
         if not self._handle:
             raise RuntimeError("Environment is closed")
+        owner = getattr(self, "_cuda_observation_thread", None)
+        if owner is not None and owner != threading.get_ident():
+            raise RuntimeError("CUDA observation environments must be used from their registration thread")
 
     @contextmanager
     def profile_collection(self, timer):
@@ -279,6 +287,71 @@ class Environment:
         function.restype = ctypes.c_int
         self._check(function(self._handle, observations.data_ptr(), observations.numel(), stream.cuda_stream))
         return observations
+
+    def register_cuda_observations(self, output=None):
+        """Register a reusable CUDA tensor for configured asynchronous observations."""
+        self._require_open()
+        if self.device != "cuda":
+            raise ValueError("CUDA observations require a CUDA environment")
+        function = getattr(self.native, "mcsim_register_cuda_observations", None)
+        if function is None or self.build_info.get("cuda_async_observation_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for asynchronous CUDA observations")
+        import torch
+
+        if output is None:
+            output = torch.empty((self.count, 2, self.observation_dim), dtype=torch.float32, device="cuda")
+        if (not isinstance(output, torch.Tensor) or output.device.type != "cuda" or output.dtype != torch.float32
+                or output.shape != (self.count, 2, self.observation_dim) or not output.is_contiguous()
+                or output.requires_grad):
+            raise ValueError("CUDA observation buffer must be a contiguous float32 tensor with the configured shape")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        previous_thread = self._cuda_observation_thread
+        self._cuda_observation_thread = threading.get_ident()
+        try:
+            with torch.cuda.device(output.device):
+                self._check(function(self._handle, output.data_ptr(), output.numel()))
+        except BaseException:
+            self._cuda_observation_thread = previous_thread
+            raise
+        self._cuda_observations = output
+        self._cuda_observation_pointer = output.data_ptr()
+        self._cuda_observation_device = output.device
+        return output
+
+    def observe_cuda_async(self):
+        """Enqueue configured observations on the current stream into the registered tensor."""
+        self._require_open()
+        output = self._cuda_observations
+        if output is None:
+            raise RuntimeError("Register a CUDA observation buffer before use")
+        import torch
+
+        if (output.data_ptr() != self._cuda_observation_pointer or output.device != self._cuda_observation_device
+                or output.dtype != torch.float32 or output.shape != (self.count, 2, self.observation_dim)
+                or not output.is_contiguous() or output.requires_grad):
+            raise RuntimeError("Registered CUDA observation buffer changed; register it again")
+        function = self.native.mcsim_observe_cuda_async
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        with torch.cuda.device(output.device):
+            stream = torch.cuda.current_stream(output.device)
+            output.record_stream(stream)
+            self._check(function(self._handle, stream.cuda_stream))
+        return output
+
+    def wait_cuda_observations(self):
+        """Wait for the latest registered CUDA observation and report errors."""
+        self._require_open()
+        if self._cuda_observations is None:
+            raise RuntimeError("Register a CUDA observation buffer before use")
+        import torch
+
+        function = self.native.mcsim_wait_cuda_observations
+        function.argtypes = [ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        with torch.cuda.device(self._cuda_observation_device):
+            self._check(function(self._handle))
 
     def reward_totals(self):
         self._require_open()
@@ -404,6 +477,7 @@ class Environment:
         return {**json.loads(result), "reward_weights": self.weights.copy(), "max_ticks": self.max_ticks}
 
     def set_max_ticks(self, max_ticks):
+        self._require_open()
         if type(max_ticks) is not int or not 1 <= max_ticks <= MAX_MAX_TICKS:
             raise ValueError("Episode limit must be an integer in [1,1000000]")
         function = getattr(self.native, "mcsim_set_max_ticks", None)
@@ -416,6 +490,7 @@ class Environment:
         self.set_rewards(self.weights)
 
     def set_rewards(self, weights):
+        self._require_open()
         resolved = resolve_reward_weights({}, weights)
         if not all(np.isfinite(value) for value in resolved.values()):
             raise ValueError("Reward weights must be finite")
@@ -451,11 +526,29 @@ class Environment:
 
     def close(self):
         if self._handle:
-            self.native.mcsim_destroy(self._handle)
+            self._require_open()
+        try:
+            if self._handle:
+                device = getattr(self, "_cuda_observation_device", None)
+                if device is None:
+                    self.native.mcsim_destroy(self._handle)
+                else:
+                    import torch
+
+                    with torch.cuda.device(device):
+                        try:
+                            self.wait_cuda_observations()
+                        finally:
+                            self.native.mcsim_destroy(self._handle)
+        finally:
             self._handle = None
-        directory = getattr(self.native, "_dll_directory", None)
-        if directory is not None:
-            directory.close()
+            self._cuda_observations = None
+            self._cuda_observation_pointer = None
+            self._cuda_observation_device = None
+            self._cuda_observation_thread = None
+            directory = getattr(self.native, "_dll_directory", None)
+            if directory is not None:
+                directory.close()
 
     def __enter__(self):
         return self

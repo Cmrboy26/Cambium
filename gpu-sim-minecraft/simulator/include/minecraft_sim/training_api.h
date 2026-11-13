@@ -25,6 +25,19 @@ int mcsim_observe(void* handle, float* observations);
    stream is a cudaStream_t, or null for the default stream. This synchronizes
    the device before and after the kernel and does not apply the policy layout. */
 int mcsim_observe_base_cuda_sync(void* handle, float* observations, size_t count, void* stream);
+/* Prepare the current policy layout and per-episode metadata for CUDA observations. */
+int mcsim_prepare_cuda_observations(void* handle);
+/* Blocking diagnostic: configured float32 policy observations in caller-owned
+   CUDA memory [worlds, 2, observation_dim]. The caller owns buffer capacity. */
+int mcsim_observe_cuda_sync(void* handle, float* observations, size_t count, void* stream);
+/* Register caller-owned CUDA float32 memory of exactly worlds*2*observation_dim
+   elements. The caller must retain it until replacement or batch destruction. */
+int mcsim_register_cuda_observations(void* handle, float* observations, size_t count);
+/* Enqueue configured observations into the registered buffer on stream, which
+   must belong to the batch device. The caller orders cross-stream consumers. */
+int mcsim_observe_cuda_async(void* handle, void* stream);
+/* Wait for the most recent configured observation and report asynchronous errors. */
+int mcsim_wait_cuda_observations(void* handle);
 int mcsim_reset(void* handle, const uint8_t* mask, float* observations);
 int mcsim_step(void* handle, const int32_t* actions, float* observations, float* rewards,
                uint8_t* terminated, uint8_t* truncated);

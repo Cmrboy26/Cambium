@@ -87,10 +87,47 @@ std::size_t cellCount(BlockWorldView blocks) {
     return count;
 }
 
-__global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* arrow_summaries) {
+void validateCurrentDevice(int expected_device) {
+    int device = -1;
+    checkCuda(cudaGetDevice(&device));
+    if (device != expected_device) throw std::invalid_argument("Current CUDA device differs from batch device");
+}
+
+void validateDeviceOutput(float* output, int expected_device) {
+    validateCurrentDevice(expected_device);
+    cudaPointerAttributes attributes{};
+    const auto status = cudaPointerGetAttributes(&attributes, output);
+    if (status != cudaSuccess) {
+        cudaGetLastError();
+        throw std::invalid_argument("Observation output must be CUDA device memory");
+    }
+    if (attributes.type != cudaMemoryTypeDevice || attributes.device != expected_device) {
+        throw std::invalid_argument("Observation output must be on the batch CUDA device");
+    }
+}
+
+void rejectObservationGraphCapture(cudaStream_t stream) {
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    checkCuda(cudaStreamIsCapturing(stream, &capture));
+    if (capture != cudaStreamCaptureStatusNone) {
+        throw std::invalid_argument("Asynchronous CUDA observations do not support graph capture");
+    }
+}
+
+__global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* arrow_summaries,
+                                    app::ObservationActorMetadata* observation_actors) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(batch.environment_count)) {
         return;
+    }
+    const int offset = static_cast<int>(index) * batch.players_per_environment;
+    if (observation_actors) {
+        for (int player = 0; player < batch.players_per_environment; ++player) {
+            const auto& control = batch.queued_controls[offset + player];
+            if (control.select_weapon && control.selected_slot >= 0) {
+                observation_actors[offset + player].selected_slot = control.selected_slot;
+            }
+        }
     }
     auto world = batch.world(static_cast<int>(index));
     if (batch.projectile_states) {
@@ -98,6 +135,13 @@ __global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* ar
         processWorldTick(world, blocks, batch.projectile_states[index]);
     } else {
         world.processTick();
+    }
+    if (observation_actors) {
+        for (int player = 0; player < batch.players_per_environment; ++player) {
+            auto& observed = observation_actors[offset + player].observed_opponent_disable;
+            if (observed > 0) --observed;
+            if (batch.players[offset + player].last_attack.shield_disabled) observed = 99;
+        }
     }
     if (arrow_summaries && batch.projectile_states) {
         for (int player = 0; player < projectile_player_count; ++player) {
@@ -118,9 +162,40 @@ __global__ void observeBaseEnvironments(BatchView batch, float* output) {
     app::baseWorldObservation(batch.players[index], batch.players[target], blocks, output + std::size_t(index) * 22);
 }
 
+__global__ void observeConfiguredEnvironments(BatchView batch, const app::ObservationActorMetadata* actors,
+                                              const app::ObservationProjection* projection, int features,
+                                              float* output) {
+    const auto index = blockIdx.x * blockDim.x + threadIdx.x;
+    const auto count = static_cast<unsigned int>(batch.environment_count * batch.players_per_environment);
+    if (index >= count) return;
+    const auto environment = index / 2;
+    const auto target_index = index ^ 1U;
+    const auto& source = batch.players[index];
+    const auto& target = batch.players[target_index];
+    const auto& metadata = actors[index];
+    const auto blocks = batch.block_worlds ? batch.block_worlds[environment] : BlockWorldView{};
+    float catalogue[102]{};
+    app::baseWorldObservation(source, target, blocks, catalogue);
+    app::legacyEquipmentObservation(catalogue, source, target, metadata.observed_opponent_disable);
+    catalogue[31] = static_cast<float>(metadata.selected_slot);
+    catalogue[32] = static_cast<float>(actors[target_index].selected_slot);
+    app::velocityObservation(catalogue, source, target);
+    app::movementObservation(catalogue, source, target);
+    app::equipmentObservation(catalogue, source, target, metadata.slots, metadata.slot_count);
+    if (batch.projectile_states) {
+        app::arrowObservation(catalogue, source, target, batch.projectile_states[environment], static_cast<int>(index % 2));
+    }
+    float* projected = output + std::size_t(index) * features;
+    for (int feature = 0; feature < features; ++feature) {
+        projected[feature] = app::projectObservation(catalogue, projection[feature]);
+    }
+}
+
 __global__ void resetSelected(BatchView batch, const int* ids, int count, const PlayerState* players,
                               const ProjectileWorldState* projectile_states,
-                              ArrowObservationSummary* arrow_summaries) {
+                              ArrowObservationSummary* arrow_summaries,
+                              app::ObservationActorMetadata* observation_actors,
+                              const app::ObservationActorMetadata* reset_observation_actors) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(count)) {
         return;
@@ -134,6 +209,9 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
         batch.players[offset] = players[index * batch.players_per_environment + player];
         batch.queued_controls[offset] = {};
         batch.held_controls[offset] = {};
+        if (observation_actors) {
+            observation_actors[offset] = reset_observation_actors[index * batch.players_per_environment + player];
+        }
     }
     if (batch.projectile_states && projectile_states) {
         auto& destination_state = batch.projectile_states[destination];
@@ -176,6 +254,9 @@ struct CudaBatch::Storage {
     DeviceBuffer<ThrownProjectileState> thrown_items;
     int thrown_item_capacity = 0;
     DeviceBuffer<ArrowObservationSummary> arrow_summaries;
+    DeviceBuffer<app::ObservationProjection> observation_projection;
+    DeviceBuffer<app::ObservationActorMetadata> observation_actors;
+    DeviceBuffer<app::ObservationActorMetadata> reset_observation_actors;
     DeviceBuffer<int> reset_ids;
     DeviceBuffer<PlayerState> reset_players;
     DeviceBuffer<Block> cells;
@@ -184,6 +265,18 @@ struct CudaBatch::Storage {
     BatchView view;
     bool summarize_arrows = false;
     int device = -1;
+    cudaEvent_t observation_state_ready = nullptr;
+    cudaEvent_t observation_read_done = nullptr;
+    bool observation_read_pending = false;
+    float* registered_observation = nullptr;
+    std::size_t registered_observation_count = 0;
+
+    ~Storage() {
+        if (observation_read_done && observation_read_pending) cudaEventSynchronize(observation_read_done);
+        if (observation_state_ready) cudaEventSynchronize(observation_state_ready);
+        if (observation_read_done) cudaEventDestroy(observation_read_done);
+        if (observation_state_ready) cudaEventDestroy(observation_state_ready);
+    }
 };
 
 bool CudaBatch::available() {
@@ -321,7 +414,37 @@ void CudaBatch::uploadControls(const Controls* controls, std::size_t count) {
     if (!controls || count != storage_->queued.count) {
         throw std::invalid_argument("Control batch size mismatch");
     }
+    if (storage_->observation_state_ready) checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
     storage_->queued.upload(controls);
+}
+
+void CudaBatch::configureObservations(const app::ObservationProjection* projection, std::size_t features,
+                                      const app::ObservationActorMetadata* actors, std::size_t count) {
+    if (storage_->observation_actors.data || !projection || features == 0 || features > 128
+        || !actors || count != storage_->players.count || storage_->view.players_per_environment != 2) {
+        throw std::invalid_argument("Invalid configured observation layout or actor metadata");
+    }
+    validateCurrentDevice(storage_->device);
+    for (std::size_t index = 0; index < features; ++index) {
+        if (projection[index].source < 0 || projection[index].source >= 102) {
+            throw std::invalid_argument("Configured observation source outside catalogue");
+        }
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        if (actors[index].slot_count < 1 || actors[index].slot_count > 9
+            || actors[index].selected_slot < 0 || actors[index].selected_slot >= actors[index].slot_count
+            || actors[index].observed_opponent_disable < 0) {
+            throw std::invalid_argument("Invalid configured observation actor metadata");
+        }
+    }
+    storage_->observation_projection.allocate(features);
+    storage_->observation_actors.allocate(count);
+    storage_->reset_observation_actors.allocate(count);
+    storage_->observation_projection.upload(projection);
+    storage_->observation_actors.upload(actors);
+    checkCuda(cudaEventCreateWithFlags(&storage_->observation_state_ready, cudaEventDisableTiming));
+    checkCuda(cudaEventCreateWithFlags(&storage_->observation_read_done, cudaEventDisableTiming));
+    checkCuda(cudaEventRecord(storage_->observation_state_ready, nullptr));
 }
 
 void CudaBatch::step(int ticks) {
@@ -332,13 +455,28 @@ void CudaBatch::stepOnStream(int ticks, void* stream) {
     if (ticks <= 0) {
         throw std::invalid_argument("Tick count must be positive");
     }
+    const auto cuda_stream = static_cast<cudaStream_t>(stream);
+    if (storage_->observation_state_ready) {
+        rejectObservationGraphCapture(cuda_stream);
+        checkCuda(cudaStreamWaitEvent(cuda_stream, storage_->observation_state_ready, 0));
+        if (storage_->observation_read_pending) {
+            checkCuda(cudaStreamWaitEvent(cuda_stream, storage_->observation_read_done, 0));
+        }
+    }
     const auto count = static_cast<unsigned int>(storage_->view.environment_count);
     for (int tick = 0; tick < ticks; ++tick) {
         auto* summaries = tick == ticks - 1 ? storage_->arrow_summaries.data : nullptr;
         advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
-                              static_cast<cudaStream_t>(stream)>>>(
-            storage_->view, summaries);
+                              cuda_stream>>>(
+            storage_->view, summaries, storage_->observation_actors.data);
         checkCuda(cudaGetLastError());
+    }
+    if (storage_->observation_state_ready) {
+        const auto status = cudaEventRecord(storage_->observation_state_ready, cuda_stream);
+        if (status != cudaSuccess) {
+            cudaStreamSynchronize(cuda_stream);
+            checkCuda(status);
+        }
     }
 }
 
@@ -353,26 +491,78 @@ void CudaBatch::observeBaseOnStream(float* device_output, std::size_t count, voi
     checkCuda(cudaGetLastError());
 }
 
+void CudaBatch::observeConfiguredOnStream(float* device_output, std::size_t count, void* stream) const {
+    if (!device_output || !storage_->observation_actors.data || !storage_->observation_projection.data
+        || count != checkedProduct(storage_->players.count, storage_->observation_projection.count)) {
+        throw std::invalid_argument("Invalid configured observation buffer or batch shape");
+    }
+    const auto cuda_stream = static_cast<cudaStream_t>(stream);
+    rejectObservationGraphCapture(cuda_stream);
+    checkCuda(cudaStreamWaitEvent(cuda_stream, storage_->observation_state_ready, 0));
+    if (storage_->observation_read_pending) {
+        checkCuda(cudaStreamWaitEvent(cuda_stream, storage_->observation_read_done, 0));
+    }
+    const auto players = static_cast<unsigned int>(storage_->players.count);
+    observeConfiguredEnvironments<<<(players + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
+                                    cuda_stream>>>(storage_->view,
+        storage_->observation_actors.data, storage_->observation_projection.data,
+        static_cast<int>(storage_->observation_projection.count), device_output);
+    checkCuda(cudaGetLastError());
+    const auto status = cudaEventRecord(storage_->observation_read_done, cuda_stream);
+    if (status != cudaSuccess) {
+        cudaStreamSynchronize(cuda_stream);
+        checkCuda(status);
+    }
+    storage_->observation_read_pending = true;
+}
+
 void CudaBatch::observeBaseSynchronized(float* device_output, std::size_t count, void* stream) const {
     if (!device_output || storage_->view.players_per_environment != 2
         || count != checkedProduct(storage_->players.count, std::size_t(22))) {
         throw std::invalid_argument("Invalid base observation buffer or batch shape");
     }
-    int device = -1;
-    checkCuda(cudaGetDevice(&device));
-    if (device != storage_->device) throw std::invalid_argument("Current CUDA device differs from batch device");
-    cudaPointerAttributes attributes{};
-    const auto status = cudaPointerGetAttributes(&attributes, device_output);
-    if (status != cudaSuccess) {
-        cudaGetLastError();
-        throw std::invalid_argument("Base observation output must be CUDA device memory");
-    }
-    if (attributes.type != cudaMemoryTypeDevice || attributes.device != device) {
-        throw std::invalid_argument("Base observation output must be on the batch CUDA device");
-    }
+    validateDeviceOutput(device_output, storage_->device);
     checkCuda(cudaDeviceSynchronize());
     observeBaseOnStream(device_output, count, stream);
     checkCuda(cudaDeviceSynchronize());
+}
+
+void CudaBatch::observeConfiguredSynchronized(float* device_output, std::size_t count, void* stream) const {
+    if (!device_output || !storage_->observation_actors.data || !storage_->observation_projection.data
+        || count != checkedProduct(storage_->players.count, storage_->observation_projection.count)) {
+        throw std::invalid_argument("Invalid configured observation buffer or batch shape");
+    }
+    validateDeviceOutput(device_output, storage_->device);
+    checkCuda(cudaDeviceSynchronize());
+    observeConfiguredOnStream(device_output, count, stream);
+    checkCuda(cudaDeviceSynchronize());
+}
+
+void CudaBatch::registerConfiguredObservationBuffer(float* device_output, std::size_t count) {
+    if (!device_output || !storage_->observation_actors.data || !storage_->observation_projection.data
+        || count != checkedProduct(storage_->players.count, storage_->observation_projection.count)) {
+        throw std::invalid_argument("Invalid configured observation buffer or batch shape");
+    }
+    validateDeviceOutput(device_output, storage_->device);
+    if (storage_->observation_read_pending) checkCuda(cudaEventSynchronize(storage_->observation_read_done));
+    storage_->registered_observation = device_output;
+    storage_->registered_observation_count = count;
+}
+
+void CudaBatch::observeRegisteredOnStream(void* stream) const {
+    if (!storage_->registered_observation) {
+        throw std::invalid_argument("Register a CUDA observation buffer before use");
+    }
+    validateCurrentDevice(storage_->device);
+    observeConfiguredOnStream(storage_->registered_observation, storage_->registered_observation_count, stream);
+}
+
+void CudaBatch::waitForConfiguredObservations() {
+    validateCurrentDevice(storage_->device);
+    if (storage_->observation_read_pending) {
+        checkCuda(cudaEventSynchronize(storage_->observation_read_done));
+        storage_->observation_read_pending = false;
+    }
 }
 
 void CudaBatch::synchronize() const {
@@ -380,14 +570,18 @@ void CudaBatch::synchronize() const {
 }
 
 void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const PlayerState* players,
-                                  const ProjectileWorldState* projectile_states) {
+                                  const ProjectileWorldState* projectile_states,
+                                  const app::ObservationActorMetadata* observation_metadata) {
     if (count == 0) {
         return;
     }
     if (!ids || !players || count > storage_->reset_ids.count
-        || (storage_->projectile_states.count != 0 && !projectile_states)) {
+        || (storage_->projectile_states.count != 0 && !projectile_states)
+        || (storage_->observation_actors.count != 0 && !observation_metadata)) {
         throw std::invalid_argument("Invalid reset batch");
     }
+    if (storage_->observation_state_ready) checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    if (storage_->observation_read_pending) checkCuda(cudaEventSynchronize(storage_->observation_read_done));
     std::vector<bool> seen(storage_->view.environment_count, false);
     for (std::size_t index = 0; index < count; ++index) {
         if (ids[index] < 0 || ids[index] >= storage_->view.environment_count || seen[ids[index]]) {
@@ -401,13 +595,19 @@ void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const Playe
     if (storage_->projectile_states.count != 0) {
         storage_->reset_projectile_states.upload(projectile_states, count);
     }
+    if (storage_->observation_actors.count != 0) {
+        storage_->reset_observation_actors.upload(observation_metadata,
+            count * static_cast<std::size_t>(storage_->view.players_per_environment));
+    }
     resetSelected<<<(static_cast<unsigned int>(count) + threads_per_block - 1) / threads_per_block,
                     threads_per_block>>>(storage_->view, storage_->reset_ids.data,
                                         static_cast<int>(count), storage_->reset_players.data,
                                         storage_->projectile_states.count != 0
                                             ? storage_->reset_projectile_states.data : nullptr,
-                                        storage_->arrow_summaries.data);
+                                        storage_->arrow_summaries.data, storage_->observation_actors.data,
+                                        storage_->reset_observation_actors.data);
     checkCuda(cudaGetLastError());
+    if (storage_->observation_state_ready) checkCuda(cudaEventRecord(storage_->observation_state_ready, nullptr));
 }
 
 void CudaBatch::download(BatchView destination) const {
@@ -416,6 +616,7 @@ void CudaBatch::download(BatchView destination) const {
         || destination.players_per_environment != storage_->view.players_per_environment) {
         throw std::invalid_argument("Snapshot batch size mismatch");
     }
+    if (storage_->observation_state_ready) checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
     storage_->players.download(destination.players);
     storage_->queued.download(destination.queued_controls);
     storage_->held.download(destination.held_controls);
@@ -472,6 +673,7 @@ void CudaBatch::downloadForTraining(BatchView destination, ArrowObservationSumma
     if (arrow_summaries && storage_->arrow_summaries.count == 0) {
         throw std::invalid_argument("Arrow summaries were not enabled for this CUDA batch");
     }
+    if (storage_->observation_state_ready) checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
     storage_->players.download(destination.players);
     storage_->worlds.download(destination.worlds);
     if (arrow_summaries) {

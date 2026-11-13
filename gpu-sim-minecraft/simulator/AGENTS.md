@@ -83,13 +83,29 @@ it checks the batch device, buffer pointer and expected count, then synchronizes
 the device before and after the same kernel. The caller still owns buffer
 capacity. Neither path changes the configured policy observation format.
 
+`mcsim_register_cuda_observations` prepares the configured projection and actor
+metadata, validates a caller-owned CUDA float32 buffer of
+`worlds * 2 * observation_dim` elements, and registers its pointer. Preparation
+may allocate and synchronize; it is not part of the per-observation fast path.
+`mcsim_observe_cuda_async` enqueues configured observations into that buffer on
+the supplied stream. Device events order observation reads against prior steps,
+other observation reads and later steps or resets. Host-staged resets, buffer
+replacement and destruction may wait for the relevant event.
+`mcsim_wait_cuda_observations` explicitly waits for the latest observation and
+reports asynchronous errors without synchronizing the entire device. C callers must
+serialize access to each batch, keep the correct CUDA device current, supply a
+valid same-device stream, retain the registered allocation until replacement or
+destruction, and ensure its actual capacity; pointer checks cannot prove size.
+The async path rejects CUDA graph capture. Cross-stream consumers must wait on
+the producer stream and finish before the registered buffer is overwritten.
+
 ## Native Equipment Mechanics
 
 Policy metadata comes from [the shared catalogue](../contracts/policy_catalogue.json)
 through generated `apps/policy_catalogue.generated.hpp`. Regenerate from root
 with `python scripts/generate-contract.py`; do not hand-edit generated tables.
-Base observation math and terrain rays are in `apps/observation.hpp`; configured
-equipment and policy projection stay in the training adapter. Native
+Observation math, terrain rays and projection are shared through
+`apps/observation.hpp`; the training adapter owns policy and episode metadata. Native
 `shared_core_checks` consumes the same [fixture file](../contracts/policy_fixtures.json)
 as Java/Python.
 
