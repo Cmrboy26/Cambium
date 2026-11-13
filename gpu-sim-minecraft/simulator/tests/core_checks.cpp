@@ -103,6 +103,8 @@ void checkPolicyFixtures() {
         require(actual.size() == expected.size(), "expanded observation projection size");
         for (std::size_t index = 0; index < actual.size(); ++index) {
             near(actual[index], expected[index], tolerance, sample.at("name").get_ref<const std::string&>().c_str());
+            near(app::projectObservation(catalogue.data(), encoded.projection(index)), expected[index], tolerance,
+                "shared device-compatible projection");
         }
     }
     auto oversized = fixture.at("policy");
@@ -179,6 +181,24 @@ void checkEquipmentObservation() {
     near(feature("self.weapon_damage_fraction"), 0.1, 1e-6, "selected unarmed base attack damage");
     near(feature("self.weapon_speed_fraction"), 1, 0, "selected unarmed base attack speed");
     for (int index = 0; index < 33; ++index) near(catalogue[index], -1, 0, "legacy equipment observations remain untouched");
+    PlayerState shielded, opponent;
+    shielded.weapon = WeaponItem::iron_axe;
+    shielded.using_shield = true;
+    shielded.shield_use_ticks = 3;
+    shielded.shield_cooldown = 75;
+    shielded.attack_strength_ticks = 100;
+    opponent.weapon = WeaponItem::diamond_sword;
+    catalogue.fill(-1.0F);
+    app::legacyEquipmentObservation(catalogue.data(), shielded, opponent, 99);
+    const std::array<float, 9> expected{1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.75F, 1.0F, 0.6F};
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        near(catalogue[22 + index], expected[index], 1e-6, "legacy equipment observation");
+    }
+    require(catalogue[21] == -1.0F && catalogue[31] == -1.0F, "legacy encoder touches only its own fields");
+    app::legacyEquipmentObservation(catalogue.data(), opponent, shielded, 0);
+    require(catalogue[22] == 0.0F && catalogue[23] == 1.0F && catalogue[24] == 0.0F
+        && catalogue[25] == 1.0F && catalogue[26] == 0.0F && catalogue[27] == 0.0F
+        && catalogue[30] == 0.0F, "legacy equipment observation follows actor perspective");
     std::cout << "PASS: descriptor equipment fractions, own hotbar, empty slots and legacy isolation\n";
 }
 

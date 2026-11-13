@@ -263,6 +263,23 @@ class Environment:
         self._check(self.native.mcsim_observe(self._handle, self._observations.ctypes.data))
         return self._observations.copy()
 
+    def observe_base_cuda(self):
+        """Return synchronized raw 22-feature CUDA observations, without policy projection."""
+        self._require_open()
+        if self.device != "cuda":
+            raise ValueError("Base CUDA observations require a CUDA environment")
+        function = getattr(self.native, "mcsim_observe_base_cuda_sync", None)
+        if function is None or self.build_info.get("cuda_base_observation_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for base CUDA observations")
+        import torch
+
+        observations = torch.empty((self.count, 2, 22), dtype=torch.float32, device="cuda")
+        stream = torch.cuda.current_stream(observations.device)
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+        function.restype = ctypes.c_int
+        self._check(function(self._handle, observations.data_ptr(), observations.numel(), stream.cuda_stream))
+        return observations
+
     def reward_totals(self):
         self._require_open()
         function = getattr(self.native, "mcsim_reward_totals", None)

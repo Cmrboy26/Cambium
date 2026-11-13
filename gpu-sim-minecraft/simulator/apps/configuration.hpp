@@ -1,5 +1,6 @@
 #pragma once
 
+#include "observation.hpp"
 #include "minecraft_sim/core.hpp"
 #include "policy_catalogue.generated.hpp"
 #include <algorithm>
@@ -271,11 +272,14 @@ struct PolicyLayout {
         }
     }
 
+    ObservationProjection projection(std::size_t index) const {
+        return {observations[index], scales[index], categories[index], lower_bounds[index], upper_bounds[index],
+                !std::isnan(categories[index])};
+    }
+
     void project(const float* catalogue, float* output) const {
         for (std::size_t index = 0; index < observations.size(); ++index) {
-            const float value = catalogue[observations[index]];
-            output[index] = (std::isnan(categories[index]) ? std::clamp(value, lower_bounds[index], upper_bounds[index])
-                : (value == categories[index] ? 1.0F : 0.0F)) * scales[index];
+            output[index] = projectObservation(catalogue, projection(index));
         }
     }
 

@@ -1,10 +1,12 @@
 #include "../apps/observation.hpp"
+#include "minecraft_sim/cuda_backend.hpp"
 
 #include <cuda_runtime.h>
 
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 
 namespace {
 
@@ -58,6 +60,102 @@ __global__ void encodeScenariosOnDevice(float* output) {
     encodeScenarios(output);
 }
 
+bool checkBatchedWorldObservations() {
+    using namespace minecraft_sim;
+    constexpr int environments = 137;
+    constexpr int players_per_environment = 2;
+    constexpr int values = environments * players_per_environment * 22;
+    std::array<PlayerState, environments * players_per_environment> players{};
+    std::array<Controls, environments * players_per_environment> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<Block, environments> cells{};
+    std::array<BlockWorldView, environments> blocks{};
+    std::array<float, values> expected{}, actual{};
+    for (int environment = 0; environment < environments; ++environment) {
+        cells[environment] = environment % 2 == 0 ? Block::solid : Block::air;
+        blocks[environment] = {cells.data() + environment, 1, 1, 1, 0, 1, 4};
+        for (int player = 0; player < players_per_environment; ++player) {
+            auto& actor = players[environment * players_per_environment + player];
+            actor.position = {0.5, 0.0, 0.5 + player * 2.0};
+            actor.yaw = static_cast<float>(environment + player * 180);
+        }
+    }
+    for (int environment = 0; environment < environments; ++environment) {
+        for (int player = 0; player < players_per_environment; ++player) {
+            const int index = environment * players_per_environment + player;
+            app::baseWorldObservation(players[index], players[index ^ 1], blocks[environment],
+                                      expected.data() + index * 22);
+        }
+    }
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments,
+                   players_per_environment, blocks.data(), {sine.data()}};
+    CudaBatch device(host);
+    float* device_output = nullptr;
+    cudaStream_t stream = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_output), sizeof(actual)) != cudaSuccess
+        || cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) return false;
+    bool rejected_null = false;
+    bool rejected_size = false;
+    bool rejected_host = false;
+    try { device.observeBaseOnStream(nullptr, values, stream); }
+    catch (const std::invalid_argument&) { rejected_null = true; }
+    try { device.observeBaseOnStream(device_output, values - 1, stream); }
+    catch (const std::invalid_argument&) { rejected_size = true; }
+    try { device.observeBaseSynchronized(expected.data(), values, stream); }
+    catch (const std::invalid_argument&) { rejected_host = true; }
+    device.observeBaseOnStream(device_output, values, stream);
+    bool result = cudaMemcpyAsync(actual.data(), device_output, sizeof(actual), cudaMemcpyDeviceToHost, stream)
+        == cudaSuccess && cudaStreamSynchronize(stream) == cudaSuccess;
+    if (!result || !rejected_null || !rejected_size || !rejected_host
+        || std::abs(actual[10] - 0.07F) > 1.0e-6F || actual[2 * 22 + 10] != 1.0F) return false;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        if (!std::isfinite(actual[index]) || std::abs(actual[index] - expected[index]) > 1.0e-6F) {
+            std::cerr << "CPU/CUDA batched observation mismatch at index " << index << '\n';
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < queued.size(); ++index) {
+        queued[index].forward = index % 2 == 0;
+        queued[index].yaw_delta = index % 2 == 0 ? 5.0F : -5.0F;
+    }
+    device.uploadControls(queued.data(), queued.size());
+    cudaGraph_t graph = nullptr;
+    if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) return false;
+    device.stepOnStream(3, stream);
+    device.observeBaseOnStream(device_output, values, stream);
+    std::size_t node_count = 0;
+    result = cudaStreamEndCapture(stream, &graph) == cudaSuccess
+        && cudaGraphGetNodes(graph, nullptr, &node_count) == cudaSuccess && node_count == 4;
+    cudaGraphExec_t executable = nullptr;
+    result = result && cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0) == cudaSuccess
+        && cudaGraphLaunch(executable, stream) == cudaSuccess
+        && cudaMemcpyAsync(actual.data(), device_output, sizeof(actual), cudaMemcpyDeviceToHost, stream) == cudaSuccess
+        && cudaStreamSynchronize(stream) == cudaSuccess;
+    if (executable) cudaGraphExecDestroy(executable);
+    if (graph) cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    cudaFree(device_output);
+    if (!result) return false;
+    for (int tick = 0; tick < 3; ++tick) {
+        for (int environment = 0; environment < environments; ++environment) host.world(environment).processTick();
+    }
+    for (int environment = 0; environment < environments; ++environment) {
+        for (int player = 0; player < players_per_environment; ++player) {
+            const int index = environment * players_per_environment + player;
+            app::baseWorldObservation(players[index], players[index ^ 1], blocks[environment],
+                                      expected.data() + index * 22);
+        }
+    }
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        if (!std::isfinite(actual[index]) || std::abs(actual[index] - expected[index]) > 1.0e-6F) {
+            std::cerr << "CPU/CUDA stepped observation mismatch at index " << index << '\n';
+            return false;
+        }
+    }
+    return true;
+}
+
 }
 
 int main() {
@@ -101,6 +199,10 @@ int main() {
                 return 1;
             }
         }
+    }
+    if (!checkBatchedWorldObservations()) {
+        std::cerr << "CUDA batched world observation check failed\n";
+        return 1;
     }
     return 0;
 }

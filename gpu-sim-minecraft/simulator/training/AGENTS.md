@@ -22,6 +22,14 @@ memory; observations/rays/rewards run on CPU. Do not present physics benchmark
 rates as full PPO rates. Research collection covers rollout setup, decisions,
 physics, rewards, episode resets and GAE; replay is timed separately.
 
+`Environment.observe_base_cuda()` is a diagnostic returning a CUDA float32
+tensor `[worlds, 2, 22]` with raw base features, not the configured policy
+projection. It requires the batch's CUDA device to be current and synchronizes
+the device before and after observation; it is not graph-capture compatible,
+used by PPO or a throughput optimization. Set `MCSIM_TEST_CUDA_LIBRARY` to the freshly built CUDA training
+library when running `python -B -m unittest simulator.training.test_cuda_observation -v`
+on a GPU. The CUDA cases are skipped without that explicit library selection.
+
 ## Learner Configuration
 
 The plan's `learner` object owns all effective PPO settings. The compiler fills

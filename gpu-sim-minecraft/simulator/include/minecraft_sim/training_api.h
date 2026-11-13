@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -19,6 +20,11 @@ void* mcsim_create_contract(int worlds, int use_cuda, const char* path, int max_
                            uint64_t seed, const float* weights, const char* contract);
 void mcsim_destroy(void* handle);
 int mcsim_observe(void* handle, float* observations);
+/* Blocking diagnostic: raw 22-feature rows [worlds, 2, 22] in caller-owned
+   CUDA device memory on the batch device. The caller must allocate count floats.
+   stream is a cudaStream_t, or null for the default stream. This synchronizes
+   the device before and after the kernel and does not apply the policy layout. */
+int mcsim_observe_base_cuda_sync(void* handle, float* observations, size_t count, void* stream);
 int mcsim_reset(void* handle, const uint8_t* mask, float* observations);
 int mcsim_step(void* handle, const int32_t* actions, float* observations, float* rewards,
                uint8_t* terminated, uint8_t* truncated);

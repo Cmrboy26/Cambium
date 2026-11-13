@@ -8,6 +8,36 @@
 
 namespace minecraft_sim::app {
 
+struct ObservationProjection {
+    int source;
+    float scale;
+    float category;
+    float lower;
+    float upper;
+    bool one_hot;
+};
+
+MCSIM_HD inline float projectObservation(const float* catalogue, const ObservationProjection& projection) {
+    const float value = catalogue[projection.source];
+    const float encoded = projection.one_hot ? (value == projection.category ? 1.0F : 0.0F)
+        : (value < projection.lower ? projection.lower : (projection.upper < value ? projection.upper : value));
+    return encoded * projection.scale;
+}
+
+MCSIM_HD inline void legacyEquipmentObservation(float* catalogue, const PlayerState& source,
+                                                  const PlayerState& target, int observed_opponent_disable) {
+    catalogue[22] = weaponAttributes(source.weapon).disable_shield_seconds > 0 ? 1.0F : 0.0F;
+    catalogue[23] = weaponAttributes(target.weapon).disable_shield_seconds > 0 ? 1.0F : 0.0F;
+    catalogue[24] = source.using_shield ? 1.0F : 0.0F;
+    catalogue[25] = target.using_shield ? 1.0F : 0.0F;
+    catalogue[26] = source.shield_cooldown > 0 ? 1.0F : 0.0F;
+    catalogue[27] = observed_opponent_disable > 0 ? 1.0F : 0.0F;
+    catalogue[28] = static_cast<float>(minimum(source.shield_cooldown / 100.0F, 1.0F));
+    catalogue[29] = source.attackCharge();
+    catalogue[30] = source.using_shield
+        ? static_cast<float>(minimum(source.shield_use_ticks / 5.0F, 1.0F)) : 0.0F;
+}
+
 MCSIM_HD inline float equipmentFraction(double value, double maximum) {
     const double fraction = value / maximum;
     return static_cast<float>(fraction < 0.0 ? 0.0 : (fraction > 1.0 ? 1.0 : fraction));
@@ -121,6 +151,18 @@ MCSIM_HD inline void baseObservation(const PlayerState& source, const PlayerStat
         result[21] = static_cast<float>((::atan2(-relative.y,
             maximum(::hypot(relative.x, relative.z), 0.01)) / radians - source.pitch) / 90.0);
     }
+}
+
+MCSIM_HD inline void baseWorldObservation(const PlayerState& source, const PlayerState& target,
+                                          BlockWorldView blocks, float* result) {
+    constexpr double radians = 0.017453292519943295;
+    float rays[8]{};
+    for (int ray = 0; ray < 8; ++ray) {
+        const double angle = ray * 45.0 * radians;
+        rays[ray] = static_cast<float>(blockRayFraction(blocks, source.eyePosition(),
+            {-::sin(angle) * 50.0, 0.0, ::cos(angle) * 50.0}));
+    }
+    baseObservation(source, target, rays, result);
 }
 
 inline std::array<float, 22> baseObservation(const PlayerState& source, const PlayerState& target,

@@ -23,6 +23,8 @@ public:
                            const ProjectileWorldState* projectile_states = nullptr);
     void step(int ticks = 1);
     void stepOnStream(int ticks, void* stream);
+    void observeBaseOnStream(float* device_output, std::size_t count, void* stream) const;
+    void observeBaseSynchronized(float* device_output, std::size_t count, void* stream) const;
     void synchronize() const;
     void download(BatchView destination) const;
     void downloadForTraining(BatchView destination, ArrowObservationSummary* arrow_summaries = nullptr) const;

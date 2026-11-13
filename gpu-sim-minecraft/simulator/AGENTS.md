@@ -73,14 +73,25 @@ upload, download and reset methods do not provide non-default-stream ordering.
 The Python trainer still uses the host-staged path; this API alone does not make
 rollout collection GPU-resident.
 
+`observeBaseOnStream(output, count, stream)` writes the unprojected 22 base
+features in `[worlds, 2, 22]` order to caller-owned CUDA memory. It is an
+asynchronous low-level operation: the caller owns the buffer, validates its
+device and capacity, and orders the batch state and buffer lifetime on the
+supplied stream. It does not expose equipment, configured projection, rewards
+or resets. `mcsim_observe_base_cuda_sync` is an additive blocking diagnostic:
+it checks the batch device, buffer pointer and expected count, then synchronizes
+the device before and after the same kernel. The caller still owns buffer
+capacity. Neither path changes the configured policy observation format.
+
 ## Native Equipment Mechanics
 
 Policy metadata comes from [the shared catalogue](../contracts/policy_catalogue.json)
 through generated `apps/policy_catalogue.generated.hpp`. Regenerate from root
 with `python scripts/generate-contract.py`; do not hand-edit generated tables.
-Pure base observation math is in `apps/observation.hpp`; raycasts and equipment
-sampling stay in the training adapter. Native `shared_core_checks` consumes the
-same [fixture file](../contracts/policy_fixtures.json) as Java/Python.
+Base observation math and terrain rays are in `apps/observation.hpp`; configured
+equipment and policy projection stay in the training adapter. Native
+`shared_core_checks` consumes the same [fixture file](../contracts/policy_fixtures.json)
+as Java/Python.
 
 The training library exports ABI 5 plus JSON `mcsim_build_info()` and
 `mcsim_batch_info(handle)`. Build info contains catalogue/capabilities, scalar

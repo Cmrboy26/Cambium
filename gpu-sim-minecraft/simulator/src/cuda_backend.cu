@@ -1,5 +1,6 @@
 #include "minecraft_sim/cuda_backend.hpp"
 #include "minecraft_sim/projectiles.hpp"
+#include "../apps/observation.hpp"
 
 #include <cuda_runtime.h>
 
@@ -107,6 +108,16 @@ __global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* ar
     }
 }
 
+__global__ void observeBaseEnvironments(BatchView batch, float* output) {
+    const auto index = blockIdx.x * blockDim.x + threadIdx.x;
+    const auto count = static_cast<unsigned int>(batch.environment_count * batch.players_per_environment);
+    if (index >= count) return;
+    const auto environment = index / 2;
+    const auto target = index ^ 1U;
+    const auto blocks = batch.block_worlds ? batch.block_worlds[environment] : BlockWorldView{};
+    app::baseWorldObservation(batch.players[index], batch.players[target], blocks, output + std::size_t(index) * 22);
+}
+
 __global__ void resetSelected(BatchView batch, const int* ids, int count, const PlayerState* players,
                               const ProjectileWorldState* projectile_states,
                               ArrowObservationSummary* arrow_summaries) {
@@ -172,6 +183,7 @@ struct CudaBatch::Storage {
     DeviceBuffer<float> sine;
     BatchView view;
     bool summarize_arrows = false;
+    int device = -1;
 };
 
 bool CudaBatch::available() {
@@ -186,6 +198,7 @@ CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows) : storage_(std::m
     }
     const auto player_count = std::size_t(initial.environment_count) * initial.players_per_environment;
     auto& storage = *storage_;
+    checkCuda(cudaGetDevice(&storage.device));
     storage.summarize_arrows = summarize_arrows;
     storage.players.allocate(player_count);
     storage.queued.allocate(player_count);
@@ -327,6 +340,39 @@ void CudaBatch::stepOnStream(int ticks, void* stream) {
             storage_->view, summaries);
         checkCuda(cudaGetLastError());
     }
+}
+
+void CudaBatch::observeBaseOnStream(float* device_output, std::size_t count, void* stream) const {
+    if (!device_output || storage_->view.players_per_environment != 2
+        || count != checkedProduct(storage_->players.count, std::size_t(22))) {
+        throw std::invalid_argument("Invalid base observation buffer or batch shape");
+    }
+    const auto players = static_cast<unsigned int>(storage_->players.count);
+    observeBaseEnvironments<<<(players + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
+                              static_cast<cudaStream_t>(stream)>>>(storage_->view, device_output);
+    checkCuda(cudaGetLastError());
+}
+
+void CudaBatch::observeBaseSynchronized(float* device_output, std::size_t count, void* stream) const {
+    if (!device_output || storage_->view.players_per_environment != 2
+        || count != checkedProduct(storage_->players.count, std::size_t(22))) {
+        throw std::invalid_argument("Invalid base observation buffer or batch shape");
+    }
+    int device = -1;
+    checkCuda(cudaGetDevice(&device));
+    if (device != storage_->device) throw std::invalid_argument("Current CUDA device differs from batch device");
+    cudaPointerAttributes attributes{};
+    const auto status = cudaPointerGetAttributes(&attributes, device_output);
+    if (status != cudaSuccess) {
+        cudaGetLastError();
+        throw std::invalid_argument("Base observation output must be CUDA device memory");
+    }
+    if (attributes.type != cudaMemoryTypeDevice || attributes.device != device) {
+        throw std::invalid_argument("Base observation output must be on the batch CUDA device");
+    }
+    checkCuda(cudaDeviceSynchronize());
+    observeBaseOnStream(device_output, count, stream);
+    checkCuda(cudaDeviceSynchronize());
 }
 
 void CudaBatch::synchronize() const {

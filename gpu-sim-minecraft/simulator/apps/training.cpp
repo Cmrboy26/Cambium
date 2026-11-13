@@ -362,25 +362,9 @@ struct TrainingBatch {
                 const auto& target = players[std::size_t(environment) * 2 + (1 - player)];
                 float catalogue[app::feature_names.size()]{};
                 float* observation = layout ? catalogue : output + index * features;
-                std::array<float, 8> rays{};
-                for (int ray = 0; ray < 8; ++ray) {
-                    const double angle = ray * 45.0 * radians;
-                    rays[ray] = static_cast<float>(blockRayFraction(terrain.blocks,
-                        source.eyePosition(), {-std::sin(angle) * 50.0, 0.0, std::cos(angle) * 50.0}));
-                }
-                const auto base = app::baseObservation(source, target, rays);
-                std::copy(base.begin(), base.end(), observation);
+                app::baseWorldObservation(source, target, terrain.blocks, observation);
                 if (schema_version != 1) {
-                    observation[22] = weaponAttributes(source.weapon).disable_shield_seconds > 0 ? 1.0F : 0.0F;
-                    observation[23] = weaponAttributes(target.weapon).disable_shield_seconds > 0 ? 1.0F : 0.0F;
-                    observation[24] = source.using_shield ? 1.0F : 0.0F;
-                    observation[25] = target.using_shield ? 1.0F : 0.0F;
-                    observation[26] = source.shield_cooldown > 0 ? 1.0F : 0.0F;
-                    observation[27] = observed_opponent_disable[index] > 0 ? 1.0F : 0.0F;
-                    observation[28] = static_cast<float>(minimum(source.shield_cooldown / 100.0F, 1.0F));
-                    observation[29] = source.attackCharge();
-                    observation[30] = source.using_shield
-                        ? static_cast<float>(minimum(source.shield_use_ticks / 5.0F, 1.0F)) : 0.0F;
+                    app::legacyEquipmentObservation(observation, source, target, observed_opponent_disable[index]);
                 }
                 if (layout) {
                     catalogue[31] = static_cast<float>(selected_slots[index]);
@@ -673,6 +657,7 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"compiler", MCSIM_BUILD_COMPILER}, {"compiled", __DATE__ " " __TIME__},
         {"catalogue_hash", app::catalogue_hash}, {"capabilities", app::capability_names},
         {"observation_projection_version", 1},
+        {"cuda_base_observation_version", 1},
         {"behavior_events_version", 1},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
@@ -843,6 +828,21 @@ MCSIM_EXPORT int mcsim_observe(void* handle, float* observations) {
         const auto start = batch.profileStart();
         batch.observe(observations, batch.currentArrowSummaries());
         batch.profileEnd(Observe, start);
+    });
+}
+MCSIM_EXPORT int mcsim_observe_base_cuda_sync(void* handle, float* observations, std::size_t count, void* stream) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null observation handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.gpu) throw std::invalid_argument("Base CUDA observations require a CUDA batch");
+        batch.gpu->observeBaseSynchronized(observations, count, stream);
+#else
+        static_cast<void>(observations);
+        static_cast<void>(count);
+        static_cast<void>(stream);
+        throw std::invalid_argument("Base CUDA observations require a CUDA-enabled library");
+#endif
     });
 }
 MCSIM_EXPORT int mcsim_reward_totals(void* handle, double* totals) {
