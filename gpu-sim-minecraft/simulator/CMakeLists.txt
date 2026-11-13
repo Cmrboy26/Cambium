@@ -150,6 +150,13 @@ if(MCSIM_ENABLE_CUDA)
         )
         add_test(NAME projectile_cuda_checks COMMAND minecraft_sim_projectile_cuda_checks)
         set_tests_properties(projectile_cuda_checks PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(minecraft_sim_observation_cuda_checks tests/observation_cuda_checks.cu)
+        target_link_libraries(minecraft_sim_observation_cuda_checks PRIVATE minecraft_sim::minecraft_sim CUDA::cudart)
+        set_target_properties(minecraft_sim_observation_cuda_checks PROPERTIES
+            CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF
+        )
+        add_test(NAME observation_cuda_checks COMMAND minecraft_sim_observation_cuda_checks)
+        set_tests_properties(observation_cuda_checks PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 endif()
 

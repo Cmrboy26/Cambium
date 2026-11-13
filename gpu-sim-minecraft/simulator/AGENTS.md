@@ -61,6 +61,18 @@ effects. Flight eligibility/movement attributes are supplied state, not the
 systems underlying them. Spawn states must be finite and collision-free; views
 need valid buffers/dimensions. Task rewards/resets belong in the training wrapper.
 
+## CUDA Stream Execution
+
+`CudaBatch::step()` keeps its existing default-stream behavior.
+`stepOnStream(ticks, stream)` enqueues one physics kernel per tick on the
+supplied CUDA stream, passed as an opaque `cudaStream_t` pointer; null selects
+the default stream. The caller must use a stream on the batch's CUDA device,
+order preceding device writes on that stream, and ensure the work completes
+before host downloads, resets, cross-stream use or batch destruction. Existing
+upload, download and reset methods do not provide non-default-stream ordering.
+The Python trainer still uses the host-staged path; this API alone does not make
+rollout collection GPU-resident.
+
 ## Native Equipment Mechanics
 
 Policy metadata comes from [the shared catalogue](../contracts/policy_catalogue.json)

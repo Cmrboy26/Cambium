@@ -312,13 +312,18 @@ void CudaBatch::uploadControls(const Controls* controls, std::size_t count) {
 }
 
 void CudaBatch::step(int ticks) {
+    stepOnStream(ticks, nullptr);
+}
+
+void CudaBatch::stepOnStream(int ticks, void* stream) {
     if (ticks <= 0) {
         throw std::invalid_argument("Tick count must be positive");
     }
     const auto count = static_cast<unsigned int>(storage_->view.environment_count);
     for (int tick = 0; tick < ticks; ++tick) {
         auto* summaries = tick == ticks - 1 ? storage_->arrow_summaries.data : nullptr;
-        advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block>>>(
+        advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
+                              static_cast<cudaStream_t>(stream)>>>(
             storage_->view, summaries);
         checkCuda(cudaGetLastError());
     }

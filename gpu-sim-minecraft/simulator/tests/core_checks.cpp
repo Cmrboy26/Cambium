@@ -1,12 +1,14 @@
 #include "minecraft_sim/core.hpp"
 #include "minecraft_sim/comparison.hpp"
 #include "minecraft_sim/constants_mace.hpp"
+#include "../apps/configuration.hpp"
 #include "../apps/observation.hpp"
 #include "../apps/replay.hpp"
 #include <fstream>
 
 #if defined(MCSIM_HAS_CUDA)
 #include "minecraft_sim/cuda_backend.hpp"
+#include <cuda_runtime_api.h>
 #endif
 
 #include <array>
@@ -1611,6 +1613,50 @@ void checkReplay() {
     }
 
 #if defined(MCSIM_HAS_CUDA)
+void checkCudaStreamStep() {
+    using namespace minecraft_sim;
+    Fixture fixture;
+    CudaBatch device(fixture.batch);
+    Controls controls;
+    controls.forward = true;
+    controls.yaw_delta = 45.0F;
+    fixture.world().player(0).setInputs(controls);
+    cudaStream_t stream = nullptr;
+    require(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess, "create nonblocking CUDA stream");
+    PlayerState* snapshot = nullptr;
+    require(cudaMallocHost(reinterpret_cast<void**>(&snapshot), sizeof(PlayerState)) == cudaSuccess,
+        "allocate pinned CUDA snapshot");
+    const auto view = device.deviceView();
+    require(cudaMemcpyAsync(view.queued_controls, fixture.queued.data(), sizeof(Controls), cudaMemcpyHostToDevice, stream)
+        == cudaSuccess, "queue stream controls");
+    device.stepOnStream(3, stream);
+    require(cudaMemcpyAsync(snapshot, view.players, sizeof(PlayerState), cudaMemcpyDeviceToHost, stream)
+        == cudaSuccess, "queue stream snapshot");
+    require(cudaStreamSynchronize(stream) == cudaSuccess, "synchronize CUDA stream");
+    for (int tick = 0; tick < 3; ++tick) fixture.world().processTick();
+    const auto& expected = fixture.players[0];
+    near(snapshot->position.x, expected.position.x, 1.0E-12, "stream step X diverged");
+    near(snapshot->position.y, expected.position.y, 1.0E-12, "stream step Y diverged");
+    near(snapshot->position.z, expected.position.z, 1.0E-12, "stream step Z diverged");
+    require(snapshot->tick == expected.tick && snapshot->yaw == expected.yaw,
+        "stream step tick or look diverged");
+        cudaGraph_t graph = nullptr;
+        require(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) == cudaSuccess,
+            "begin explicit stream capture");
+        device.stepOnStream(3, stream);
+        require(cudaStreamEndCapture(stream, &graph) == cudaSuccess, "end explicit stream capture");
+        std::size_t node_count = 0;
+        require(cudaGraphGetNodes(graph, nullptr, &node_count) == cudaSuccess && node_count == 3,
+            "each physics tick must be enqueued on the supplied stream");
+        require(cudaGraphDestroy(graph) == cudaSuccess, "destroy captured CUDA graph");
+    bool rejected = false;
+    try { device.stepOnStream(0, stream); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "stream step rejects a nonpositive tick count");
+    require(cudaFreeHost(snapshot) == cudaSuccess, "free pinned CUDA snapshot");
+    require(cudaStreamDestroy(stream) == cudaSuccess, "destroy CUDA stream");
+}
+
 void checkCudaWindStorage() {
     using namespace minecraft_sim;
     constexpr int environments = 16;
@@ -1688,6 +1734,7 @@ int checkCudaReplay() {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
+    checkCudaStreamStep();
     checkCudaWindStorage();
     constexpr int environments = 137;
     constexpr int players_per_world = 2;

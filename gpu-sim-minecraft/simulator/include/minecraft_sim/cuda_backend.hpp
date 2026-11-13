@@ -22,6 +22,7 @@ public:
     void resetEnvironments(const int* ids, std::size_t count, const PlayerState* players,
                            const ProjectileWorldState* projectile_states = nullptr);
     void step(int ticks = 1);
+    void stepOnStream(int ticks, void* stream);
     void synchronize() const;
     void download(BatchView destination) const;
     void downloadForTraining(BatchView destination, ArrowObservationSummary* arrow_summaries = nullptr) const;
