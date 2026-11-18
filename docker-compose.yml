@@ -28,6 +28,10 @@ services:
       - "8000:8000"
     environment:
       - ENV=production
+      - CAMBIUM_GAME_MODE=bridge_duel
+      - CAMBIUM_MAP=bridge_duel
+      - CAMBIUM_BRIDGE_TARGET_SCORE=5
+      - CAMBIUM_BRIDGE_RESPAWN_DELAY_SEC=0.5
     depends_on:
       - mc-forge
     restart: unless-stopped

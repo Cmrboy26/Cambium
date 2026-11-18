@@ -256,6 +256,24 @@ The Minecraft server runs in offline mode with these key settings (in `server/se
 
 Bot commands (`/give`, `/tp`, `/effect`, etc.) are sent via RCON which runs as the server console with full permissions. The bots themselves don't need to be OP.
 
+## Bridge Duel Configuration
+
+`bridge_duel` is the default live-backend map and game mode. It uses a symmetrical
+bridge arena, Bridge equipment, respawn resets, and a five-round match target.
+
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `CAMBIUM_GAME_MODE` | `bridge_duel` | Select `bridge_duel` or `classic` |
+| `CAMBIUM_MAP` | `bridge_duel` | Select the live arena preset |
+| `CAMBIUM_BRIDGE_TARGET_SCORE` | `5` | Rounds required to win |
+| `CAMBIUM_BRIDGE_RESPAWN_DELAY_SEC` | `0.5` | Post-death respawn delay |
+
+The compatibility map remains available:
+
+```bash
+CAMBIUM_GAME_MODE=classic CAMBIUM_MAP=classic docker compose up -d --build backend mc-forge
+```
+
 ## Bot Chat Commands
 
 Once a bot's Minecraft client is connected to the server, it responds to chat commands prefixed with `&`:

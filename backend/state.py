@@ -55,6 +55,20 @@ EVAL_OPPONENT_PATH = os.getenv("CAMBIUM_EVAL_OPPONENT", "")
 EVAL_TRIGGER_INTERVAL = int(os.getenv("CAMBIUM_EVAL_INTERVAL", "50"))
 EVAL_ROUNDS = 5   # episodes per bot-pair during each eval phase
 
+# ── Map and game mode ──
+GAME_MODE = os.getenv("CAMBIUM_GAME_MODE", "bridge_duel").strip().lower()
+MAP_NAME = os.getenv("CAMBIUM_MAP", "bridge_duel").strip().lower()
+if GAME_MODE not in ("classic", "bridge_duel"):
+    print(f"[CONFIG] Unknown CAMBIUM_GAME_MODE '{GAME_MODE}', using bridge_duel")
+    GAME_MODE = "bridge_duel"
+if MAP_NAME not in ("classic", "bridge_duel"):
+    print(f"[CONFIG] Unknown CAMBIUM_MAP '{MAP_NAME}', using bridge_duel")
+    MAP_NAME = "bridge_duel"
+
+BRIDGE_TARGET_SCORE = int(os.getenv("CAMBIUM_BRIDGE_TARGET_SCORE", "5"))
+BRIDGE_GOAL_WINS = os.getenv("CAMBIUM_BRIDGE_GOAL_WINS", "0") == "1"
+BRIDGE_RESPAWN_DELAY_SEC = float(os.getenv("CAMBIUM_BRIDGE_RESPAWN_DELAY_SEC", "0.5"))
+
 # Log file size cap (bytes) — rotate if exceeded to prevent disk-full crashes
 LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -159,6 +173,9 @@ fast_rl_agent = None
 # ═══════════════════════ Arenas ═════════════════════════════════════
 from arena import areanaA     # noqa: E402 (deferred so constants above exist first)
 arenas = areanaA.Arenas
+
+match_scores: Dict[str, Dict[str, int]] = {}
+match_rounds: Dict[str, int] = {}
 
 # ═══════════════════════ Mutable Bot State ══════════════════════════
 bot_states:               Dict[str, dict]  = {}

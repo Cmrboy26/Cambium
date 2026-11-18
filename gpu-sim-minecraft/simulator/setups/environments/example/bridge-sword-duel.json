@@ -1,0 +1,42 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 2,
+  "minecraft": "26.3",
+  "name": "example-bridge-sword-duel",
+  "arena": "../../arenas/example/bridge-duel.json",
+  "players": {
+    "shared": {
+      "health": 20,
+      "loadout": {
+        "weapons": ["minecraft:iron_sword"],
+        "selected": 0,
+        "offhand": "minecraft:air",
+        "armor": {
+          "boots": "minecraft:iron_boots",
+          "leggings": "minecraft:iron_leggings",
+          "chestplate": "minecraft:iron_chestplate",
+          "helmet": "minecraft:iron_helmet"
+        }
+      }
+    },
+    "overrides": [
+      {"position": [-9, 1, 0], "yaw": 90},
+      {"position": [9, 1, 0], "yaw": -90}
+    ]
+  },
+  "spawns": {
+    "sample": "episode",
+    "region": {"min": [-10, 1, -4], "max": [10, 1, 4]},
+    "minimum_separation": 12,
+    "yaw": {"uniform": [-180, 180]}
+  },
+  "task": {
+    "max_ticks": 900,
+    "rewards": {
+      "doing_damage": 10, "taking_damage": -4, "won_duel": 50, "death": -20,
+      "episode_timeout": -10, "no_damage_penalty": -20,
+      "good_aim": 1, "proximity": 0.5, "pitch_control": 0.25,
+      "aim_hold": 1.5, "extreme_pitch_penalty": -1
+    }
+  }
+}

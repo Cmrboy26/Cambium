@@ -27,7 +27,7 @@ import game_logic
 import training
 import botController
 from BotClass import Bot
-from kits import classicKit
+from kits import classicKit, bridgeKit
 from kits.kitBase import Kit
 from fast_rl_model import FastRLAgent
 
@@ -191,6 +191,7 @@ def _is_eval_bot(bot_name: str) -> bool:
 
 @app.on_event("startup")
 async def _startup():
+    await game_logic.ensure_bridge_duel_world()
     async def _idle_loop():
         while True:
             await asyncio.sleep(10)
@@ -516,6 +517,10 @@ async def bot_setup(request: Request):
             if hasattr(existing, 'arena') and existing.arena:
                 existing.arena.status = "open"
                 existing.arena = ""
+            if state.MAP_NAME == "bridge_duel":
+                existing.kit = Kit(bridgeKit.kitStart, bridgeKit.kitEnd, name)
+            else:
+                existing.kit = Kit(classicKit.kitStart, classicKit.kitEnd, name)
             state.bot_episode_start[name] = time.time()
             await game_logic.give_kit(existing)
             move = botController.pairBot(existing)
@@ -528,8 +533,9 @@ async def bot_setup(request: Request):
                 f"/say Bot {name} reconnected. Waiting for pair...")
 
         print(f"Bot setup for: {name}")
+        kit_module = bridgeKit if state.MAP_NAME == "bridge_duel" else classicKit
         new_bot = Bot(name, "ready",
-                      Kit(classicKit.kitStart, classicKit.kitEnd, name),
+                      Kit(kit_module.kitStart, kit_module.kitEnd, name),
                       "agent")
         botController.addBot(new_bot)
         if name not in state.bot_model_mapping:
@@ -639,12 +645,27 @@ async def death(request: Request):
         if pair:
             state.bot_episode_damage_dealt[pair.name] = 0
 
+        match_won = False
+        round_score = 0
+        if pair:
+            _, round_score, match_won = game_logic.award_round(pair, bot)
+
         if hasattr(bot, 'arena') and bot.arena:
             bot.arena.status = "open"
 
         if pair:
             bot.updateBot("ready")
             pair.updateBot("ready")
+            if state.MAP_NAME == "bridge_duel":
+                await asyncio.sleep(state.BRIDGE_RESPAWN_DELAY_SEC)
+                if match_won:
+                    await rcon.send(
+                        f"/say Bridge Duel: {pair.name} wins the match "
+                        f"at {state.BRIDGE_TARGET_SCORE} points!")
+                else:
+                    await rcon.send(
+                        f"/say Bridge Duel: {pair.name} scores round "
+                        f"{round_score}/{state.BRIDGE_TARGET_SCORE}")
             await game_logic.fight_bots(bot, pair)
             return await rcon.send(
                 f"/say Bot {name} died! Quick reset for continuous combat.")

@@ -47,6 +47,38 @@ def get_open_arena():
     return None
 
 
+def match_key(bot1: Bot, bot2: Bot) -> str:
+    return "::".join(sorted((bot1.name, bot2.name)))
+
+
+def award_round(winner: Bot, loser: Bot):
+    if state.MAP_NAME != "bridge_duel" or state.BRIDGE_TARGET_SCORE <= 0:
+        return match_key(winner, loser), 0, False
+
+    key = match_key(winner, loser)
+    scores = state.match_scores.setdefault(key, {winner.name: 0, loser.name: 0})
+    scores[winner.name] = scores.get(winner.name, 0) + 1
+    state.match_rounds[key] = state.match_rounds.get(key, 0) + 1
+    match_won = scores[winner.name] >= state.BRIDGE_TARGET_SCORE
+    if match_won:
+        state.match_scores[key] = {winner.name: 0, loser.name: 0}
+        state.match_rounds[key] = 0
+    return key, scores[winner.name], match_won
+
+
+async def ensure_bridge_duel_world():
+    if state.MAP_NAME != "bridge_duel":
+        return
+
+    await rcon.send("/fill -42 13 18 -13 13 44 bedrock")
+    for lane_z in (23, 35):
+        for x1, x2 in ((-39, -31), (-24, -16)):
+            await rcon.send(f"/fill {x1} 14 {lane_z - 4} {x2} 14 {lane_z + 4} sandstone")
+            await rcon.send(f"/fill {x1} 15 {lane_z - 4} {x2} 15 {lane_z + 4} stained_hardened_clay 14")
+        await rcon.send(f"/fill -31 14 {lane_z} -24 14 {lane_z} wool 14")
+        await rcon.send(f"/fill -31 15 {lane_z} -24 15 {lane_z} air")
+
+
 async def give_kit(bot: Bot):
     for command in bot.kit.commands:
         await rcon.send(command)
