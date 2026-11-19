@@ -603,12 +603,25 @@ overlay ownership checks one shared base plus one byte per cell per world;
 CUDA preflights three copies of its distinct bases and overlays (source, host
 staging and device), sharing identical bases. Explicit native C++ constructors
 can supply a different budget. Checked multiplication and addition reject
-overflow before allocation. This is a per-allocation terrain-payload budget,
-not a process-wide or GPU-memory limit: it excludes object/array overhead,
-other batches, state, projectiles, models, rollouts and allocator overhead.
-It does not guarantee that the host or GPU has enough available memory. Live
+overflow before the affected terrain allocation. Each preflight compares its
+own estimate to the cap, accepting equality; estimates are not summed across
+preflights or against already-live allocations. For example, 147456 cells and
+16 overlay worlds require a CUDA preflight of `3 * (147456 + 16 * 147456) =
+7520256` bytes. During replacement the old 147456-byte device base can remain
+live, making those terrain payloads total 7667712 bytes; accepting a 7520256-byte
+cap does not establish aggregate peak compliance. Budget rejection during
+replacement leaves the existing batch and terrain views usable. The cap is not
+a process-wide or GPU-memory limit: it excludes object/array overhead, other
+batches, state, projectiles, models, rollouts and allocator overhead. It does
+not guarantee that the host or GPU has enough available memory. Live
 arena construction still requires loaded chunks, safe height and world border,
 and may be slow for large arenas. See the [scenario contract](../docs/simulation_contract.md).
+
+From an isolated build directory, run the focused native check with
+`./minecraft_sim_training_checks /absolute/path/to/simulator/tests/reset_environment.json
+--terrain-budget`. Append `--cuda` for the separate CUDA gate; it tests a
+replacement preflight while the prior device base is live.
+`shared_core_checks` additionally covers terrain arithmetic overflow.
 
 Players declare position/velocity/yaw/pitch/on_ground; health/absorption/charge
 default 20/0/0. Optional `loadout` supplies Minecraft-ID weapon slots, selection,

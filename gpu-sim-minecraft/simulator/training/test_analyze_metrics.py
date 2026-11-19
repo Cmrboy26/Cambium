@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from simulator.training.analyze_metrics import format_timing_report, read_run, summarize_run, summarize_timings
+from simulator.training.analyze_metrics import format_report, format_timing_report, read_run, summarize_run, summarize_timings
 
 
 class AnalyzeMetricsChecks(unittest.TestCase):
@@ -25,7 +26,8 @@ class AnalyzeMetricsChecks(unittest.TestCase):
             (run / "metrics.jsonl").write_text(
                 "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
-            report = summarize_run(read_run(run), windows=(2,))
+            with patch.object(Path, "iterdir", side_effect=PermissionError("unrelated run directory")):
+                report = summarize_run(read_run(run), windows=(2,))
 
         window = report["windows"][0]
         self.assertEqual(report["environment"], "test-duel")
@@ -35,6 +37,54 @@ class AnalyzeMetricsChecks(unittest.TestCase):
         self.assertEqual(window["timeout_fraction"], 1 / 3)
         self.assertEqual(window["average_metrics"]["entropy"], 1.5)
         self.assertEqual(window["reward_per_player_transition"]["won_duel"], 0.75)
+
+    def test_match_outcomes_survive_loading_and_are_not_called_duels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run"
+            run.mkdir()
+            rows = [{"update": 1, "samples": 8, "reward_mean": 0.1, "completed_rounds": 4,
+                     "terminated_matches": 3, "timeouts": 1},
+                    {"update": 2, "samples": 16, "reward_mean": 0.2, "completed_rounds": 6,
+                     "terminated_matches": 1, "timeouts": 1}]
+            (run / "metrics.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            report = summarize_run(read_run(run), windows=(2,))
+        window = report["windows"][0]
+        self.assertEqual(window["ended_matches"], 4)
+        self.assertNotIn("ended_duels", window)
+        self.assertEqual(window["timeout_fraction"], 1 / 3)
+        self.assertIn("Completed matches: 6", format_report(report))
+        self.assertIn("match-clock endings count as terminated matches", format_report(report))
+        self.assertNotIn("duels", format_report(report))
+
+    def test_incomplete_and_mixed_outcome_rows(self):
+        rows = [{"update": 1, "reward_mean": 0.1, "terminated_duels": 2, "timeouts": 1},
+                {"update": 2, "reward_mean": 0.1, "terminated_matches": 3, "terminated_duels": 3, "timeouts": 2}]
+        run = {"name": "mixed", "path": "/tmp/mixed", "metrics": rows}
+        window = summarize_run(run, windows=(2,))["windows"][0]
+        self.assertEqual((window["ended_duels"], window["ended_matches"]), (2, 3))
+        self.assertEqual(window["timeout_fraction"], 3 / 8)
+        del rows[1]["terminated_matches"]
+        del rows[1]["terminated_duels"]
+        report = summarize_run(run, windows=(2,))
+        self.assertIsNone(report["windows"][0]["timeout_fraction"])
+        self.assertIsNone(report["windows"][0]["ended_duels"])
+        self.assertEqual(report["round_label"], "rounds")
+        del rows[1]["timeouts"]
+        report = summarize_run(run, windows=(2,))
+        self.assertIsNone(report["windows"][0]["timeouts"])
+        self.assertIn("timeouts n/a (n/a)", format_report(report))
+
+    def test_match_timeout_fraction_handles_zero_endings(self):
+        row = {"update": 1, "reward_mean": 0, "terminated_matches": 0, "timeouts": 0}
+        run = {"name": "bridge", "path": "/tmp/bridge", "metrics": [row]}
+        self.assertIsNone(summarize_run(run, windows=(1,))["windows"][0]["timeout_fraction"])
+        row["timeouts"] = 2
+        self.assertEqual(summarize_run(run, windows=(1,))["windows"][0]["timeout_fraction"], 1)
+
+    def test_resumed_run_reports_cumulative_target_update(self):
+        run = {"name": "resumed", "path": "/tmp/resumed", "metrics": [{"update": 2}],
+               "config": {"options": {"updates": 1}, "training": {"start_update": 1, "target_update": 2}}}
+        self.assertEqual(summarize_run(run)["configured_updates"], 2)
 
     def test_timing_profiles_keep_nested_phases_and_separate_throughput(self):
         profile = {"version": 1, "seconds": {"environment_reset": 0.6, "environment_reset.sample": 0.4},

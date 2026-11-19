@@ -19,6 +19,22 @@ namespace {
 using nlohmann::json;
 using Handle = std::unique_ptr<void, decltype(&mcsim_destroy)>;
 
+struct BudgetSetting {
+    bool present = std::getenv("MCSIM_TERRAIN_BUDGET_BYTES") != nullptr;
+    std::string previous = present ? std::getenv("MCSIM_TERRAIN_BUDGET_BYTES") : "";
+    static void set(const char* value) {
+#if defined(_WIN32)
+        if (_putenv_s("MCSIM_TERRAIN_BUDGET_BYTES", value ? value : "") != 0)
+            throw std::runtime_error("Unable to set terrain budget");
+#else
+        if ((value ? setenv("MCSIM_TERRAIN_BUDGET_BYTES", value, 1)
+                   : unsetenv("MCSIM_TERRAIN_BUDGET_BYTES")) != 0)
+            throw std::runtime_error("Unable to set terrain budget");
+#endif
+    }
+    ~BudgetSetting() { set(present ? previous.c_str() : nullptr); }
+};
+
 void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(std::string(message) + ": " + mcsim_last_error());
 }
@@ -50,6 +66,11 @@ void checkBridgeBatch(const char* environment, int cuda) {
     const auto descriptor = policy.dump();
     Handle batch(mcsim_create_contract(2, cuda, environment, 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     require(batch != nullptr, "create experimental Bridge batch");
+    std::array<std::uint64_t, 2> counters{91, 92};
+    require(mcsim_bridge_reset_episodes(batch.get(), counters.data(), counters.size()) != 0
+        && counters == std::array<std::uint64_t, 2>{91, 92}, "duel batch rejects Bridge counter access");
+    require(mcsim_set_bridge_reset_episodes(batch.get(), counters.data(), counters.size()) != 0,
+        "duel batch rejects Bridge counter restore");
     auto invalid = config;
     invalid["match"]["arrow_refill_ticks"] = 80;
     require(mcsim_configure_bridge(batch.get(), invalid.dump().c_str()) != 0,
@@ -58,6 +79,48 @@ void checkBridgeBatch(const char* environment, int cuda) {
     require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) == 0, "configure static Bridge batch");
     require(scenario(batch.get(), 0)["experimental_bridge"] == config, "resolved scenario records Bridge identity");
     require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) != 0, "reject repeated Bridge configuration");
+    {
+        Handle resumed(mcsim_create_contract(2, cuda, environment, 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+        require(resumed && mcsim_configure_bridge(resumed.get(), config.dump().c_str()) == 0,
+            "configure resumed Bridge batch");
+        std::array<float, 4> expected{}, actual{}, rewards{};
+        const std::array<uint8_t, 2> first{1, 0};
+        require(mcsim_reset(batch.get(), first.data(), expected.data()) == 0
+            && mcsim_bridge_reset_episodes(batch.get(), counters.data(), counters.size()) == 0
+            && counters == std::array<std::uint64_t, 2>{3, 2}, "snapshot selective Bridge resets");
+        const auto snapshot = counters;
+        require(mcsim_reset(batch.get(), nullptr, expected.data()) == 0
+            && mcsim_set_bridge_reset_episodes(resumed.get(), snapshot.data(), snapshot.size()) == 0
+            && mcsim_observe(resumed.get(), actual.data()) == 0 && actual == expected,
+            "restored counters start the next fresh matches");
+        require(mcsim_bridge_reset_episodes(resumed.get(), counters.data(), counters.size()) == 0
+            && counters == std::array<std::uint64_t, 2>{4, 3}, "restore increments every counter once");
+        std::array<int32_t, 4> neutral{};
+        std::array<uint8_t, 2> terminated{}, truncated{};
+        require(mcsim_step(resumed.get(), neutral.data(), actual.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0, "advance resumed match before invalid restores");
+        const auto state = json::parse(mcsim_bridge_state(resumed.get()));
+        const auto before = actual;
+        const std::array<std::uint64_t, 2> overflow{5, (std::numeric_limits<std::uint64_t>::max)()};
+        require(mcsim_bridge_reset_episodes(nullptr, counters.data(), 2) != 0
+            && mcsim_bridge_reset_episodes(resumed.get(), nullptr, 2) != 0
+            && mcsim_bridge_reset_episodes(resumed.get(), counters.data(), 1) != 0
+            && mcsim_set_bridge_reset_episodes(nullptr, snapshot.data(), 2) != 0
+            && mcsim_set_bridge_reset_episodes(resumed.get(), nullptr, 2) != 0
+            && mcsim_set_bridge_reset_episodes(resumed.get(), snapshot.data(), 1) != 0
+            && mcsim_set_bridge_reset_episodes(resumed.get(), overflow.data(), 2) != 0,
+            "invalid Bridge counter arguments are rejected");
+        require(mcsim_bridge_reset_episodes(resumed.get(), counters.data(), 2) == 0
+            && counters == std::array<std::uint64_t, 2>{4, 3}
+            && mcsim_observe(resumed.get(), actual.data()) == 0 && actual == before
+            && json::parse(mcsim_bridge_state(resumed.get())) == state,
+            "invalid restores leave counters and live matches unchanged");
+        const std::array<std::uint64_t, 2> boundary{0, (std::numeric_limits<std::uint64_t>::max)() - 1};
+        require(mcsim_set_bridge_reset_episodes(resumed.get(), boundary.data(), 2) == 0
+            && mcsim_bridge_reset_episodes(resumed.get(), counters.data(), 2) == 0
+            && counters == std::array<std::uint64_t, 2>{1, (std::numeric_limits<std::uint64_t>::max)()},
+            "restore accepts the largest incrementable counter");
+    }
     std::array<int32_t, 4> actions{1, 0, 0, 0};
     std::array<float, 4> observations{}, rewards{};
     std::array<uint8_t, 2> terminated{}, truncated{};
@@ -276,8 +339,16 @@ void checkBridgeKits(const char* environment, int cuda) {
     const auto incompatible_descriptor = incompatible_policy.dump();
     Handle incompatible(mcsim_create_contract(1, cuda, path.c_str(), 100, 91, weights.data(),
                                                incompatible_descriptor.c_str()), mcsim_destroy);
+    auto seed_test_policy = policy;
+    seed_test_policy["observations"] = {{{"feature", "arrow.present"}},
+        {{"feature", "arrow.relative.velocity.x"}}, {{"feature", "arrow.relative.velocity.y"}},
+        {{"feature", "arrow.relative.velocity.z"}}};
+    const auto seed_test_descriptor = seed_test_policy.dump();
+    Handle source(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), seed_test_descriptor.c_str()), mcsim_destroy);
+    Handle resumed(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), seed_test_descriptor.c_str()), mcsim_destroy);
+    Handle replayed(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), seed_test_descriptor.c_str()), mcsim_destroy);
     std::filesystem::remove(path);
-    require(batch != nullptr && incompatible != nullptr, "create Bridge kit training batches");
+    require(batch && incompatible && source && resumed && replayed, "create Bridge kit training batches");
     const json kit{{"slots", {"sword", "bow", "pickaxe", "blocks", "golden_apple"}},
                    {"blocks", 64}, {"golden_apples", 2}};
     json config{{"mode", {{"name", "bridge"}, {"version", 1}}},
@@ -287,6 +358,40 @@ void checkBridgeKits(const char* environment, int cuda) {
         {"match", {{"goals_to_win", 2}, {"max_ticks", 100}, {"cage_ticks", 0},
                    {"persist_blocks_on_goal", true}, {"arrow_refill_ticks", 3}}},
         {"kits", {kit, kit}}, {"task_rewards", {{"score", 2.0}, {"win", 5.0}, {"loss", -3.0}}}};
+    {
+        for (auto* handle : {source.get(), resumed.get(), replayed.get()}) {
+            require(mcsim_configure_bridge(handle, config.dump().c_str()) == 0, "configure seed continuation batch");
+        }
+        std::array<float, 16> source_observations{}, resumed_observations{}, replayed_observations{};
+        const std::array<uint8_t, 2> first{1, 0};
+        std::array<std::uint64_t, 2> snapshot{};
+        require(mcsim_reset(source.get(), first.data(), source_observations.data()) == 0
+            && mcsim_bridge_reset_episodes(source.get(), snapshot.data(), snapshot.size()) == 0
+            && mcsim_reset(source.get(), nullptr, source_observations.data()) == 0
+            && mcsim_set_bridge_reset_episodes(resumed.get(), snapshot.data(), snapshot.size()) == 0,
+            "resume the next per-world projectile RNG seeds");
+        std::array<int32_t, 12> shoot{1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0};
+        std::array<float, 4> rewards{};
+        std::array<uint8_t, 2> terminated{}, truncated{};
+        const auto fire_tick = [&](void* handle, std::array<float, 16>& observations) {
+            require(mcsim_step(handle, shoot.data(), observations.data(), rewards.data(),
+                terminated.data(), truncated.data()) == 0, "step seed continuation bow");
+        };
+        for (int tick = 0; tick < 3; ++tick) {
+            fire_tick(source.get(), source_observations);
+            fire_tick(resumed.get(), resumed_observations);
+            fire_tick(replayed.get(), replayed_observations);
+        }
+        shoot[1] = shoot[7] = 0;
+        fire_tick(source.get(), source_observations);
+        fire_tick(resumed.get(), resumed_observations);
+        fire_tick(replayed.get(), replayed_observations);
+        require(source_observations[4] == 1.0F && source_observations == resumed_observations
+            && (source_observations[5] != replayed_observations[5]
+                || source_observations[6] != replayed_observations[6]
+                || source_observations[7] != replayed_observations[7]),
+            "resumed projectile randomness matches continuation and differs from replayed seeds");
+    }
     require(mcsim_configure_bridge(incompatible.get(), config.dump().c_str()) != 0,
         "reserved Bridge items cannot masquerade as empty weapon observations");
     auto invalid = config;
@@ -361,7 +466,7 @@ void checkBridgeKits(const char* environment, int cuda) {
         "selected match reset restores the apple kit and clears its effects");
 }
 
-void checkBridgeBuilding(const char* environment, int cuda) {
+void checkBridgeBuilding(const char* environment, int cuda, bool budget_only = false) {
     const std::array<float, 10> weights{};
     json policy{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
         {"ticks_per_action", 1}, {"observations", {{{"feature", "arena.ray_world_0"}}}},
@@ -399,8 +504,11 @@ void checkBridgeBuilding(const char* environment, int cuda) {
     Handle combat(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), combat_descriptor.c_str()), mcsim_destroy);
     Handle persistent(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     Handle clearing(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    Handle replacement(mcsim_create_contract(3, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    Handle reference(mcsim_create_contract(3, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     std::filesystem::remove(path);
-    require(batch != nullptr && movement != nullptr && combat != nullptr && persistent != nullptr && clearing != nullptr,
+    require(batch != nullptr && movement != nullptr && combat != nullptr && persistent != nullptr && clearing != nullptr
+        && replacement != nullptr && reference != nullptr,
         "create Bridge building training batches");
     const json kit{{"slots", {"sword", "blocks", "pickaxe"}}, {"blocks", 4}, {"golden_apples", 0}};
     json config{{"mode", {{"name", "bridge"}, {"version", 1}}},
@@ -413,6 +521,56 @@ void checkBridgeBuilding(const char* environment, int cuda) {
         {"building", {{"zones", {{{"min", {-3, 0, -3}}, {"max", {4, 4, 4}}}}},
                       {"block_range", 4.5}, {"entity_range", 3.0}, {"hardness", 1.0},
                       {"mining_speed", 15.0}, {"correct_tool", true}}}};
+    {
+        BudgetSetting budget_setting;
+        require(scenario(replacement.get(), 0)["bounds"]["size"] == json::array({7, 4, 7}),
+            "replacement budget fixture has 196 cells");
+        static_assert(sizeof(minecraft_sim::Block) == 1 && sizeof(minecraft_sim::PlacedBlock) == 1);
+        std::array<int32_t, 18> actions{};
+        std::array<float, 6> observations{}, expected_observations{}, rewards{}, expected_rewards{};
+        std::array<uint8_t, 3> terminated{}, truncated{}, expected_terminated{}, expected_truncated{};
+        const auto verify_rejection = [&](const char* budget) {
+            std::array<json, 3> before_scenarios, before_frames;
+            for (int world = 0; world < 3; ++world) {
+                before_scenarios[world] = scenario(replacement.get(), world);
+                before_frames[world] = frame(replacement.get(), world);
+            }
+            require(mcsim_observe(replacement.get(), observations.data()) == 0, "observe before budget rejection");
+            const auto before_observations = observations;
+            BudgetSetting::set(budget);
+            require(mcsim_configure_bridge(replacement.get(), config.dump().c_str()) == -1
+                && std::string(mcsim_last_error()).find("Terrain buffers exceed MCSIM_TERRAIN_BUDGET_BYTES")
+                    != std::string::npos, "replacement rejects insufficient terrain budget");
+            for (int world = 0; world < 3; ++world) {
+                require(scenario(replacement.get(), world) == before_scenarios[world]
+                    && frame(replacement.get(), world) == before_frames[world],
+                    "budget rejection preserves each world's scenario and state");
+            }
+            require(mcsim_observe(replacement.get(), observations.data()) == 0 && observations == before_observations,
+                "budget rejection preserves observations");
+            require(mcsim_step(replacement.get(), actions.data(), observations.data(), rewards.data(),
+                    terminated.data(), truncated.data()) == 0
+                && mcsim_step(reference.get(), actions.data(), expected_observations.data(), expected_rewards.data(),
+                    expected_terminated.data(), expected_truncated.data()) == 0
+                && observations == expected_observations && rewards == expected_rewards
+                && terminated == expected_terminated && truncated == expected_truncated,
+                "rejected replacement continues stepping like an untouched batch");
+            for (int world = 0; world < 3; ++world) {
+                require(frame(replacement.get(), world) == frame(reference.get(), world),
+                    "rejected replacement preserves each world's state");
+            }
+        };
+        verify_rejection("783");
+        if (cuda) verify_rejection("2351");
+        BudgetSetting::set(cuda ? "2352" : "784");
+        require(mcsim_configure_bridge(replacement.get(), config.dump().c_str()) == 0
+            && scenario(replacement.get(), 0)["experimental_bridge"] == config,
+            "replacement accepts exact independent terrain preflight budget");
+        require(mcsim_step(replacement.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0, "exact-budget replacement remains usable");
+        std::cout << "PASS: terrain replacement exact/insufficient preflight budgets and rollback\n";
+    }
+    if (budget_only) return;
     const auto check_goal_reset = [&](Handle& goal_batch, bool persist) {
         auto goal_config = config;
         goal_config["match"]["persist_blocks_on_goal"] = persist;
@@ -582,6 +740,14 @@ void checkBridgeBuilding(const char* environment, int cuda) {
     require(status()[0]["placed"][0] == true && std::abs(observations[0] - 0.03F) < 1E-6F
         && std::abs(observations[2] - 0.05F) < 1E-6F,
         "placed terrain affects only the edited world's observation");
+    std::array<std::uint64_t, 2> reset_episodes{};
+    require(mcsim_bridge_reset_episodes(batch.get(), reset_episodes.data(), reset_episodes.size()) == 0
+        && mcsim_set_bridge_reset_episodes(batch.get(), reset_episodes.data(), reset_episodes.size()) == 0
+        && mcsim_observe(batch.get(), observations.data()) == 0 && std::abs(observations[0] - 0.05F) < 1E-6F,
+        "restoring Bridge counters starts full matches and clears placed terrain");
+    step();
+    require(status()[0]["placed"][0] == true && std::abs(observations[0] - 0.03F) < 1E-6F,
+        "building configuration remains active after restore");
     const std::array<uint8_t, 2> other{0, 1};
     require(mcsim_reset(batch.get(), other.data(), observations.data()) == 0
         && std::abs(observations[0] - 0.03F) < 1E-6F, "other-world reset preserves placed terrain");
@@ -864,21 +1030,7 @@ void checkLargeArena(const char* environment, int cuda) {
     auto handle = create(definition);
     require(handle != nullptr && scenario(handle.get(), 0)["bounds"]["size"] == json::array({32, 48, 96}),
             "native batch accepts the Bridge-sized static arena");
-    struct BudgetSetting {
-        bool present = std::getenv("MCSIM_TERRAIN_BUDGET_BYTES") != nullptr;
-        std::string previous = present ? std::getenv("MCSIM_TERRAIN_BUDGET_BYTES") : "";
-        static void set(const char* value) {
-#if defined(_WIN32)
-            if (_putenv_s("MCSIM_TERRAIN_BUDGET_BYTES", value ? value : "") != 0)
-                throw std::runtime_error("Unable to set terrain budget");
-#else
-            if ((value ? setenv("MCSIM_TERRAIN_BUDGET_BYTES", value, 1)
-                       : unsetenv("MCSIM_TERRAIN_BUDGET_BYTES")) != 0)
-                throw std::runtime_error("Unable to set terrain budget");
-#endif
-        }
-        ~BudgetSetting() { set(present ? previous.c_str() : nullptr); }
-    } budget_setting;
+    BudgetSetting budget_setting;
     BudgetSetting::set("1327104");
     require(create(definition) != nullptr, "native scene accepts exact portable budget");
     BudgetSetting::set("1327103");
@@ -1379,6 +1531,14 @@ void checkBowAdapter(const char* environment, int cuda) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc >= 3 && std::string(argv[2]) == "--terrain-budget") {
+            require(argc == 3 || (argc == 4 && std::string(argv[3]) == "--cuda"),
+                "Usage: training_checks <environment.json> --terrain-budget [--cuda]");
+            const int cuda = argc == 4 ? 1 : 0;
+            if (cuda && !mcsim_cuda_available()) return 77;
+            checkBridgeBuilding(argv[1], cuda, true);
+            return 0;
+        }
         require(argc == 2 || (argc == 3 && std::string(argv[2]) == "--cuda"),
             "Usage: training_checks <two-slot-environment.json> [--cuda]");
         const int cuda = argc == 3 ? 1 : 0;

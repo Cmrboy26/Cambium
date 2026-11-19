@@ -1,0 +1,15 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "bridge-static-lane",
+  "seed": 42,
+  "policy": "../../policies/bridge/scalar-lane.json",
+  "environment": "../../environments/bridge/static-lane.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
+  "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
+  "mixtures": {"target": [{"id": "target", "weight": 1}]},
+  "stages": [
+    {"name": "static-lane", "opponents": "target", "controls": {"fixed": {}},
+     "advance": {"updates": 1000}}
+  ]
+}

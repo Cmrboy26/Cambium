@@ -1463,6 +1463,30 @@ MCSIM_EXPORT int mcsim_reset_cuda_resident_async(void* handle, void* stream) {
 #endif
     });
 }
+MCSIM_EXPORT int mcsim_bridge_reset_episodes(void* handle, std::uint64_t* episodes, std::size_t worlds) {
+    return protect([&] {
+        if (!handle || !episodes) throw std::invalid_argument("Null Bridge reset episode argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        if (!batch.bridge_enabled) throw std::invalid_argument("Bridge is not configured");
+        if (worlds != batch.episodes.size()) throw std::invalid_argument("Invalid Bridge reset episode count");
+        std::copy(batch.episodes.begin(), batch.episodes.end(), episodes);
+    });
+}
+MCSIM_EXPORT int mcsim_set_bridge_reset_episodes(void* handle, const std::uint64_t* episodes, std::size_t worlds) {
+    return protect([&] {
+        if (!handle || !episodes) throw std::invalid_argument("Null Bridge reset episode argument");
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        if (!batch.bridge_enabled) throw std::invalid_argument("Bridge is not configured");
+        if (worlds != batch.episodes.size()) throw std::invalid_argument("Invalid Bridge reset episode count");
+        if (std::any_of(episodes, episodes + worlds, [](auto episode) {
+                return episode == (std::numeric_limits<std::uint64_t>::max)();
+            })) throw std::invalid_argument("Bridge reset episode counter cannot be incremented");
+        std::copy_n(episodes, worlds, batch.episodes.begin());
+        batch.reset(nullptr);
+    });
+}
 MCSIM_EXPORT int mcsim_cuda_reset_episodes(void* handle, std::uint64_t* episodes, std::size_t worlds) {
     return protect([&] {
         if (!handle || !episodes) throw std::invalid_argument("Null CUDA reset episode argument");

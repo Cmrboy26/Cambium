@@ -26,12 +26,14 @@ from simulator.training.replay_requests import (
 
 RUNS = Path(__file__).resolve().parent / "runs"
 ASSETS = Path(__file__).resolve().parent / "dashboard"
-METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "timeouts",
+METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "terminated_matches", "timeouts",
+           "bridge_goals_for", "bridge_goals_against", "bridge_wins", "bridge_losses", "bridge_draws",
            "replays_exported", "reward_mean", "reward_total", "loss", "policy_loss", "value_loss", "entropy",
            "collection_seconds", "update_seconds", "evaluation_seconds", "evaluation_episodes",
            "replay_seconds", "iteration_seconds", "elapsed_seconds", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",
            "player_transitions_per_second", "training_episode_window", *EPISODE_FIELDS)
-COUNTS = {"update", "samples", "completed_rounds", "terminated_duels", "timeouts", "replays_exported",
+COUNTS = {"update", "samples", "completed_rounds", "terminated_duels", "terminated_matches", "timeouts", "replays_exported",
+          "bridge_goals_for", "bridge_goals_against", "bridge_wins", "bridge_losses", "bridge_draws",
           "evaluation_episodes", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",
           "training_episodes", "training_episode_window"}
 MAX_REPLAY_BYTES = 64 * 1024 * 1024
@@ -139,16 +141,17 @@ def metric_metadata(record):
 
 
 class RunStore:
-    def __init__(self, directory=RUNS, runs=()):
+    def __init__(self, directory=RUNS, runs=(), discover=True):
         self.directory = Path(directory).resolve()
         self.explicit = tuple(Path(run).resolve() for run in runs)
+        self.discover = discover
         self.summaries = {}
         self.replay_request_lock = Lock()
         self.analytics_request_lock = Lock()
 
     def paths(self):
         candidates = list(self.explicit)
-        if self.directory.is_dir():
+        if self.discover and self.directory.is_dir():
             candidates.extend(path for path in self.directory.iterdir()
                               if path.is_dir() and path.resolve().parent == self.directory)
         found = {}
@@ -386,7 +389,7 @@ class RunStore:
             warnings.append(f"Skipped {invalid} invalid metric record(s).")
         previous = {"update": 0, "samples": 0}
         for row in metrics:
-            if "training_rollout" not in row:
+            if "training_rollout" not in row and "terminated_matches" not in row:
                 recovered = recover_rollout(row, config)
                 if recovered is not None:
                     row["training_rollout"] = recovered

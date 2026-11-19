@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from simulator.training.contract import FEATURES, resolve_players, resolve_scenario
+from simulator.training.bridge import _intersects, _player_bounds, validate_bridge
 from simulator.training.environment import ROOT
 
 
@@ -203,13 +204,16 @@ def reached(rule, progress, evaluation):
 
 
 def _scenario(value):
-    fields(value, ("base", "arenas", "spawns", "equipment"), "scenario")
+    fields(value, ("base", "arenas", "spawns", "equipment", "bridge"), "scenario")
     scenario = deepcopy(value)
     if ("base" in scenario) == ("arenas" in scenario):
         raise ValueError("Scenario needs either base or a weighted arenas list")
     if "base" in scenario:
         scenario["arenas"] = [{"base": scenario.pop("base"), "weight": 1}]
     weights(scenario["arenas"])
+    if "bridge" in scenario:
+        if len(scenario["arenas"]) != 1 or "spawns" in scenario or "equipment" in scenario:
+            raise ValueError("Bridge requires one fixed arena without spawn or equipment sampling")
     for arena in scenario["arenas"]:
         fields(arena, ("base", "environment", "weight"), "arena")
         if ("base" in arena) == ("environment" in arena):
@@ -219,6 +223,8 @@ def _scenario(value):
             path = path if path.is_absolute() else ROOT / path
             arena["environment"] = json.loads(path.read_text(encoding="utf-8"))
         arena["environment"] = resolve_scenario(arena["environment"])
+    if "bridge" in scenario:
+        validate_bridge(scenario["bridge"], scenario["arenas"][0]["environment"])
     for component in ("spawns", "equipment"):
         if scenario.get(component, False) is None:
             scenario.pop(component)
@@ -297,6 +303,8 @@ class EpisodeSampler:
 
     def configure(self, scenario):
         scenario = _scenario(scenario)
+        if ("bridge" in self.scenario or "bridge" in scenario) and scenario != self.scenario:
+            raise ValueError("Changing a Bridge scenario requires a new sampler")
         if scene_key(scenario) != scene_key(self.scenario):
             raise ValueError("Changing arenas requires a new scene assignment")
         for component in ("spawns", "equipment"):
@@ -373,20 +381,20 @@ class EpisodeSampler:
         delta_x = abs(positions[0][0] - positions[1][0])
         delta_y = abs(positions[0][1] - positions[1][1])
         delta_z = abs(positions[0][2] - positions[1][2])
-        return ((delta_x >= 0.6 or delta_z >= 0.6 or delta_y >= 1.8)
+        return (not _intersects(*_player_bounds(positions[0]), *_player_bounds(positions[1]))
             and math.sqrt(delta_x * delta_x + delta_y * delta_y + delta_z * delta_z) >= minimum)
 
     @staticmethod
     def _valid_position(position, base):
         origin, size = base["bounds"]["min"], base["bounds"]["size"]
+        lower, upper = _player_bounds(position)
         if not origin[1] <= position[1] < origin[1] + size[1]:
             return False
-        if any(position[axis] - 0.3 < origin[axis] or position[axis] + 0.3 >= origin[axis] + size[axis]
+        if any(lower[axis] < origin[axis] or upper[axis] >= origin[axis] + size[axis]
                for axis in (0, 2)):
             return False
-        low = [math.floor(position[0] - 0.3), math.floor(position[1]), math.floor(position[2] - 0.3)]
-        high = [math.floor(position[0] + 0.3 - 1e-9), math.floor(position[1] + 1.8 - 1e-9),
-                math.floor(position[2] + 0.3 - 1e-9)]
+        low = [math.floor(value) for value in lower]
+        high = [math.ceil(value) - 1 for value in upper]
         for x in range(low[0], high[0] + 1):
             for y in range(low[1], high[1] + 1):
                 for z in range(low[2], high[2] + 1):

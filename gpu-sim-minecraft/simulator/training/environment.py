@@ -288,6 +288,45 @@ class Environment:
             raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
         return json.loads(result)
 
+    def bridge_reset_episodes(self):
+        """Return the next per-world Bridge reset counters as a uint64 array."""
+        self._require_open()
+        if self.bridge is None:
+            raise RuntimeError("Bridge is not configured")
+        function = getattr(self.native, "mcsim_bridge_reset_episodes", None)
+        if function is None:
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge reset episode counters")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        episodes = np.empty(self.count, dtype=np.uint64)
+        self._check(function(self._handle, episodes.ctypes.data, self.count))
+        return episodes
+
+    def restore_bridge_reset_episodes(self, episodes):
+        """Restore next-reset counters, start fresh matches, and return observations."""
+        self._require_open()
+        if self.bridge is None:
+            raise RuntimeError("Bridge is not configured")
+        function = getattr(self.native, "mcsim_set_bridge_reset_episodes", None)
+        if function is None:
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge reset episode counters")
+        if isinstance(episodes, (list, tuple)):
+            if (len(episodes) != self.count or any(
+                    isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer))
+                    or not 0 <= int(value) < 2**64 - 1 for value in episodes)):
+                raise ValueError("Bridge reset episodes must be nonnegative integers below uint64 max, one per world")
+            raw = np.asarray(episodes, dtype=np.uint64)
+        else:
+            raw = np.asarray(episodes)
+        if (raw.shape != (self.count,) or raw.dtype.kind not in "iu"
+                or np.any(raw < 0) or np.any(raw == np.iinfo(np.uint64).max)):
+            raise ValueError("Bridge reset episodes must be nonnegative integers below uint64 max, one per world")
+        values = np.ascontiguousarray(raw, dtype=np.uint64)
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        self._check(function(self._handle, values.ctypes.data, self.count))
+        return self.observe()
+
     def bridge_kits(self, player):
         """Return privileged per-world kit state for one player index."""
         self._require_open()

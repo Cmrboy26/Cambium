@@ -133,6 +133,16 @@ void checkMutableTerrain() {
         overflow_rejected = true;
     }
     require(overflow_rejected, "terrain index overflow rejected before allocation");
+        const auto maximum = (std::numeric_limits<std::size_t>::max)();
+        require(checkedTerrainProduct(maximum, 1) == maximum && checkedTerrainSum(maximum - 1, 1) == maximum,
+            "terrain size arithmetic accepts the exact representable limit");
+        bool product_overflow_rejected = false, sum_overflow_rejected = false;
+        try { (void)checkedTerrainProduct(maximum, 2); }
+        catch (const std::invalid_argument&) { product_overflow_rejected = true; }
+        try { (void)checkedTerrainSum(maximum, 1); }
+        catch (const std::invalid_argument&) { sum_overflow_rejected = true; }
+        require(product_overflow_rejected && sum_overflow_rejected,
+            "terrain size multiplication and addition reject overflow");
     TerrainOverlays exact_budget(static_world, 2, 24);
     bool budget_rejected = false;
     try {

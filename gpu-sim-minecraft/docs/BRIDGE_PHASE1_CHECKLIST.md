@@ -1,23 +1,22 @@
 # Phase 1 Bridge: Implementation Checklist
 
 **Status:** In progress; complete Bridge mode is not implemented. An experimental
-host-staged basic match runs on CPU/CUDA. This is the shared implementation
+fixed-arena host-staged Bridge match and PPO path run on CPU/CUDA. This is the shared implementation
 tracker for the seven Phase 1 milestones; existing duel features are foundations,
 not completed Bridge features.
 
 ## Next Action
 
-**Owner:** GitHub Copilot for the current terrain and lifecycle slice.
-**Blocked by:** Authored Bridge setups, resident collection and replay/live
-adapters are not implemented; in-game conformance remains open. The terrain
-memory gate needs a decision on peak versus per-preflight cap accounting.
-**First task:** P1-02-07.
+**Owner:** GitHub Copilot for the current Bridge slice.
+**Blocked by:** Full authored capabilities, resident collection and replay/live
+adapters are not implemented; in-game conformance remains open.
+**First task:** P1-01-05, alongside the remaining P1-04 item/building work.
 
-1. Resolve the P1-02-07 peak accounting discrepancy and finish the terrain gate;
-  the host-staged composite terrain path is covered.
-2. Finish match lifecycle cases, remaining building/item subsets, authored setup
-  and PPO collector paths; the experimental host batch is not those adapters.
-3. Complete the remaining resident, in-game and H100 validation gates before
+1. Finish source citations and the supported building/item subsets; extend the
+  fixed authored setup only when each capability and adapter is ready.
+2. Complete structured observations, the model interface and resident Bridge
+  integration; the current PPO path is host-staged and stationary-opponent only.
+3. Complete the remaining replay/live, in-game and H100 validation gates before
   claiming full Bridge support.
 
 Starting points: [`BlockWorldView`](../simulator/include/minecraft_sim/geometry.hpp),
@@ -163,7 +162,9 @@ conditions and distinguish compatible legacy duels from Bridge.
   resolve a representative Bridge setup;
   reject invalid goals, overlapping/unsafe spawns, kits, zones, limits,
   unsupported capabilities and inconsistent versions. Confirm old duel
-  setups/checkpoints still load or reject explicitly as designed.
+  setups/checkpoints still load or reject explicitly as designed. **In progress:**
+  a fixed static arena and stationary-opponent plan validate and train; kits,
+  build zones, sampling and the full declared Bridge capability gate remain open.
 
 ## 2. Per-World Mutable Terrain
 
@@ -342,11 +343,11 @@ the composite terrain interface before parallel physics or observation work.
   NVCC reported `#20013-D` host/device constexpr warnings. Results are fixture
   evidence for the experimental host-staged path, not resident Bridge, measured
   memory, H100, live integration or real-game conformance.
-- [ ] P1-02-07: **Gate:** CPU and CUDA observe identical intended terrain and
+- [x] P1-02-07: **Gate:** CPU and CUDA observe identical intended terrain and
   collision/ray results after edits and resets; static duel regression passes;
-  recorded memory use respects the configured cap. **Blocked:** GitHub Copilot;
-  the documented cap is per preflight, while measured aggregate requested terrain
-  payload briefly exceeds it during CUDA batch replacement.
+  recorded terrain preflight estimates respect the configured per-preflight cap.
+  **Decision:** preserve the existing per-preflight contract; it does not cap
+  aggregate live allocations or physical host/GPU residency.
 - **P1-02-07 measurement, 2026-11-19:** For a 32 x 48 x 96 base and 16
   independent overlays, allocation tracing on the integrated source measured
   147456 bytes for the host base and 2359296 for host overlays. The CPU
@@ -358,10 +359,25 @@ the composite terrain interface before parallel physics or observation work.
   included allocator overhead; GPU allocation extents were queried via the
   CUDA driver, not measured physical residency. The cap documented in the
   [native guide](../simulator/AGENTS.md#json-environments) is per preflight,
-  not an aggregate process/device limit. Decide whether this gate requires
-  aggregate peak enforcement or explicitly scoped per-preflight accounting;
-  do not call the observed peak within the cap. The temporary probe and traces
-  are not durable repository artifacts.
+  not an aggregate process/device limit. The observed aggregate peak is not
+  within the cap. The temporary probe and traces are not durable repository artifacts.
+- **P1-02-07 decision and validation, 2026-11-19:** Repeated the representative
+  allocation trace on native source hash
+  `a52a1324d3dee7e2a197c17ebd7a3541d4ae549a5aebd5242d1f3008bfec945d`
+  at baseline `ecef3904e801` plus worktree changes. CPU accepted 2506752 bytes
+  and rejected 2506751; T4 accepted 7520256 and rejected 7520255, with the same
+  7667712-byte aggregate requested-payload overlap described above. Exact and
+  insufficient preflights and rollback are durably exercised by
+  [training checks](../simulator/tests/training_checks.cpp); CUDA also tests
+  distinct `(base pointer, cell count)` sharing in
+  [observation checks](../simulator/tests/observation_cuda_checks.cu).
+  `ctest --test-dir simulator/build-bridge-host-20261119-cpu --output-on-failure`
+  passed 6/6; the four CUDA suites passed 4/4 in
+  `simulator/build-bridge-host-20261119-t4`. The focused
+  `minecraft_sim_training_checks simulator/tests/reset_environment.json --terrain-budget`
+  check also ran with `--cuda` on T4. Slurm job 302316 used `dh-node8`, Tesla
+  T4, driver 610.43.02, CUDA 12.9.86 and GNU 13.3.0. These measurements do not
+  include physical GPU backing, allocator overhead, other batches or models.
 
 ## 3. Match Lifecycle
 
@@ -374,12 +390,10 @@ before building; the complete milestone also requires P1-02 persistence.
   **In progress:** GitHub Copilot; static CPU/CUDA host batches own match state;
   kit counts and refill state are written and host fixtures pass, but resident
   integration and its validation remain open.
-- [ ] P1-03-02: Implement cages and their opening, goal detection and scoring,
+- [x] P1-03-02: Implement cages and their opening, goal detection and scoring,
   configurable first-to-N result, time cap and specified simultaneous/tie
-  behavior. Emit explicit score and match outcome events. **In progress:**
-  GitHub Copilot; scoring, outcome and cage-enforced host-batch ticks are
-  written and host fixtures pass, but authored setup integration and its
-  validation remain open.
+  behavior. Emit explicit score and match outcome events. The fixed authored
+  host-staged subset is validated below; resident support remains tracked in P1-06.
 - [ ] P1-03-03: Implement void/combat death and player-only respawn/refill
   without ending the match; clear the affected player's relevant state and
   preserve the other player's state according to the specification.
@@ -405,14 +419,50 @@ before building; the complete milestone also requires P1-02 persistence.
   static-arena Bridge configuration, score/outcome rewards, match events and
   CPU/CUDA host-staged ticking. Focused native and Python fixtures passed; see
   P1-02-05/06 above. Mutable host-staged terrain was added later; the
-  authored compiler, research collector, resident path, replay and live
-  controller remain unsupported.
-- [ ] P1-03-05: Connect match outcomes and minimal score/win/loss task events
+  fixed authored and research slice is recorded below; resident,
+  replay and live controllers remain unsupported.
+- [x] P1-03-05: Connect match outcomes and minimal score/win/loss task events
   to the training API and metrics. Preserve final observations and the specified
   termination/truncation semantics; a death or nonwinning goal is not a match
-  terminal. Do not silently substitute duel rewards or endings. **In progress:**
-  GitHub Copilot; the direct `Environment` adapter exposes configured match
-  rewards and events, but research collection and validation remain open.
+  terminal. Do not silently substitute duel rewards or endings.
+- **P1-03-02/05 authored training evidence, 2026-11-19:** The [static-lane
+  plan](../simulator/setups/curricula/bridge/static-lane.json) uses one fixed
+  arena, fixed spawns/loadouts, scalar observations and a stationary opponent.
+  Validation rejects unsupported sampling, task overrides, evaluation, replay,
+  resident collection and live serving. Research collector fixtures exercise
+  scoring and outcomes from the learner's perspective, task rewards, selective
+  resets, final observations, terminal versus truncated bootstrapping, and
+  checkpoint reset-counter continuity. The driven scoring fixture records a
+  training return of 9; per-rollout goal and match counters are learner-relative.
+
+  Fresh CPU and T4 native builds reported source hash
+  `a52a1324d3dee7e2a197c17ebd7a3541d4ae549a5aebd5242d1f3008bfec945d`
+  at baseline `ecef3904e801` plus worktree changes. CPU native CTest passed
+  6/6; the four relevant T4 native tests passed 4/4. The affected CPU Python
+  suites ran 210 tests with four environment-dependent skips before the final
+  metric additions; 36 focused collector/dashboard tests and two metric-selector
+  tests passed afterward. T4 Python observation/resident-opponent checks ran
+  34 tests with one two-device skip; 50 mocked Rosie submission tests passed.
+  The authored plan validator passed. Fixture SHA-256 values are
+  `115b4936da83953e90155b7b7b564c53d15157de66467d060df60768609a3b94`
+  for [research checks](../simulator/training/test_research.py) and
+  `eb5c9c89a6cee1891357ba2348f15f9ae47bf13964692e55d5e8bff61595bb28`
+  for [experiment checks](../simulator/training/test_experiments.py).
+
+  CPU and host-staged T4 PPO each ran two 64-step rollouts in two worlds,
+  saving a checkpoint after the first update and resuming for the second.
+  Both reached 256 samples with finite losses and explicit Bridge event metrics;
+  no matches finished or goals were scored, so these runs demonstrate plumbing,
+  not learning. The T4 runs used `dh-node8` (Slurm jobs 302316 and 302317),
+  driver 610.43.02, CUDA 12.9.86 and PyTorch 2.5.1+cu124. No H100 or in-game
+  conformance is claimed. From the project root, a fresh CPU smoke and resume
+  can be reproduced with:
+
+  ```sh
+  OUTPUT=$(mktemp -d /tmp/cambium-bridge-smoke-XXXXXXXX)
+  .venv-rosie/bin/python -B -m simulator.training.train --plan simulator/setups/curricula/bridge/static-lane.json --device cpu --rollout-backend host --envs 2 --updates 1 --rollout-steps 64 --max-ticks 100 --threads 1 --replay-every 0 --library simulator/build-bridge-host-20261119-cpu/minecraft_sim_training.so --output "$OUTPUT"
+  .venv-rosie/bin/python -B -m simulator.training.train --resume "$OUTPUT/latest.pt" --device cpu --rollout-backend host --updates 1 --threads 1 --replay-every 0 --library simulator/build-bridge-host-20261119-cpu/minecraft_sim_training.so
+  ```
 - [x] P1-03-06: Add independently specified cases for both sides, cage timing,
   player death, void, goal, simultaneous events, time-cap ties, selective reset
   and persistence, including shared CPU/CUDA state and result comparisons.

@@ -529,23 +529,23 @@ CudaBatch::CudaBatch(BatchView initial, bool summarize_arrows, std::size_t terra
     std::vector<std::size_t> offsets(initial.environment_count);
     std::vector<std::size_t> overlay_offsets(initial.environment_count);
     std::vector<std::uint8_t> copy_base(initial.environment_count);
-    std::unordered_map<const Block*, std::pair<std::size_t, std::size_t>> shared_bases;
+    std::unordered_map<const Block*, std::unordered_map<std::size_t, std::size_t>> shared_bases;
     std::size_t base_count = 0;
     std::size_t overlay_count = 0;
     for (int index = 0; index < initial.environment_count; ++index) {
         auto blocks = initial.block_worlds ? initial.block_worlds[index] : BlockWorldView{};
         const auto count = cellCount(blocks);
         offsets[index] = base_count;
-        const auto shared = shared_bases.find(blocks.cells);
         if (blocks.overlay && count == 0) {
             throw std::invalid_argument("Terrain overlay requires a nonempty base");
         }
-        if (shared != shared_bases.end() && shared->second.second == count) {
-            offsets[index] = shared->second.first;
-        } else if (count != 0) {
-            base_count = checkedTerrainSum(base_count, count);
-            copy_base[index] = 1;
-            shared_bases.emplace(blocks.cells, std::make_pair(offsets[index], count));
+        if (count != 0) {
+            const auto shared = shared_bases[blocks.cells].emplace(count, base_count);
+            offsets[index] = shared.first->second;
+            if (shared.second) {
+                base_count = checkedTerrainSum(base_count, count);
+                copy_base[index] = 1;
+            }
         }
         if (blocks.overlay) {
             overlay_offsets[index] = overlay_count;

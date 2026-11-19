@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 
+from simulator.training.bridge import _intersects, _player_bounds
 from simulator.training.contract import CAPABILITIES, RULES, resolve_scenario, validate_contract
 from simulator.training.environment import REWARD_NAMES, MAX_MAX_TICKS
 from simulator.training.plans import (
@@ -179,8 +180,8 @@ def _concrete(value):
     for player in result["players"]:
         if not EpisodeSampler._valid_position(player["position"], result):
             raise ValueError("Initial player must be collision-free inside arena bounds")
-    delta = [abs(a - b) for a, b in zip(*(player["position"] for player in result["players"]))]
-    if delta[0] < 0.6 and delta[2] < 0.6 and delta[1] < 1.8:
+    if _intersects(*_player_bounds(result["players"][0]["position"]),
+                   *_player_bounds(result["players"][1]["position"])):
         raise ValueError("Initial players must not intersect")
     task = _task({"max_ticks": result.get("max_ticks", 300),
                   "rewards": result.get("reward_weights", {})})
@@ -279,7 +280,7 @@ def _opponents(value, base_dir):
 
 def _resolved_condition(value, policy, opponents):
     result = deepcopy(value)
-    scenario = fields(result.get("scenario"), ("arenas", "spawns", "equipment"), "resolved scenario")
+    scenario = fields(result.get("scenario"), ("arenas", "spawns", "equipment", "bridge"), "resolved scenario")
     if not isinstance(scenario.get("arenas"), list):
         raise ValueError("Resolved scenario needs concrete arenas")
     for arena in scenario["arenas"]:
@@ -294,6 +295,22 @@ def _resolved_condition(value, policy, opponents):
     if reward.get("mode") != "replace" or set(reward.get("weights", {})) != set(REWARD_NAMES):
         raise ValueError("Resolved rewards must explicitly replace all reward weights")
     result["rewards"] = {"mode": "replace", "weights": _rewards(reward["weights"])}
+    if "bridge" in result["scenario"]:
+        if any(result["rewards"]["weights"].values()):
+            raise ValueError("Bridge requires zero duel reward weights")
+        for action in policy["actions"]:
+            name, choices = action["name"], action["values"]
+            neutral = "neutral" if name == "movement" else 0 if name in ("yaw", "pitch", "weapon") else False
+            if neutral not in choices:
+                raise ValueError(f"Bridge stationary opponent requires a neutral {name} choice")
+        if "weapon" in policy["action_names"] and any(
+                player["loadout"]["selected"] != 0
+                for player in result["scenario"]["arenas"][0]["environment"]["players"]):
+            raise ValueError("Bridge stationary opponent requires initial weapon slot 0")
+        for opponent in opponents.values():
+            if (opponent.get("type") != "scripted" or opponent.get("controller") != "stationary_target"
+                    or opponent.get("options", {})):
+                raise ValueError("Bridge requires stationary_target opponents without options")
     for arena in result["scenario"]["arenas"]:
         if arena["environment"]["reward_weights"] != result["rewards"]["weights"]:
             raise ValueError("Resolved environment and stage rewards disagree")
@@ -359,6 +376,13 @@ def _resolved(value, base_dir):
         stages[index] = _resolved_condition(stage, result["policy"], result["opponents"])
     if "scenario" in result and result["scenario"] != stages[0]["scenario"]:
         raise ValueError("Experiment default scenario must equal its first stage")
+    conditions = [*stages, *evaluations.values(),
+                  *(suite for stage in stages for suite in stage.get("evaluations", {}).values())]
+    if any("bridge" in condition["scenario"] for condition in conditions):
+        if evaluations or any(stage.get("evaluations") for stage in stages):
+            raise ValueError("Bridge evaluation is not supported")
+        if any(condition["scenario"] != stages[0]["scenario"] for condition in conditions):
+            raise ValueError("Bridge conditions must use the same fixed scenario in every stage and evaluation")
     result["scenario"] = deepcopy(stages[0]["scenario"])
     return result
 
@@ -396,7 +420,7 @@ class _Authoring:
         raw, path = self.read(reference, self.base_dir)
         if path not in self.environments:
             fields(raw, ("format", "version", "minecraft", "name", "arena", "players",
-                         "spawns", "equipment", "task"), "environment")
+                         "spawns", "equipment", "task", "bridge"), "environment")
             _version(raw, "minecraft_sim_environment", 2, "environment")
             _name(raw.get("name"), "Environment name")
             arena = self.arena(raw.get("arena"), path.parent)
@@ -414,7 +438,7 @@ class _Authoring:
             task = _task(raw.get("task", {}))
             concrete.update(max_ticks=task["max_ticks"], reward_weights=task["rewards"])
             scenario = {"arenas": [{"environment": _concrete(concrete), "weight": 1}]}
-            for component in ("spawns", "equipment"):
+            for component in ("spawns", "equipment", "bridge"):
                 if component in raw:
                     scenario[component] = deepcopy(raw[component])
             self.environments[path] = {
@@ -432,6 +456,8 @@ class _Authoring:
         else:
             result = {key: deepcopy(base[key]) for key in RESOLVED_CONDITION_FIELDS if key in base}
         scenario = result["scenario"]
+        if "bridge" in scenario and any(key in value for key in ("spawns", "equipment", "task_override")):
+            raise ValueError("Bridge does not support sampling or task overrides")
         for component in ("spawns", "equipment"):
             if component in value:
                 if value[component] is None:

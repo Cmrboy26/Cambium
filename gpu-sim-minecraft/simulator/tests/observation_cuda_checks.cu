@@ -9,6 +9,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -280,22 +281,37 @@ bool checkCompositeWorldConsumers() {
 
 bool checkStaticTerrainSharing() {
     using namespace minecraft_sim;
-    std::array<Block, 8> base{};
-    std::array<BlockWorldView, 2> blocks{{{base.data(), 4, 2, 1}, {base.data(), 4, 2, 1}}};
-    std::array<PlayerState, 4> players{};
-    std::array<Controls, 4> queued{}, held{};
-    std::array<WorldState, 2> worlds{};
+    constexpr int environments = 5;
+    std::array<Block, 8> base{Block::solid, Block::air, Block::solid, Block::air,
+                              Block::air, Block::solid, Block::air, Block::solid};
+    std::array<Block, 4> other{Block::air, Block::solid, Block::solid, Block::air};
+    std::array<BlockWorldView, environments> blocks{{
+        {base.data(), 4, 2, 1}, {base.data(), 4, 1, 1}, {base.data(), 2, 2, 1},
+        {base.data(), 2, 4, 1}, {other.data(), 4, 1, 1}}};
+    std::array<PlayerState, environments * 2> players{};
+    std::array<Controls, environments * 2> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
     const auto sine = makeSineTable();
-    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), 2, 2,
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
                    blocks.data(), {sine.data()}, nullptr};
+    const std::size_t budget = 3 * (base.size() + 4 + other.size()) * sizeof(Block);
     bool budget_rejected = false;
-    try { CudaBatch too_large(host, false, 23); } catch (const std::invalid_argument&) { budget_rejected = true; }
+    try { CudaBatch too_large(host, false, budget - 1); } catch (const std::invalid_argument&) { budget_rejected = true; }
     if (!budget_rejected) return false;
-    CudaBatch device(host, false, 24);
-    std::array<BlockWorldView, 2> uploaded{};
-    return cudaMemcpy(uploaded.data(), device.deviceView().block_worlds, sizeof(uploaded),
-                      cudaMemcpyDeviceToHost) == cudaSuccess
-        && uploaded[0].cells == uploaded[1].cells && uploaded[0].cells != nullptr;
+    CudaBatch device(host, false, budget);
+    std::array<BlockWorldView, environments> uploaded{};
+    if (cudaMemcpy(uploaded.data(), device.deviceView().block_worlds, sizeof(uploaded),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    if (!uploaded[0].cells || uploaded[0].cells != uploaded[3].cells
+        || uploaded[1].cells != uploaded[2].cells || uploaded[0].cells == uploaded[1].cells
+        || uploaded[4].cells == uploaded[0].cells || uploaded[4].cells == uploaded[1].cells) return false;
+    std::array<Block, 8> copied_base{};
+    std::array<Block, 4> copied_small{}, copied_other{};
+    return cudaMemcpy(copied_base.data(), uploaded[0].cells, sizeof(copied_base), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(copied_small.data(), uploaded[1].cells, sizeof(copied_small), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(copied_other.data(), uploaded[4].cells, sizeof(copied_other), cudaMemcpyDeviceToHost) == cudaSuccess
+        && copied_base == base && std::equal(copied_small.begin(), copied_small.end(), base.begin())
+        && copied_other == other;
 }
 
 bool checkFixedTerrainReset() {

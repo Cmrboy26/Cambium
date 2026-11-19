@@ -1,0 +1,100 @@
+"""Validation for the authored static, host-staged Bridge subset."""
+
+import math
+import struct
+
+
+FLOAT_MAX = 3.4028234663852886e38
+PLAYER_HALF_WIDTH = struct.unpack("f", struct.pack("f", 0.6))[0] / 2.0
+PLAYER_HEIGHT = struct.unpack("f", struct.pack("f", 1.8))[0]
+
+
+def _object(value, keys, label):
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise ValueError(f"Bridge {label} requires exactly {', '.join(keys)}")
+    return value
+
+
+def _number(value, label):
+    try:
+        valid = type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError(f"Bridge {label} must be finite")
+    return value
+
+
+def _intersects(lower, upper, other_lower, other_upper):
+    return all(a < d and c < b for a, b, c, d in zip(lower, upper, other_lower, other_upper))
+
+
+def _player_bounds(position):
+    return ([position[0] - PLAYER_HALF_WIDTH, position[1], position[2] - PLAYER_HALF_WIDTH],
+            [position[0] + PLAYER_HALF_WIDTH, position[1] + PLAYER_HEIGHT, position[2] + PLAYER_HALF_WIDTH])
+
+
+def _solid(scene, cell):
+    for fill in reversed(scene["blocks"]):
+        if all(lower <= coordinate <= upper for lower, coordinate, upper in
+               zip(fill["from"], cell, fill["to"])):
+            return fill["block"] != "minecraft:air"
+    return False
+
+
+def validate_bridge(configuration, scene):
+    bridge = _object(configuration, ("mode", "goals", "void_y", "match", "task_rewards"), "configuration")
+    mode = _object(bridge["mode"], ("name", "version"), "mode")
+    if mode["name"] != "bridge" or type(mode["version"]) is not int or mode["version"] != 1:
+        raise ValueError("Unsupported Bridge mode")
+    void_y = _number(bridge["void_y"], "void_y")
+    origin, size = scene["bounds"]["min"], scene["bounds"]["size"]
+    goals = bridge["goals"]
+    if not isinstance(goals, list) or len(goals) != 2:
+        raise ValueError("Bridge requires two goals")
+    for goal in goals:
+        _object(goal, ("min", "max"), "goal")
+        for key in ("min", "max"):
+            if not isinstance(goal[key], list) or len(goal[key]) != 3:
+                raise ValueError("Bridge goal coordinates require three values")
+            for coordinate in goal[key]:
+                _number(coordinate, "goal coordinate")
+        if any(lower >= upper or lower < start or upper > start + extent
+               for lower, upper, start, extent in zip(goal["min"], goal["max"], origin, size)):
+            raise ValueError("Bridge goal must be nonempty and inside arena bounds")
+        if goal["min"][1] < void_y:
+            raise ValueError("Bridge goal must be above the void")
+        for x_coord in range(math.floor(goal["min"][0]), math.ceil(goal["max"][0])):
+            for y_coord in range(math.floor(goal["min"][1]), math.ceil(goal["max"][1])):
+                for z_coord in range(math.floor(goal["min"][2]), math.ceil(goal["max"][2])):
+                    if _solid(scene, (x_coord, y_coord, z_coord)):
+                        raise ValueError("Bridge goals must be clear of solid blocks")
+    if _intersects(goals[0]["min"], goals[0]["max"], goals[1]["min"], goals[1]["max"]):
+        raise ValueError("Bridge goals must not overlap")
+    match = _object(bridge["match"], ("goals_to_win", "max_ticks", "cage_ticks",
+                                     "persist_blocks_on_goal", "arrow_refill_ticks"), "match")
+    for key in ("goals_to_win", "max_ticks", "cage_ticks", "arrow_refill_ticks"):
+        minimum = 1 if key in ("goals_to_win", "max_ticks") else 0
+        if type(match[key]) is not int or not minimum <= match[key] <= 1000000:
+            raise ValueError(f"Bridge {key} must be an integer in {minimum}..1000000")
+    if type(match["persist_blocks_on_goal"]) is not bool:
+        raise ValueError("Bridge persist_blocks_on_goal must be boolean")
+    rewards = _object(bridge["task_rewards"], ("score", "win", "loss"), "task_rewards")
+    converted = {}
+    for key, value in rewards.items():
+        if abs(_number(value, f"reward {key}")) > FLOAT_MAX:
+            raise ValueError("Bridge rewards must fit float32")
+        converted[key] = struct.unpack("f", struct.pack("f", value))[0]
+    if any(abs(converted["score"] + converted[key]) > FLOAT_MAX for key in ("win", "loss")):
+        raise ValueError("Combined Bridge rewards must fit float32")
+    for player in scene["players"]:
+        position = player["position"]
+        lower, upper = _player_bounds(position)
+        if (position[1] < void_y or upper[1] > origin[1] + size[1]
+                or not player["on_ground"] or not _solid(scene, (math.floor(position[0]),
+                    math.floor(position[1] - 1e-5), math.floor(position[2])))):
+            raise ValueError("Bridge spawns must be supported, inside bounds and above the void")
+        if any(_intersects(lower, upper, goal["min"], goal["max"]) for goal in goals):
+            raise ValueError("Bridge spawns must be outside both goals")
+        if match["arrow_refill_ticks"] and "minecraft:bow" not in player["loadout"]["weapons"]:
+            raise ValueError("Bridge arrow refill requires a bow for both players")

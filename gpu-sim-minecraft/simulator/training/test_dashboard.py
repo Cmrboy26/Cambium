@@ -1091,6 +1091,12 @@ assert.equal(document.getElementById('window-size').disabled,true);
 assert.equal(document.getElementById('window-start').disabled,true);
 assert.equal(document.getElementById('window-stage').disabled,true);
 assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/);
+vm.runInContext(`chartAxis='update'; smoothing=1; windowMode='all'; records=[
+    {update:1,terminated_duels:4,timeouts:2}, {update:2,terminated_matches:7,timeouts:1},
+    {update:3,terminated_matches:3,terminated_duels:99,timeouts:0}, {update:4,timeouts:1}
+]; redrawCharts();`,context);
+assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[0].data.map(point=>point.y)"),[4,7,3,null]);
+assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[1].data.map(point=>point.y)"),[2,1,0,1]);
 """, str(script), json.dumps(CATALOG)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1106,6 +1112,24 @@ assert.match(document.getElementById('window-info').textContent,/0 of 0 updates/
         opponent = result["metrics"][0]["training_opponents"]["<past>"]
         self.assertEqual(opponent["training_win_rate"], .5)
         self.assertNotIn("ignored", opponent)
+        self.assertIn("Skipped 1", result["warnings"][0])
+
+    def test_match_counts_are_validated_and_not_recovered_as_duels(self):
+        config = {"metadata": {"learner": "opponent_pool"}, "experiment": {"stages": [
+            {"name": "combat", "rewards": {"weights": {"won_duel": 20, "death": -20}}}]}}
+        (self.run_dir / "config.json").write_text(json.dumps(config))
+        row = {"update": 1, "stage_index": 0, "stage": "combat", "terminated_matches": 8,
+             "terminated_duels": 8, "timeouts": 2, "bridge_goals_for": 5, "bridge_wins": 3,
+             "reward_types": {"won_duel": 120, "death": -40}}
+        invalid = {**row, "update": 2, "terminated_matches": -1}
+        self.metrics.write_text(json.dumps(row) + "\n" + json.dumps(invalid) + "\n")
+        result = self.store.read(self.store.list_runs()[0]["id"])
+        self.assertEqual(result["metrics"][0]["terminated_matches"], 8)
+        self.assertEqual(result["metrics"][0]["bridge_goals_for"], 5)
+        self.assertEqual(result["metrics"][0]["bridge_wins"], 3)
+        self.assertIn("bridge_goals_for", result["metric_catalog"])
+        self.assertNotIn("training_rollout", result["metrics"][0])
+        self.assertEqual(len(result["metrics"]), 1)
         self.assertIn("Skipped 1", result["warnings"][0])
 
     def test_historical_rollout_recovery_is_conservative_and_read_only(self):

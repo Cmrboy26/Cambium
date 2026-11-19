@@ -27,6 +27,10 @@ LOCAL_ORDER = tuple(key for key in ORDER if key not in (*RESOURCE_FIELDS, "DEPEN
 OPTIONAL_TEXT_FIELDS = ("RESUME", "INITIALIZE", "START_STAGE")
 
 
+def replay_default(plan):
+    return "0" if any(stage["scenario"].get("bridge") is not None for stage in plan["stages"]) else "50000"
+
+
 def parse_values(values):
     settings, sweep = {}, {}
     for key, text in values.items():
@@ -85,8 +89,11 @@ def parse_values(values):
     return settings, sweep
 
 
-def normalize(values, shared_gpu=False, max_parallel=0, local=False):
+def normalize(values, shared_gpu=False, max_parallel=0, local=False, bridge=False):
     settings, sweep = parse_values(values)
+    replay_values = sweep["values"] if sweep.get("variable") == "REPLAY" else [settings["REPLAY"]]
+    if bridge and any(int(value) != 0 for value in replay_values):
+        raise ValueError("Bridge research replay is not supported; set the replay interval to 0")
     if settings["RESUME"] and settings["INITIALIZE"]:
         raise ValueError("Choose resume or initialize from a checkpoint, not both")
     if settings["RESUME"] and settings["START_STAGE"]:
@@ -120,7 +127,7 @@ def normalize(values, shared_gpu=False, max_parallel=0, local=False):
 
 
 class SubmissionForm:
-    def __init__(self, values, shared_gpu=False, max_parallel=0, input=None, output=None, local=False):
+    def __init__(self, values, shared_gpu=False, max_parallel=0, input=None, output=None, local=False, bridge=False):
         from prompt_toolkit import Application
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, VSplit
@@ -137,7 +144,7 @@ class SubmissionForm:
         def submit():
             try:
                 result = normalize({key: field.text for key, field in self.fields.items()}, shared_gpu,
-                                   max_parallel, local=self.local)
+                                   max_parallel, local=self.local, bridge=bridge)
             except ValueError as error:
                 self.error.text = str(error)
             else:
@@ -212,7 +219,7 @@ def main(argv=None):
     values = {"JOB_NAME": options.plan.replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".json"),
               "TIME": options.time_default, "ENVS": options.envs_default, "UPDATES": str(updates),
               "ROLLOUT": options.rollout_default, "CPUS": "8", "MEMORY": "24G", "THREADS": "auto",
-              "REPLAY": "50000", "PROFILE_EVERY": options.profile_every_default,
+              "REPLAY": replay_default(plan), "PROFILE_EVERY": options.profile_every_default,
               "SAVE_EVERY": options.save_every_default, "RESUME": options.resume_default,
               "INITIALIZE": options.initialize_default, "START_STAGE": options.start_stage_default,
               "DEPENDENCY": "none",
@@ -227,7 +234,8 @@ def main(argv=None):
         else:
             from prompt_toolkit.output.defaults import create_output
             result = SubmissionForm(values, options.shared_gpu, options.max_parallel,
-                                    output=create_output(stdout=sys.stderr), local=options.local).run()
+                                    output=create_output(stdout=sys.stderr), local=options.local,
+                                    bridge=replay_default(plan) == "0").run()
     except (KeyboardInterrupt, EOFError):
         parser.exit(1, "Cancelled; nothing submitted.\n")
     except ImportError:

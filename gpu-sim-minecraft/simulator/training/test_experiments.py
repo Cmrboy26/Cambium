@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 from pathlib import Path
 import shutil
 import tempfile
@@ -13,7 +14,7 @@ from uuid import uuid4
 import numpy as np
 
 from simulator.training._test_plans import TEST_SETUPS, example_plan
-from simulator.training.compiler import LEARNER_DEFAULTS, _geometry, _learner, _opponents, _policy, _snapshots
+from simulator.training.compiler import LEARNER_DEFAULTS, _concrete, _geometry, _learner, _opponents, _policy, _snapshots
 from simulator.training.contract import FEATURES, categorical_values, fingerprint, from_legacy, project_observations, validate_contract
 from simulator.training.environment import REWARD_NAMES, ROOT, SCHEMA, SCHEMA_V2
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
@@ -263,6 +264,240 @@ class ExperimentChecks(unittest.TestCase):
 
     def resolve(self):
         return resolve_plan(self.raw, base_dir=self.plan_path.parent)
+
+    def bridge_setup(self):
+        self.environment.pop("spawns")
+        self.environment.pop("equipment")
+        self.environment["task"]["rewards"] = {}
+        self.raw["opponents"].pop("fighter")
+        self.raw["mixtures"] = {"target": self.raw["mixtures"]["target"]}
+        self.raw["stages"] = [{"name": "bridge", "opponents": "target", "advance": {"updates": 1}}]
+        self.raw["evaluations"] = {}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [-6, 1, -1], "max": [-5, 3, 1]},
+                            {"min": [5, 1, -1], "max": [6, 3, 1]}],
+                  "void_y": 0, "match": {"goals_to_win": 2, "max_ticks": 100,
+                  "cage_ticks": 0, "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        self.environment["bridge"] = bridge
+        self.write()
+        return bridge
+
+    def test_fixed_bridge_scenario_roundtrip(self):
+        bridge = self.bridge_setup()
+        resolved = self.resolve()
+        self.assertEqual(resolved["scenario"]["bridge"], bridge)
+        self.assertNotIn("bridge", resolved["scenario"]["arenas"][0]["environment"])
+        self.assertEqual(resolve_plan(resolved), resolved)
+        sampler = EpisodeSampler(resolved["scenario"], 1, 42)
+        self.assertEqual(sampler.scenario["bridge"], bridge)
+        sampler.configure(resolved["scenario"])
+        changed = deepcopy(resolved["scenario"])
+        changed["bridge"]["match"]["cage_ticks"] = 1
+        with self.assertRaisesRegex(ValueError, "new sampler"):
+            sampler.configure(changed)
+        self.environment["spawns"] = {"sample": "episode"}
+        self.write()
+        with self.assertRaisesRegex(ValueError, "without spawn or equipment sampling"):
+            self.resolve()
+
+    def test_bridge_rejects_invalid_configuration_and_spawns(self):
+        bridge = self.bridge_setup()
+        resolved = self.resolve()
+        mutations = [
+            lambda value: value.update(mode={"name": "bridge", "version": True}),
+            lambda value: value.update(kits=[]),
+            lambda value: value.update(building={}),
+            lambda value: value.pop("goals"),
+            lambda value: value.update(void_y=float("nan")),
+            lambda value: value.update(goals=[]),
+            lambda value: value["goals"][0].update(min=[-8, 1, -1]),
+            lambda value: value["goals"][0].update(max=[-6, 3, 1]),
+            lambda value: value["goals"][0].update(min=[-6, 0, -1]),
+            lambda value: value["goals"][0].update(min=[-6, -1, -1]),
+            lambda value: value["goals"].__setitem__(1, deepcopy(value["goals"][0])),
+            lambda value: value["match"].update(goals_to_win=0),
+            lambda value: value["match"].update(max_ticks=1000001),
+            lambda value: value["match"].update(cage_ticks=True),
+            lambda value: value["match"].update(persist_blocks_on_goal=1),
+            lambda value: value["match"].update(arrow_refill_ticks=1),
+            lambda value: value["task_rewards"].update(score=float("inf")),
+            lambda value: value["task_rewards"].update(score=True),
+            lambda value: value["task_rewards"].update(score=3.4028234663852886e38,
+                                                        win=3.4028234663852886e38),
+            lambda value: value["task_rewards"].pop("loss"),
+            lambda value: value["goals"][0].update(min=[-3, 1, -1], max=[-1, 3, 1]),
+        ]
+        for index, mutate in enumerate(mutations):
+            self.environment["bridge"] = deepcopy(bridge)
+            mutate(self.environment["bridge"])
+            self.write()
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                self.resolve()
+        self.environment["bridge"] = deepcopy(bridge)
+        for position in ([-2, 0.5, 0], [-2, 2, 0], [-2, 3, 0]):
+            self.environment["players"]["overrides"][0]["position"] = position
+            self.write()
+            with self.subTest(position=position), self.assertRaises(ValueError):
+                self.resolve()
+        self.assertEqual(resolve_plan(resolved), resolved)
+
+    def test_bridge_accepts_goal_boundaries_and_matching_bow_refill(self):
+        bridge = self.bridge_setup()
+        bridge["goals"] = [{"min": [-6, 1, -6], "max": [-5, 3, -5]},
+                           {"min": [-5, 1, -6], "max": [-4, 3, -5]}]
+        bridge["match"]["arrow_refill_ticks"] = 80
+        self.environment["players"]["shared"]["loadout"].update(
+            weapons=["minecraft:iron_sword", "minecraft:bow"], arrows=1)
+        self.write()
+        resolved = self.resolve()
+        self.assertEqual(resolved["scenario"]["bridge"], bridge)
+        self.assertEqual(resolve_plan(resolved), resolved)
+        self.environment["players"]["overrides"][0]["loadout"] = {
+            "weapons": ["minecraft:iron_sword"], "arrows": 0}
+        self.write()
+        with self.assertRaisesRegex(ValueError, "bow for both players"):
+            self.resolve()
+
+    def test_bridge_rejects_native_spawn_overlap_boundaries(self):
+        self.bridge_setup()
+        resolved = self.resolve()
+        resolved.pop("scenario")
+        scenario = resolved["stages"][0]["scenario"]
+        scene = scenario["arenas"][0]["environment"]
+        bridge = scenario["bridge"]
+        bridge["goals"][0] = {"min": [-3, 1, -1], "max": [-2.3, 3, 1]}
+        with self.assertRaisesRegex(ValueError, "outside both goals"):
+            resolve_plan(resolved)
+
+        bridge["goals"][0] = {"min": [-6, 1, -1], "max": [-5, 3, 1]}
+        scene["players"][0]["position"] = [-1.30000001, 1, 0]
+        scene["blocks"].append({"from": [-1, 1, 0], "to": [-1, 1, 0], "block": "minecraft:stone"})
+        with self.assertRaisesRegex(ValueError, "collision-free"):
+            resolve_plan(resolved)
+
+        scene["blocks"].pop()
+        scene["players"][0]["position"] = [-2, 1, 0]
+        scene["players"][1]["position"] = [-1.4, 1, 0]
+        with self.assertRaisesRegex(ValueError, "must not intersect"):
+            resolve_plan(resolved)
+
+    def test_bridge_goal_contact_and_one_ulp_overlap(self):
+        bridge = self.bridge_setup()
+        half_width = float(np.float32(0.6)) / 2
+        height = float(np.float32(1.8))
+        cases = [
+            ({"min": [-3, 1, -1], "max": [-2 - half_width, 3, 1]}, "max", 0, math.inf),
+            ({"min": [-3, 1, -1], "max": [-1, 3, -half_width]}, "max", 2, math.inf),
+            ({"min": [-3, 1 + height, -1], "max": [-1, 3, 1]}, "min", 1, -math.inf),
+        ]
+        for goal, face, axis, direction in cases:
+            with self.subTest(goal=goal):
+                bridge["goals"][0] = deepcopy(goal)
+                self.write()
+                resolved = self.resolve()
+                self.assertEqual(resolve_plan(resolved), resolved)
+                bridge["goals"][0][face][axis] = math.nextafter(goal[face][axis], direction)
+                self.write()
+                with self.assertRaisesRegex(ValueError, "outside both goals"):
+                    self.resolve()
+                resolved.pop("scenario")
+                resolved["stages"][0]["scenario"]["bridge"]["goals"][0] = deepcopy(bridge["goals"][0])
+                with self.assertRaisesRegex(ValueError, "outside both goals"):
+                    resolve_plan(resolved)
+
+    def test_spawn_collision_and_separation_at_native_boundaries(self):
+        self.bridge_setup()
+        scene = self.resolve()["scenario"]["arenas"][0]["environment"]
+        half_width = float(np.float32(0.6)) / 2
+        height = float(np.float32(1.8))
+        for cell, position, axis in [([-1, 1, 0], [-1 - half_width, 1, 0], 0),
+                                     ([0, 3, 0], [0, 3 - height, 0], 1)]:
+            with self.subTest(cell=cell):
+                scene["blocks"].append({"from": cell, "to": cell, "block": "minecraft:stone"})
+                self.assertTrue(EpisodeSampler._valid_position(position, scene))
+                position[axis] = math.nextafter(position[axis], math.inf)
+                if axis == 1:
+                    position[axis] = math.nextafter(position[axis], math.inf)
+                self.assertFalse(EpisodeSampler._valid_position(position, scene))
+                scene["blocks"].pop()
+        positions = [[0, 1, 0], [2 * half_width, 1, 0]]
+        self.assertTrue(EpisodeSampler._separated(positions, 0))
+        positions[1][0] = math.nextafter(positions[1][0], -math.inf)
+        self.assertFalse(EpisodeSampler._separated(positions, 0))
+        positions = [[0, 0, 0], [0, height, 0]]
+        self.assertTrue(EpisodeSampler._separated(positions, 0))
+        positions[1][1] = math.nextafter(height, -math.inf)
+        self.assertFalse(EpisodeSampler._separated(positions, 0))
+
+    def test_legacy_concrete_scene_native_wall_boundary(self):
+        legacy = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        _concrete(legacy)
+        position = legacy["players"][1]["position"]
+        position[2] = 3 - float(np.float32(0.6)) / 2
+        _concrete(legacy)
+        position[2] = math.nextafter(position[2], math.inf)
+        with self.assertRaisesRegex(ValueError, "collision-free"):
+            _concrete(legacy)
+
+    def test_bridge_rejects_unused_opponent_definitions(self):
+        self.bridge_setup()
+        resolved = self.resolve()
+        checkpoint = self.directory / "unused.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        for opponent in ({"type": "scripted", "controller": "custom_controller"},
+                         {"type": "scripted", "controller": "stationary_target", "options": {"custom": True}},
+                         {"type": "self_play"},
+                         {"type": "frozen_self_play", "every_updates": 1},
+                         {"type": "checkpoint", "path": str(checkpoint)}):
+            self.raw["opponents"]["unused"] = opponent
+            with self.subTest(opponent=opponent), self.assertRaisesRegex(ValueError, "stationary_target"):
+                self.resolve()
+            changed = deepcopy(resolved)
+            changed["opponents"]["unused"] = opponent
+            with self.subTest(resolved_opponent=opponent), self.assertRaisesRegex(ValueError, "stationary_target"):
+                resolve_plan(changed)
+
+    def test_bridge_rejects_unsupported_conditions_and_opponents(self):
+        self.bridge_setup()
+        resolved = self.resolve()
+        for key, value in (("spawns", None), ("equipment", None), ("task_override", {})):
+            self.raw["stages"][0][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "sampling or task overrides"):
+                self.resolve()
+            self.raw["stages"][0].pop(key)
+        self.environment["task"]["rewards"] = {"doing_damage": 1}
+        self.write()
+        with self.assertRaisesRegex(ValueError, "zero duel reward"):
+            self.resolve()
+        self.environment["task"]["rewards"] = {}
+        self.raw["opponents"]["fighter"] = {"type": "scripted", "controller": "basic_melee"}
+        self.raw["mixtures"]["combat"] = [{"id": "fighter", "weight": 1}]
+        self.raw["stages"][0]["opponents"] = "combat"
+        self.write()
+        with self.assertRaisesRegex(ValueError, "stationary_target"):
+            self.resolve()
+        self.raw["stages"][0]["opponents"] = "target"
+        self.raw["opponents"].pop("fighter")
+        self.raw["mixtures"].pop("combat")
+        self.policy["actions"][0]["values"].remove("neutral")
+        self.write()
+        with self.assertRaisesRegex(ValueError, "neutral movement"):
+            self.resolve()
+        evaluation = deepcopy(resolved["stages"][0])
+        evaluation.update(every_updates=1, episodes=1, seed=1)
+        evaluation.pop("name")
+        evaluation.pop("advance")
+        with_evaluation = deepcopy(resolved)
+        with_evaluation["evaluations"]["bridge"] = evaluation
+        with self.assertRaisesRegex(ValueError, "Bridge evaluation is not supported"):
+            resolve_plan(with_evaluation)
+        changed = deepcopy(resolved["stages"][0])
+        changed["name"] = "different"
+        changed["scenario"]["bridge"]["match"]["cage_ticks"] = 1
+        resolved["stages"].append(changed)
+        with self.assertRaisesRegex(ValueError, "same fixed scenario"):
+            resolve_plan(resolved)
 
     def test_large_arena_geometry_limits(self):
         self.arena["bounds"]["size"] = [32, 48, 96]

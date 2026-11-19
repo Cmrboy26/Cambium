@@ -1,0 +1,29 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 2,
+  "minecraft": "26.3",
+  "name": "bridge-static-lane",
+  "arena": "../../arenas/bridge/static-lane.json",
+  "players": {
+    "shared": {
+      "loadout": {"weapons": ["minecraft:diamond_sword"], "selected": 0,
+                  "offhand": "minecraft:air", "arrows": 0}
+    },
+    "overrides": [
+      {"position": [0, 1, -8], "yaw": 0},
+      {"position": [0, 1, 8], "yaw": 180}
+    ]
+  },
+  "task": {"max_ticks": 1500, "rewards": {}},
+  "bridge": {
+    "mode": {"name": "bridge", "version": 1},
+    "goals": [
+      {"min": [-2, 1, -11], "max": [2, 3, -10]},
+      {"min": [-2, 1, 10], "max": [2, 3, 11]}
+    ],
+    "void_y": -3,
+    "match": {"goals_to_win": 3, "max_ticks": 1200, "cage_ticks": 40,
+              "persist_blocks_on_goal": true, "arrow_refill_ticks": 0},
+    "task_rewards": {"score": 1, "win": 5, "loss": -5}
+  }
+}

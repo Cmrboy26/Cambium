@@ -31,6 +31,31 @@ class SubmissionFormTests(unittest.TestCase):
                 "START_STAGE": "", "DEPENDENCY": "none",
                 **{key: str(LEARNER_DEFAULTS[name]) for key, name in LEARNER_FIELDS.items()}}
 
+    def test_bridge_replay_defaults_and_validation(self):
+        from simulator.training.submit_form import normalize, replay_default
+        duel = {"scenario": {}}
+        bridge = {"scenario": {"bridge": {}}}
+        self.assertEqual(replay_default({"stages": [duel]}), "50000")
+        self.assertEqual(replay_default({"stages": [duel, bridge]}), "0")
+        self.assertEqual(normalize(self.values(), bridge=True)[0]["REPLAY"], "0")
+        for value in ("1", "0,5", "5,0"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "Bridge.*replay"):
+                normalize({**self.values(), "REPLAY": value}, bridge=True)
+        self.assertEqual(normalize({**self.values(), "REPLAY": "5"})[0]["REPLAY"], "5")
+
+    def test_form_main_passes_resolved_replay_policy_to_form(self):
+        from simulator.training.compiler import LEARNER_DEFAULTS
+        from simulator.training.submit_form import main
+        for bridge, expected in ((False, "50000"), (True, "0")):
+            plan = {"stages": [{"advance": {"updates": 1}, "scenario": {"bridge": {}} if bridge else {}}],
+                    "learner": LEARNER_DEFAULTS}
+            with self.subTest(bridge=bridge), patch("simulator.training.submit_form.load_plan", return_value=plan), \
+                    patch("simulator.training.submit_form.SubmissionForm") as form, contextlib.redirect_stdout(io.StringIO()):
+                form.return_value.run.return_value = (self.values(), {})
+                self.assertEqual(main(["--plan", "plan.json"]), 0)
+                self.assertEqual(form.call_args.args[0]["REPLAY"], expected)
+                self.assertEqual(form.call_args.kwargs["bridge"], bridge)
+
     def test_form_validates_numeric_sweeps_and_cpu_limits(self):
         from simulator.training.submit_form import normalize
         values = self.values()
@@ -503,12 +528,31 @@ print(f"{12345 + count};test-cluster")
             "learner": {"hidden_dim": 512, "epochs": 2, "minibatch_size": 16384, "lr": 0.0003},
         }))
 
+    def make_bridge_plan(self):
+        path = self.root / "simulator/setups/environments/test.json"
+        environment = json.loads(path.read_text())
+        environment["task"]["rewards"] = {}
+        environment["bridge"] = {
+            "mode": {"name": "bridge", "version": 1},
+            "goals": [{"min": [0, 1, -2.9], "max": [1, 3, -2.2]},
+                      {"min": [0, 1, 2.2], "max": [1, 3, 2.9]}],
+            "void_y": -2,
+            "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                      "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+            "task_rewards": {"score": 2, "win": 5, "loss": -3},
+        }
+        path.write_text(json.dumps(environment))
+
     def launch(self, answers=None, dry_run=True, profile_every=None, shared_gpu=False, max_parallel=None,
-               learner=None, local=False, resume=None, initialize=None, start_stage=None, save_every=None, **settings):
+               learner=None, local=False, resume=None, initialize=None, start_stage=None, save_every=None,
+               line_mode=False, extra_arguments=(), **settings):
         environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
                        "PYTHONPATH": str(Path(__file__).resolve().parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                        "SUBMIT_TEST_LOG": str(self.log), "SUBMIT_TEST_HISTORY": str(self.history), **settings}
         arguments = ["bash", str(self.script)] + (["--dry-run"] if dry_run else [])
+        if line_mode:
+            arguments.append("--line-mode")
+        arguments.extend(extra_arguments)
         if profile_every is not None:
             arguments.extend(["--profile-every", str(profile_every)])
         if resume is not None:
@@ -661,9 +705,59 @@ print(f"{12345 + count};test-cluster")
         for expected in ("--partition=dgxh100", "--gres=gpu:h100:1", "MCSIM_CUDA_ARCHITECTURES=90",
                          "SIM_ENVS=8192", "SIM_UPDATES=2000", "SIM_ROLLOUT_STEPS=128",
                          "SIM_HIDDEN_DIM=512", "SIM_EPOCHS=2", "SIM_MINIBATCH_SIZE=16384",
-                         "SIM_LR=0.0003", "Validated 1 plan(s); 0 failed", "Dry run: nothing submitted"):
+                         "SIM_LR=0.0003", "SIM_REPLAY_EVERY=50000", "Validated 1 plan(s); 0 failed",
+                         "Dry run: nothing submitted"):
             self.assertIn(expected, result.stdout)
         self.assertFalse(self.log.exists())
+
+    def test_bridge_replay_defaults_to_zero_in_both_line_modes(self):
+        self.make_bridge_plan()
+        for local, line_mode in ((False, False), (False, True), (True, True)):
+            with self.subTest(local=local, line_mode=line_mode):
+                result = self.launch(local=local, line_mode=line_mode,
+                                     SIM_REPLAY_EVERY="99", SIM_REPLAY_EVERY_UPDATES="99")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Replay interval in completed duels (0 disables) [0]", result.stderr)
+                self.assertIn("SIM_REPLAY_EVERY=0", result.stdout)
+                self.assertNotIn("SIM_REPLAY_EVERY=99", result.stdout)
+                self.assertFalse(self.log.exists())
+
+    def test_duel_replay_interval_and_sweep_remain_available(self):
+        result = self.launch([""] * 14 + ["123", ""])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SIM_REPLAY_EVERY=123", result.stdout)
+        result = self.launch(self.sweep_answers(14, ["0", "123"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SIM_REPLAY_EVERY=0", result.stdout)
+        self.assertIn("SIM_REPLAY_EVERY=123", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_bridge_rejects_replay_before_any_submission(self):
+        self.make_bridge_plan()
+        for local, shared_gpu, values in ((False, False, ["5"]), (True, False, ["5"]),
+                                          (False, False, ["0", "5"]), (False, True, ["0", "5"])):
+            with self.subTest(local=local, shared_gpu=shared_gpu, values=values):
+                if len(values) == 1:
+                    answers = [""] * (10 if local else 14) + values + [""] * 2 + ["y"]
+                else:
+                    answers = self.sweep_answers(14, values)
+                result = self.launch(answers, dry_run=local, local=local, shared_gpu=shared_gpu, line_mode=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Bridge research replay is not supported", result.stderr)
+                self.assertNotIn("sbatch --parsable", result.stdout)
+                self.assertFalse(self.log.exists())
+                self.assertFalse((self.root / "simulator/training/sweeps").exists())
+
+    def test_explicit_replay_flags_remain_unsupported(self):
+        for bridge in (False, True):
+            if bridge:
+                self.make_bridge_plan()
+            for flag in ("--replay-every", "--replay-every-updates"):
+                with self.subTest(bridge=bridge, flag=flag):
+                    result = self.launch(extra_arguments=(flag, "1"), dry_run=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Unknown option: " + flag, result.stderr)
+                    self.assertFalse(self.log.exists())
 
     def test_stage_start_initialization_and_checkpoint_cadence_reach_dry_run(self):
         checkpoint = self.root / "prior-run" / "latest.pt"

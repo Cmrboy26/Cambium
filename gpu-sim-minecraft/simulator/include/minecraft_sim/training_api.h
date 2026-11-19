@@ -22,6 +22,11 @@ void mcsim_destroy(void* handle);
 int mcsim_configure_bridge(void* handle, const char* json_utf8);
 const char* mcsim_bridge_state(void* handle);
 const char* mcsim_bridge_kits(void* handle, int player);
+/* Host-staged Bridge batches only. Read next-reset counters, or restore them
+   and immediately reset every world. Buffers contain exactly worlds entries;
+   UINT64_MAX is invalid for restore because the reset increments each value. */
+int mcsim_bridge_reset_episodes(void* handle, uint64_t* episodes, size_t worlds);
+int mcsim_set_bridge_reset_episodes(void* handle, const uint64_t* episodes, size_t worlds);
 int mcsim_observe(void* handle, float* observations);
 /* Blocking diagnostic: raw 22-feature rows [worlds, 2, 22] in caller-owned
    CUDA device memory on the batch device. The caller must allocate count floats.

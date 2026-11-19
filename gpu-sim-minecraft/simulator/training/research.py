@@ -26,9 +26,18 @@ from simulator.training.ppo import compute_gae, metadata, optimize
 from simulator.training.timing import CollectionTimer, OptimizationTimer
 
 
+BRIDGE_REWARD_SEMANTICS = "bridge_score_win_loss_v1"
+
+
 def scene_key(scenario):
     return [{"weight": arena.get("weight", 1), **{name: arena["environment"].get(name)
             for name in ("bounds", "blocks", "rules")}} for arena in scenario["arenas"]]
+
+
+def requires_new_worlds(current, next_scenario):
+    if scene_key(current) != scene_key(next_scenario):
+        return True
+    return (current.get("bridge") is not None or next_scenario.get("bridge") is not None) and current != next_scenario
 
 
 def deployment_summary(plan, stage, stage_index):
@@ -37,11 +46,21 @@ def deployment_summary(plan, stage, stage_index):
             "controllers": "shared_learner", "sampling": "fixed_checkpoint_episode"}
 
 
+def research_metadata(environment, hidden_dim, learner):
+    result = metadata(environment, hidden_dim, learner)
+    if environment.bridge is not None:
+        result.pop("reward_weights", None)
+        result["reward_semantics"] = BRIDGE_REWARD_SEMANTICS
+    return result
+
+
 def resident_unsupported(plan, device):
     if device != "cuda":
         return "CUDA resident collection requires --device cuda"
     for stage in plan["stages"]:
         scenario = stage["scenario"]
+        if scenario.get("bridge") is not None:
+            return f"Stage {stage['name']!r} uses Bridge, which requires host collection"
         if len(scenario["arenas"]) != 1:
             return f"Stage {stage['name']!r} has multiple arenas"
         for component in ("spawns", "equipment"):
@@ -144,7 +163,12 @@ class SampledWorlds:
         self.observation_dim = contract["observation_dim"]
         self.action_names = tuple(contract["action_names"])
         self.action_count = len(self.action_names)
-        self.sampler = EpisodeSampler(scenario, count, seed)
+        bridge = scenario.get("bridge")
+        self.bridge_scenario = deepcopy(scenario) if bridge is not None else None
+        if bridge is not None and any(scenario.get(name) for name in ("spawns", "equipment")):
+            raise ValueError("Bridge research requires fixed spawns and equipment")
+        sampler_scenario = {name: value for name, value in scenario.items() if name != "bridge"}
+        self.sampler = EpisodeSampler(sampler_scenario, count, seed)
         if state is not None:
             self.sampler.load_state_dict(state)
         self.groups = []
@@ -158,8 +182,9 @@ class SampledWorlds:
                 path = directory / f"arena-{arena_id}.json"
                 path.write_text(json.dumps(definition, allow_nan=False), encoding="utf-8")
                 environment = self.resources.enter_context(Environment(len(ids), device, path, library,
-                    max_ticks, (seed + arena_id) % 2**63, contract=contract))
-                environment.reset_players([initial[int(world)] for world in ids], np.ones(len(ids), dtype=bool))
+                    max_ticks, (seed + arena_id) % 2**63, contract=contract, bridge=bridge))
+                if bridge is None:
+                    environment.reset_players([initial[int(world)] for world in ids], np.ones(len(ids), dtype=bool))
                 self.groups.append((ids, environment))
             self.max_ticks = max(environment.max_ticks for _, environment in self.groups)
             self.build_info = self.groups[0][1].build_info
@@ -168,8 +193,18 @@ class SampledWorlds:
             raise
 
     def configure(self, stage):
+        scenario = stage["scenario"]
+        if self.bridge_scenario is not None:
+            if scenario != self.bridge_scenario:
+                raise ValueError("Changing a Bridge scenario requires a new environment batch")
+            if any(stage.get("rewards", {}).get("weights", {}).values()):
+                raise ValueError("Bridge research does not support duel reward weights")
+            self.episode_metrics.reset()
+            return
+        if scenario.get("bridge") is not None:
+            raise ValueError("Changing to Bridge requires a new environment batch")
         self.episode_metrics.reset()
-        self.sampler.configure(stage["scenario"])
+        self.sampler.configure(scenario)
         for ids, environment in self.groups:
             arena_id = self.sampler.arenas[int(ids[0])]
             definition = stage["scenario"]["arenas"][arena_id]["environment"]
@@ -193,11 +228,32 @@ class SampledWorlds:
             result[ids] = environment.observe()
         return result
 
+    def bridge_reset_episodes(self):
+        if self.bridge_scenario is None:
+            raise ValueError("Bridge reset episodes require Bridge worlds")
+        result = np.empty(self.count, dtype=np.uint64)
+        for ids, environment in self.groups:
+            result[ids] = environment.bridge_reset_episodes()
+        return result.tolist()
+
+    def restore_bridge_reset_episodes(self, episodes):
+        if (self.bridge_scenario is None or not isinstance(episodes, list) or len(episodes) != self.count
+                or any(type(value) is not int or not 0 <= value < 2**64 - 1 for value in episodes)):
+            raise ValueError("Invalid Bridge checkpoint reset episodes")
+        for ids, environment in self.groups:
+            environment.restore_bridge_reset_episodes([episodes[int(world)] for world in ids])
+
     def reset(self, mask=None, timer=None):
         timer = timer or CollectionTimer(self.device)
         mask = np.ones(self.count, dtype=bool) if mask is None else np.asarray(mask)
         if mask.shape != (self.count,) or mask.dtype.kind != "b":
             raise ValueError("Sampled reset mask must contain one boolean per world")
+        if self.bridge_scenario is not None:
+            observations = np.empty((self.count, 2, self.observation_dim), dtype=np.float32)
+            for ids, environment in self.groups:
+                selected = mask[ids]
+                observations[ids] = environment.reset(selected) if selected.any() else environment.observe()
+            return observations
         with timer.phase("environment_reset.sample"):
             definitions = {int(world): self.sampler.players(int(world), timer.counts if timer.enabled else None)
                            for world in np.flatnonzero(mask)}
@@ -224,6 +280,8 @@ class SampledWorlds:
         return observations, rewards, terminated, truncated
 
     def step_reward_totals(self, learner_slots):
+        if any(environment.bridge is not None for _, environment in self.groups):
+            return None
         totals = dict.fromkeys(REWARD_NAMES, 0.0)
         for ids, environment in self.groups:
             selected = np.zeros((len(ids), 2), dtype=bool)
@@ -241,12 +299,47 @@ class SampledWorlds:
             result[ids] = environment.step_behavior_events()
         return result
 
+    def bridge_goal_counts(self, learner_slots):
+        goals_for = goals_against = 0
+        for ids, environment in self.groups:
+            for local, state in enumerate(environment.bridge_state()):
+                player = int(learner_slots[ids[local]])
+                goals_for += int(state["scored"][player])
+                goals_against += int(state["scored"][1 - player])
+        return goals_for, goals_against
+
     def losses(self, mask):
         result = np.zeros((self.count, 2), dtype=bool)
         for ids, environment in self.groups:
             if mask[ids].any():
                 result[ids] = environment.losses(mask[ids])
         return result
+
+    def outcomes(self, done, terminated, learner_slots):
+        if self.bridge_scenario is None:
+            losses = self.losses(done)
+            return ["timeout" if not terminated[world] else
+                    "draw" if losses[world, 0] == losses[world, 1] else
+                    "loss" if losses[world, learner_slots[world]] else "win"
+                    for world in np.flatnonzero(done)]
+        results = {}
+        for ids, environment in self.groups:
+            if not done[ids].any():
+                continue
+            states = environment.bridge_state()
+            for local, world in enumerate(ids):
+                if not done[world]:
+                    continue
+                outcome = states[local]["outcome"]
+                if not terminated[world]:
+                    results[int(world)] = "timeout"
+                elif outcome == "draw":
+                    results[int(world)] = "draw"
+                elif outcome in ("team0", "team1"):
+                    results[int(world)] = "win" if outcome == f"team{learner_slots[world]}" else "loss"
+                else:
+                    raise RuntimeError(f"Invalid terminated Bridge outcome: {outcome!r}")
+        return [results[int(world)] for world in np.flatnonzero(done)]
 
     def episode(self, world):
         for ids, environment in self.groups:
@@ -576,6 +669,9 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
         reward_types = worlds.step_reward_totals(pool.learner_slots)
         if reward_types is not None:
             reward_types = dict.fromkeys(reward_types, 0.0)
+        bridge_events = (dict.fromkeys(("bridge_goals_for", "bridge_goals_against", "bridge_wins",
+                                       "bridge_losses", "bridge_draws"), 0)
+                         if worlds.bridge_scenario is not None else None)
         endings = timeouts = 0
         ids = np.arange(worlds.count)
     for step in range(steps):
@@ -612,14 +708,19 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
                                 ("rewards", rewards[ids, slots]), ("terminated", terminated), ("truncated", truncated)):
                 rollout[name][step] = torch.as_tensor(value, device=device)
         with timer.phase("episode_bookkeeping"):
+            if bridge_events is not None:
+                goals_for, goals_against = worlds.bridge_goal_counts(slots)
+                bridge_events["bridge_goals_for"] += goals_for
+                bridge_events["bridge_goals_against"] += goals_against
             done = terminated | truncated
             endings += int(terminated.sum())
             timeouts += int(truncated.sum())
             selected = np.flatnonzero(done)
-            losses = worlds.losses(done) if len(selected) else None
-            outcomes = ["timeout" if not terminated[world] else
-                        "draw" if losses[world, 0] == losses[world, 1] else
-                        "loss" if losses[world, slots[world]] else "win" for world in selected]
+            outcomes = worlds.outcomes(done, terminated, slots) if len(selected) else []
+            if bridge_events is not None:
+                for outcome in ("win", "loss", "draw"):
+                    key = {"win": "bridge_wins", "loss": "bridge_losses", "draw": "bridge_draws"}[outcome]
+                    bridge_events[key] += outcomes.count(outcome)
             opponents = [pool.names[int(pool.assignments[world])] for world in selected]
             worlds.episode_metrics.step(rewards[ids, slots], done, outcomes, opponents)
         if done.any():
@@ -644,6 +745,8 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
             rollout["truncated"], learner["gamma"], learner["gae_lambda"])
     if reward_types is not None:
         rollout["reward_types"] = reward_types
+    if bridge_events is not None:
+        rollout["bridge_events"] = bridge_events
     rollout["episode_metrics"] = {**worlds.episode_metrics.snapshot(),
                                   "training_rollout": worlds.episode_metrics.rollout_snapshot()}
     if trace:
@@ -682,6 +785,8 @@ class BehaviorEvaluation:
 
 @torch.no_grad()
 def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
+    if suite["scenario"].get("bridge") is not None:
+        raise ValueError("Bridge research evaluation is not supported")
     count = min(suite.get("worlds", 16), suite["episodes"])
     fixed = fixed_indices(plan["policy"], suite["controls"])
     worlds = SampledWorlds(suite["scenario"], plan["policy"], count, options.device,
@@ -737,6 +842,8 @@ def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
 @torch.no_grad()
 def export_replay(model, plan, stage, options, scenario, provenance, device, rounds, update, directory,
                   opponent_pool=None):
+    if stage["scenario"].get("bridge") is not None or "experimental_bridge" in scenario:
+        raise ValueError("Bridge research replay is not supported")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"research-{rounds:09d}-{datetime.now():%Y%m%d-%H%M%S-%f}.jsonl"
@@ -827,6 +934,17 @@ def run(options, checkpoint=None):
             plan["learner"][name] = override
         setattr(options, name, plan["learner"][name])
     plan = resolve_plan(plan)
+    bridge_stages = [stage for stage in plan["stages"] if stage["scenario"].get("bridge") is not None]
+    if bridge_stages:
+        if plan["evaluations"] or any(stage.get("evaluations") for stage in plan["stages"]):
+            raise ValueError("Bridge research evaluation is not supported")
+        if options.replay_every or getattr(options, "replay_every_updates", 0):
+            raise ValueError("Bridge research replay is not supported")
+        for bridge_stage in bridge_stages:
+            for entry in bridge_stage["opponents"]:
+                opponent = plan["opponents"][entry["id"]]
+                if opponent.get("type") != "scripted" or opponent.get("controller") != "stationary_target":
+                    raise ValueError("Bridge research requires a stationary_target opponent")
     saved = {} if checkpoint is None else checkpoint.get("research", {})
     requested_backend = getattr(options, "rollout_backend", "host")
     reason = resident_unsupported(plan, options.device) if requested_backend != "host" else None
@@ -893,7 +1011,8 @@ def run(options, checkpoint=None):
         pool.configure(stage["opponents"], stage["controls"])
         if checkpoint is not None:
             if (checkpoint.get("format") != "minecraft_sim_ppo" or checkpoint.get("version") != 1
-                    or checkpoint["metadata"].get("reward_semantics") != REWARD_SEMANTICS
+                    or checkpoint["metadata"].get("reward_semantics") != (
+                        BRIDGE_REWARD_SEMANTICS if worlds.bridge_scenario is not None else REWARD_SEMANTICS)
                     or checkpoint["metadata"]["hidden_dim"] != options.hidden_dim
                     or saved.get("rollout_steps") != options.rollout_steps
                     or saved.get("max_ticks_override") != options.max_ticks):
@@ -931,9 +1050,13 @@ def run(options, checkpoint=None):
                 resident.pool.reset(torch.ones(options.envs, dtype=torch.bool, device=resident.device))
             observations = resident.observations
         else:
+            if checkpoint is not None and worlds.bridge_scenario is not None:
+                if "bridge_episodes" not in saved:
+                    raise ValueError("Bridge checkpoint is missing reset episode counters")
+                worlds.restore_bridge_reset_episodes(saved["bridge_episodes"])
             observations = worlds.observe()
             pool.reset(np.ones(options.envs, dtype=bool))
-            if worlds.step_reward_totals(pool.learner_slots) is None:
+            if worlds.bridge_scenario is None and worlds.step_reward_totals(pool.learner_slots) is None:
                 print("Reward breakdown unavailable: rebuild minecraft_sim_training and restart/resume training "
                       "to record learner-only per-type rewards. Total rewards are still recorded.")
         output.mkdir(parents=True, exist_ok=True)
@@ -945,9 +1068,9 @@ def run(options, checkpoint=None):
         config["effective_rollout_backend"] = rollout_backend
         if reason is not None:
             config["rollout_fallback_reason"] = reason
-        config["dashboard_replay_requests"] = True
+        config["dashboard_replay_requests"] = not bool(bridge_stages)
         config["dashboard_analytics_requests"] = True
-        run_metadata = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
+        run_metadata = research_metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
         run_metadata.update(learner="opponent_pool", controls=stage["controls"], rollout_backend=rollout_backend,
                             experiment=deployment_summary(plan, stage, stage_index))
         (output / "config.json").write_text(json.dumps({"options": config, "metadata": run_metadata,
@@ -1051,9 +1174,13 @@ def run(options, checkpoint=None):
                     replay_request = None
                 request_round = None
                 if replay_request is not None and replay_request["status"] == "pending":
-                    request_round = requested_replay_round(previous_rounds, rounds, replay_rounds)
-                    if request_round is not None and request_round not in replay_rounds:
-                        replay_rounds.append(request_round)
+                    if worlds.bridge_scenario is not None:
+                        finish_request(output, replay_request["request_id"], "failed",
+                                       error="Bridge research replay is not supported")
+                    else:
+                        request_round = requested_replay_round(previous_rounds, rounds, replay_rounds)
+                        if request_round is not None and request_round not in replay_rounds:
+                            replay_rounds.append(request_round)
                 if replay_rounds:
                     replay_start = time.perf_counter()
                     for replay_round in replay_rounds:
@@ -1084,7 +1211,7 @@ def run(options, checkpoint=None):
                     if rule.get("at_updates") != counter and not (rule.get("on_completion") and complete):
                         continue
                     scenario = worlds.episode_scenario(0)
-                    manifest = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
+                    manifest = research_metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
                     manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario,
                                     scenario=scenario, learner="opponent_pool", controls=stage["controls"],
                                     experiment=deployment_summary(plan, stage, stage_index),
@@ -1101,13 +1228,16 @@ def run(options, checkpoint=None):
                     retained_snapshots.append(str(destination.relative_to(output)))
             iteration_seconds = time.perf_counter() - start
             statistics.update(update=update, samples=samples, stage=stage["name"], stage_index=stage_index,
-                stage_progress=progress.copy(), completed_rounds=rounds, terminated_duels=endings, timeouts=timeouts,
+                stage_progress=progress.copy(), completed_rounds=rounds, timeouts=timeouts,
                 rollout_backend=rollout_backend,
                 reward_mean=rollout["rewards"].mean().item(), reward_total=rollout["rewards"].sum(dtype=torch.float64).item(),
                 collection_seconds=collection_seconds, update_seconds=optimization_seconds,
                 evaluation_seconds=evaluation_seconds, evaluation_episodes=evaluation_episodes,
                 replay_seconds=replay_seconds, iteration_seconds=iteration_seconds,
                 evaluations=deepcopy(evaluations), player_transitions_per_second=transitions / iteration_seconds)
+            statistics["terminated_matches" if worlds.bridge_scenario is not None else "terminated_duels"] = endings
+            if "bridge_events" in rollout:
+                statistics.update(rollout["bridge_events"])
             if retained_snapshots:
                 statistics["snapshots"] = retained_snapshots
             if device.type == "cuda":
@@ -1121,7 +1251,8 @@ def run(options, checkpoint=None):
                     next_stage = plan["stages"][stage_index]
                     statistics["curriculum_boundary"] = {"reset_worlds": options.envs, "next_stage": next_stage["name"]}
                     statistics["next_stage_index"] = stage_index
-                    if resident is not None or scene_key(next_stage["scenario"]) != scene_key(stage["scenario"]):
+                    recreate = resident is not None or requires_new_worlds(stage["scenario"], next_stage["scenario"])
+                    if recreate:
                         worlds.close()
                         worlds = SampledWorlds(next_stage["scenario"], plan["policy"], options.envs, options.device,
                             options.library, options.max_ticks, plan["seed"] + stage_index)
@@ -1154,7 +1285,7 @@ def run(options, checkpoint=None):
                     print(f"Dashboard analytics request could not be completed: {error}")
             if update % options.save_every == 0 or update == base_update + options.updates or completed:
                 scenario = worlds.episode_scenario(0)
-                manifest = metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
+                manifest = research_metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
                 manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario, scenario=scenario,
                                 rollout_backend=rollout_backend,
                                 learner="opponent_pool", controls=stage["controls"],
@@ -1171,6 +1302,8 @@ def run(options, checkpoint=None):
                 if resident is not None:
                     research["resident_rng"] = resident.pool.state_dict()
                     research["resident_episodes"] = resident.environment.cuda_reset_episodes()
+                elif worlds.bridge_scenario is not None:
+                    research["bridge_episodes"] = worlds.bridge_reset_episodes()
                 temporary = output / "latest.tmp"
                 torch.save({"format": "minecraft_sim_ppo", "version": 1, "metadata": manifest,
                     "model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": config,

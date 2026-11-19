@@ -222,28 +222,25 @@ if "$LOCAL" && ! "$DRY_RUN"; then
     nvidia-smi --query-gpu=name --format=csv,noheader
 fi
 if ! DEFAULTS="$("$PYTHON" - "$PLAN" "$START_STAGE" <<'PY'
-import json
 import sys
-from simulator.training.compiler import LEARNER_DEFAULTS
+from simulator.training.plans import load_plan
+from simulator.training.submit_form import replay_default
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    plan = json.load(stream)
-if plan.get("format") != "minecraft_sim_training_plan" or plan.get("version") != 2:
-    raise SystemExit("Expected a version-2 training plan")
-stages = plan.get("stages", [])
+plan = load_plan(sys.argv[1])
+stages = plan["stages"]
 start_stage = sys.argv[2]
 start_index = next((index for index, stage in enumerate(stages) if stage.get("name") == start_stage), 0)
 budgets = [stage.get("advance", {}).get("updates") for stage in stages[start_index:]]
 updates = sum(budgets) if budgets and all(type(value) is int and value > 0 for value in budgets) else 1500
-learner = {**LEARNER_DEFAULTS, **plan.get("learner", {})}
+learner = plan["learner"]
 keys = ("hidden_dim", "epochs", "minibatch_size", "lr", "gamma", "gae_lambda", "clip_eps", "vf_coef", "ent_coef", "max_grad_norm")
-print(updates, *(learner[key] for key in keys))
+print(updates, *(learner[key] for key in keys), replay_default(plan))
 PY
 )"; then
     printf 'Could not read training plan defaults; nothing submitted.\n' >&2
     exit 1
 fi
-read -r UPDATES_DEFAULT HIDDEN_DEFAULT EPOCHS_DEFAULT MINIBATCH_DEFAULT LR_DEFAULT GAMMA GAE_LAMBDA CLIP_EPS VF_COEF ENT_COEF MAX_GRAD_NORM <<< "$DEFAULTS"
+read -r UPDATES_DEFAULT HIDDEN_DEFAULT EPOCHS_DEFAULT MINIBATCH_DEFAULT LR_DEFAULT GAMMA GAE_LAMBDA CLIP_EPS VF_COEF ENT_COEF MAX_GRAD_NORM REPLAY_DEFAULT <<< "$DEFAULTS"
 
 FORM_USED=false
 FORM_ARGS=(--plan "$PLAN" --envs-default "$ENVS_DEFAULT" --rollout-default "$ROLLOUT_DEFAULT"
@@ -303,11 +300,10 @@ then
 fi
 if [[ "$START_STAGE" != "$DEFAULT_START_STAGE" && "$UPDATES" == "$UPDATES_DEFAULT" ]]; then
     if ! UPDATED_UPDATES_DEFAULT="$("$PYTHON" - "$PLAN" "$START_STAGE" <<'PY'
-import json
 import sys
+from simulator.training.plans import load_plan
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    stages = json.load(stream)["stages"]
+stages = load_plan(sys.argv[1])["stages"]
 start_stage = sys.argv[2]
 start_index = next((index for index, stage in enumerate(stages) if stage["name"] == start_stage), 0)
 budgets = [stage.get("advance", {}).get("updates") for stage in stages[start_index:]]
@@ -342,7 +338,7 @@ prompt EPOCHS 'PPO epochs' "$EPOCHS_DEFAULT" '^[1-9][0-9]{0,3}$' true
 prompt MINIBATCH 'Minibatch size' "$MINIBATCH_DEFAULT" '^[1-9][0-9]{0,7}$' true
 prompt LR 'Learning rate' "$LR_DEFAULT" '^([0-9]*\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(\.[0-9]+)?)([eE][+-]?[0-9]+)?$' true
 prompt THREADS 'Trainer CPU threads (auto allowed)' auto '^(auto|[1-9][0-9]{0,2})$' true
-prompt REPLAY 'Replay interval in completed duels (0 disables)' 50000 '^(0|[1-9][0-9]{0,8})$' true
+prompt REPLAY 'Replay interval in completed duels (0 disables)' "$REPLAY_DEFAULT" '^(0|[1-9][0-9]{0,8})$' true
 else
 prompt TIME 'Wall-time limit (days-HH:MM:SS or HH:MM:SS)' "$TIME_DEFAULT" '^([0-9]+-)?[0-9]+:[0-5][0-9]:[0-5][0-9]$' true
 prompt ENVS 'Parallel worlds' "$ENVS_DEFAULT" '^[1-9][0-9]{0,5}$' true
@@ -370,12 +366,23 @@ if [[ "$SWEEP_VARIABLE" == CPUS ]]; then
     done
 fi
 prompt THREADS 'Trainer CPU threads' "$(( THREAD_LIMIT < 4 ? THREAD_LIMIT : 4 ))" '^[1-9][0-9]{0,2}$' true "$THREAD_LIMIT"
-prompt REPLAY 'Replay interval in completed duels (0 disables)' 50000 '^(0|[1-9][0-9]{0,8})$' true
+prompt REPLAY 'Replay interval in completed duels (0 disables)' "$REPLAY_DEFAULT" '^(0|[1-9][0-9]{0,8})$' true
 printf '\nCUDA build directory: simulator/build-rosie-cuda-%s\n' "$ARCH"
 printf 'Builds use a shared lock; each job trains from a private library copy.\n'
 printf 'For jobs submitted with the older launcher, enter their IDs to avoid overlapping an unlocked build.\n'
 prompt DEPENDENCY 'Wait for job IDs (colon-separated), or none' none '^(none|[1-9][0-9]*(:[1-9][0-9]*)*)$'
 fi
+fi
+
+if [[ "$REPLAY_DEFAULT" == 0 ]]; then
+    REPLAY_VALUES=("$REPLAY")
+    if [[ "$SWEEP_VARIABLE" == REPLAY ]]; then REPLAY_VALUES=("${SWEEP_VALUES[@]}"); fi
+    for replay_value in "${REPLAY_VALUES[@]}"; do
+        if [[ "$replay_value" != 0 ]]; then
+            printf 'Bridge research replay is not supported; set the replay interval to 0. Nothing submitted.\n' >&2
+            exit 1
+        fi
+    done
 fi
 
 if "$SHARED_GPU"; then

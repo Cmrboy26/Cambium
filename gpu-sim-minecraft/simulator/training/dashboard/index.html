@@ -166,7 +166,7 @@
                     <article class="chart"><h2>Training reward per tick <span>Latest: <strong id="stat-reward">--</strong></span></h2><div class="plot"><canvas id="reward-chart" role="img" aria-label="Mean training reward per learner tick"></canvas></div></article>
                     <article class="chart"><h2>Total reward <span>Per update</span></h2><div class="plot"><canvas id="total-reward-chart" role="img" aria-label="Total player reward by PPO update"></canvas></div></article>
                     <article class="chart reward-breakdown"><h2>Reward breakdown <span>Weighted reward contributions, not raw damage</span></h2><div class="plot"><canvas id="reward-types-chart" role="img" aria-label="Weighted reward contributions by type"></canvas><p id="reward-types-empty" class="plot-empty">No per-type reward data recorded.</p></div></article>
-                    <article class="chart reward-breakdown"><h2>Duel endings <span>Per update</span></h2><div class="plot"><canvas id="duels-chart" role="img" aria-label="Terminated duels and timeouts by PPO update"></canvas></div></article>
+                    <article class="chart reward-breakdown"><h2>Episode endings <span>Per update</span></h2><div class="plot"><canvas id="duels-chart" role="img" aria-label="Terminated episodes and external timeouts by PPO update"></canvas></div></article>
                 </div>
             </section>
             <section class="chart-group" aria-labelledby="optimization-title">
@@ -179,7 +179,7 @@
             </section>
             <section class="chart-group" aria-labelledby="runtime-title">
                 <h3 id="runtime-title">Runtime &amp; throughput</h3>
-                <dl class="runtime-summary"><div><dt>Latest transitions / second</dt><dd id="stat-throughput">--</dd></div><div><dt>Completed rounds</dt><dd id="stat-rounds">--</dd></div><div><dt>Recorded timeouts</dt><dd id="stat-timeouts">--</dd></div></dl>
+                <dl class="runtime-summary"><div><dt>Latest transitions / second</dt><dd id="stat-throughput">--</dd></div><div><dt>Completed rounds</dt><dd id="stat-rounds">--</dd></div><div><dt>Recorded external timeouts</dt><dd id="stat-timeouts">--</dd></div></dl>
                 <div class="analytics-controls">
                     <button type="button" id="analytics-request" class="analytics-request-button" aria-label="Profile the next training update" title="Profile the next training update" disabled><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i><span>Profile next update</span></button>
                     <p id="analytics-request-status" role="status">Select a supported research run to request a profile.</p>

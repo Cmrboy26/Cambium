@@ -37,7 +37,7 @@ const definitions = [
     ["loss-chart", [["value_loss", "Value", colors.amber], ["loss", "Total", colors.blue]]],
     ["entropy-chart", [["entropy", "Entropy", colors.blue]]],
     ["throughput-chart", [["player_transitions_per_second", "Transitions / second", colors.green]]],
-    ["duels-chart", [["terminated_duels", "Terminated", colors.blue], ["timeouts", "Timeouts", colors.amber]]],
+    ["duels-chart", [[row => row.terminated_matches ?? row.terminated_duels, "Terminated", colors.blue], ["timeouts", "External timeouts", colors.amber]]],
     ["duration-chart", [["collection_seconds", "Collection", colors.gray], ["update_seconds", "Optimization", colors.red],
         ["evaluation_seconds", "Evaluation", colors.amber], ["replay_seconds", "Replay", colors.green]]],
 ];

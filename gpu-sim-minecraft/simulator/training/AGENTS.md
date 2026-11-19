@@ -18,12 +18,31 @@ it is not the public training entry point. Common PPO/GAE lives in [ppo.py](ppo.
 ## Experimental Bridge Batches
 
 `Environment(..., bridge=configuration)` opts into a direct, host-staged
-Bridge experiment. It is not accepted by setup JSON, curricula, replay, the live
-adapter or the PPO research collector. CPU and CUDA batches use the shared
+Bridge experiment. The research collector also accepts the fixed, static
+[authored Bridge plan](../setups/curricula/bridge/static-lane.json). CPU and CUDA batches use the shared
 Bridge tick and own match state independently per world. CUDA transfers controls,
 player state, match state and compact ordered terrain edit events through the
 host; it does not transfer a terrain grid per tick. Resident Bridge collection
 is explicitly rejected. Normal duel batches are unchanged.
+
+Authored Bridge environments place this configuration in their `bridge` field;
+the resolved scenario retains it separately from the native scene. The supported
+research subset has one fixed arena and fixed spawns/loadouts, existing scalar
+policy features, stationary-target opponents and zero duel reward weights.
+Bridge `task_rewards` provide score, win and loss signals; match-clock endings
+are terminal, while an external limit truncates and bootstraps the final
+observation. Training logs match outcomes rather than duel reward breakdowns.
+The per-rollout `bridge_goals_for`, `bridge_goals_against`, `bridge_wins`,
+`bridge_losses` and `bridge_draws` counters are relative to the learner's seat.
+Sampling, task overrides, evaluation, replay, resident collection and live
+serving are rejected. Bridge checkpoints preserve reset counters and resume
+with fresh episodes; checkpoints missing those counters cannot be resumed.
+
+For a bounded CPU plumbing check, choose a new output directory and run:
+
+```sh
+python -B -m simulator.training.train --plan simulator/setups/curricula/bridge/static-lane.json --device cpu --rollout-backend host --envs 2 --updates 1 --rollout-steps 16 --max-ticks 16 --threads 1 --replay-every 0 --library /path/to/minecraft_sim_training.so --output /path/to/new-run
+```
 
 The configuration is a JSON-compatible object with exactly these fields:
 
@@ -107,10 +126,10 @@ Golden-apple state changes the native `PlayerState` layout. Rebuild all native
 consumers together; older raw native captures are not compatible and must be
 recaptured with the matching build.
 
-Resolved scenarios include `experimental_bridge` and are intentionally rejected
-by the ordinary scene loader until the authored capability gate exists. Duel
-reward totals, behavior metrics and replay serialization reject Bridge rather
-than reporting misleading data. The additive native calls are
+Concrete episode descriptions include `experimental_bridge` and are rejected
+by the ordinary scene loader; the research collector configures Bridge through
+the dedicated API instead. Duel reward totals, behavior metrics and replay
+serialization reject Bridge rather than reporting misleading data. The additive native calls are
 `mcsim_configure_bridge`, `mcsim_bridge_state` and `mcsim_bridge_kits`;
 `mcsim_build_info` advertises
 `bridge_host_batch_version: 3` for mutable building. Focused CPU and T4 checks

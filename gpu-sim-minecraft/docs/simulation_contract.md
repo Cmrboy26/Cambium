@@ -41,6 +41,14 @@ check their terrain payloads. This budget is not a total-memory limit. See
 [native terrain budgeting](../simulator/AGENTS.md#json-environments) for
 accounting, limitations and live-world requirements.
 
+The experimental [static Bridge environment](../simulator/setups/environments/bridge/static-lane.json)
+adds a `bridge` configuration to environment version 2. Its resolved scenario
+keeps Bridge rules outside the native concrete scene. Host-staged research
+supports one fixed arena, fixed spawns and loadouts, scalar observations and
+stationary-target opponents, with explicit score/win/loss task rewards. Sampling,
+task overrides, evaluation, replay, resident collection and live serving are
+not supported for this subset. See the [Bridge training reference](../simulator/training/AGENTS.md#experimental-bridge-batches).
+
 In the [example environment](../simulator/setups/environments/example/sword-duel.json),
 `players.shared` holds constant initialization and `players.overrides` contains
 only each actor's spawn differences. To add gear sampling, use `equipment`:

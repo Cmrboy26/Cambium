@@ -357,6 +357,46 @@ class InferenceChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "compatible"):
             Policy(self.path)
 
+    def test_live_policy_rejects_bridge_checkpoints(self):
+        self.assertTrue(Policy(self.path).info["minecraft_bridge_supported"])
+        self.saved["metadata"]["experiment"] = {"name": "bridge"}
+        torch.save(self.saved, self.path)
+        self.assertTrue(Policy(self.path).info["minecraft_bridge_supported"])
+        for field in ("scenario", "environment"):
+            with self.subTest(field=field):
+                original = self.saved["metadata"].get(field)
+                self.saved["metadata"][field] = {**self.saved["metadata"]["environment"],
+                                                  "experimental_bridge": {"mode": {"name": "bridge", "version": 1}}}
+                torch.save(self.saved, self.path)
+                with self.assertRaisesRegex(ValueError, "Bridge checkpoints.*live duel"):
+                    Policy(self.path)
+                if original is None:
+                    del self.saved["metadata"][field]
+                else:
+                    self.saved["metadata"][field] = original
+
+    def test_live_duel_rejects_bridge_reference_and_fighter(self):
+        source = Policy(self.path)
+        definition = {"format": "minecraft_sim_duel", "version": 1,
+                      "policy": source.contract, "environment": source.info["environment"],
+                      "fighters": [{"type": "checkpoint", "path": "policy.pt"},
+                                   {"type": "scripted", "controller": "stationary_target"}]}
+        path = self.path.parent / "duel.json"
+        path.write_text(json.dumps(definition))
+        DuelPolicy(path)
+        definition["fighters"][0]["sha256"] = None
+        path.write_text(json.dumps(definition))
+        DuelPolicy(path)
+        self.saved["metadata"]["scenario"] = {**self.saved["metadata"]["environment"],
+                                               "experimental_bridge": {"mode": {"name": "bridge", "version": 1}}}
+        torch.save(self.saved, self.path)
+        with self.assertRaisesRegex(ValueError, "Bridge checkpoints.*live duel"):
+            DuelPolicy(path)
+        definition["reference"] = "policy.pt"
+        path.write_text(json.dumps(definition))
+        with self.assertRaisesRegex(ValueError, "Bridge checkpoints.*live duel"):
+            DuelPolicy(path)
+
     def test_equipment_inference_contract(self):
         self.saved["metadata"]["schema"] = SCHEMA_V2
         self.saved["metadata"]["environment"]["profile"] = "unarmored_sword_axe_shield"
@@ -522,6 +562,100 @@ class InferenceChecks(unittest.TestCase):
 
 
 class TrainingChecks(unittest.TestCase):
+    def test_bridge_reset_episode_snapshot_and_restore(self):
+        path = ROOT / "simulator/tests/reset_environment.json"
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "relative.z"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "forward"]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        options = dict(environments=2, environment=path, contract=contract, seed=91, bridge=bridge)
+        with Environment(**options) as original, Environment(**options) as restored:
+            players = original.episode_scenario(0)["players"]
+            players[0]["health"] = 13
+            original.reset_players([players, None], [True, False])
+            restored.reset_players([players, None], [True, False])
+            snapshot = original.bridge_reset_episodes()
+            self.assertEqual(snapshot.dtype, np.uint64)
+            np.testing.assert_array_equal(snapshot, [3, 2])
+            expected = original.reset()
+            actual = restored.restore_bridge_reset_episodes(snapshot)
+            np.testing.assert_array_equal(actual, expected)
+            self.assertEqual(restored.episode_scenario(0)["players"], players)
+            np.testing.assert_array_equal(restored.bridge_reset_episodes(), original.bridge_reset_episodes())
+            original.step(np.zeros((2, 2, 1), dtype=np.int32))
+            restored.step(np.zeros((2, 2, 1), dtype=np.int32))
+            self.assertEqual(restored.bridge_state(), original.bridge_state())
+            before_state = restored.bridge_state()
+            before_observations = restored.observe()
+            before_counters = restored.bridge_reset_episodes()
+            invalid = ([1], [[1, 2]], [1.0, 2.0], [True, False], [-1, 2],
+                       np.array([1, np.iinfo(np.uint64).max], dtype=np.uint64), [1, 2**64])
+            for value in invalid:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    restored.restore_bridge_reset_episodes(value)
+                np.testing.assert_array_equal(restored.bridge_reset_episodes(), before_counters)
+                np.testing.assert_array_equal(restored.observe(), before_observations)
+                self.assertEqual(restored.bridge_state(), before_state)
+            for name, operation in (("mcsim_bridge_reset_episodes", restored.bridge_reset_episodes),
+                                    ("mcsim_set_bridge_reset_episodes",
+                                     lambda: restored.restore_bridge_reset_episodes(snapshot))):
+                with mock.patch.object(restored.native, name, None), self.assertRaisesRegex(RuntimeError, "Rebuild"):
+                    operation()
+            restored.restore_bridge_reset_episodes([2**63, 2**64 - 2])
+            np.testing.assert_array_equal(restored.bridge_reset_episodes(),
+                                          np.array([2**63 + 1, 2**64 - 1], dtype=np.uint64))
+        with Environment(1, environment=path, contract=contract) as duel:
+            with self.assertRaisesRegex(RuntimeError, "Bridge is not configured"):
+                duel.bridge_reset_episodes()
+            with self.assertRaisesRegex(RuntimeError, "Bridge is not configured"):
+                duel.restore_bridge_reset_episodes([1])
+
+    def test_bridge_reset_episode_seed_continuation(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        for player in scene["players"]:
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:bow"],
+                                 "selected": 1, "arrows": 1, "offhand": "minecraft:air"}
+        scene["players"][1]["position"][0] = -1.5
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "requires": ["bow"],
+                    "observations": [{"feature": name} for name in
+                                     ("arrow.present", "arrow.relative.velocity.x",
+                                      "arrow.relative.velocity.y", "arrow.relative.velocity.z")],
+                    "actions": [{"name": "weapon", "values": [0, 1]},
+                                {"name": "use_item", "values": [False, True]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-seeds.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            options = dict(environments=2, environment=path, contract=contract, seed=91, bridge=bridge)
+            with Environment(**options) as original, Environment(**options) as restored, Environment(**options) as replayed:
+                original.reset([True, False])
+                snapshot = original.bridge_reset_episodes()
+                original.reset()
+                restored.restore_bridge_reset_episodes(snapshot)
+                actions = np.zeros((2, 2, 2), dtype=np.int32)
+                actions[:, :, 0] = 1
+                actions[:, 0, 1] = 1
+                for _ in range(3):
+                    for environment in (original, restored, replayed):
+                        environment.step(actions)
+                actions[:, 0, 1] = 0
+                expected, actual, stale = [environment.step(actions)[0]
+                                           for environment in (original, restored, replayed)]
+                self.assertEqual(expected[0, 1, 0], 1)
+                np.testing.assert_array_equal(actual, expected)
+                self.assertFalse(np.array_equal(expected[0, 1, 1:], stale[0, 1, 1:]))
+
     def test_experimental_bridge_batch_and_unsupported_adapters(self):
         path = ROOT / "simulator/tests/reset_environment.json"
         contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
@@ -661,6 +795,12 @@ class TrainingChecks(unittest.TestCase):
                 self.assertTrue(environment.bridge_state()[0]["placed"][0])
                 self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
                 self.assertAlmostEqual(float(observations[1, 0, 0]), 0.05, places=6)
+                snapshot = environment.bridge_reset_episodes()
+                reset = environment.restore_bridge_reset_episodes(snapshot)
+                self.assertAlmostEqual(float(reset[0, 0, 0]), 0.05, places=6)
+                np.testing.assert_array_equal(environment.bridge_reset_episodes(), snapshot + 1)
+                observations, _, _, _ = environment.step(actions)
+                self.assertTrue(environment.bridge_state()[0]["placed"][0])
                 observations = environment.reset(np.array([False, True]))
                 self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
                 actions[0, 0] = [2, 0, 1]

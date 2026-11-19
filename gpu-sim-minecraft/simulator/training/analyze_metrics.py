@@ -25,7 +25,7 @@ def read_run(path=None, include_profiles=False):
             selected = selected.parent
         if not selected.is_dir():
             raise FileNotFoundError(f"Training run directory not found: {selected}")
-        store = RunStore(selected.parent, [selected])
+        store = RunStore(selected.parent, [selected], discover=False)
 
     runs = store.list_runs()
     if not runs:
@@ -84,9 +84,15 @@ def summarize_run(run, windows=(10, 50)):
         recent = rows[-width:]
         if not recent:
             continue
-        terminated = sum(row.get("terminated_duels", 0) for row in recent)
+        matches = sum(row["terminated_matches"] for row in recent if "terminated_matches" in row)
+        duels = sum(row["terminated_duels"] for row in recent
+                if "terminated_matches" not in row and "terminated_duels" in row)
+        has_matches = any("terminated_matches" in row for row in recent)
+        has_duels = any("terminated_duels" in row and "terminated_matches" not in row for row in recent)
+        complete_terminations = all("terminated_matches" in row or "terminated_duels" in row for row in recent)
+        complete_outcomes = complete_terminations and all("timeouts" in row for row in recent)
         timeouts = sum(row.get("timeouts", 0) for row in recent)
-        endings = terminated + timeouts
+        endings = matches + duels + timeouts
         transitions = sum(sample_deltas.get(row["update"], 0) for row in recent)
         reward_types = {}
         for row in recent:
@@ -97,22 +103,27 @@ def summarize_run(run, windows=(10, 50)):
         else:
             reward_types = {}
 
-        window_reports.append({
+        window_report = {
             "updates": len(recent),
             "first_update": recent[0]["update"],
             "last_update": recent[-1]["update"],
             "reward_mean": _average(recent, "reward_mean"),
             "positive_reward_updates": sum(row.get("reward_mean", 0) > 0 for row in recent),
-            "ended_duels": terminated,
-            "timeouts": timeouts,
-            "timeout_fraction": timeouts / endings if endings else None,
+            "timeouts": timeouts if all("timeouts" in row for row in recent) else None,
+            "timeout_fraction": timeouts / endings if complete_outcomes and endings else None,
             "average_metrics": {name: _average(recent, name) for name in METRIC_NAMES},
             "reward_per_player_transition": reward_types,
-        })
+        }
+        if has_duels:
+            window_report["ended_duels"] = duels if complete_terminations else None
+        if has_matches:
+            window_report["ended_matches"] = matches if complete_terminations else None
+        window_reports.append(window_report)
 
     config = run.get("config") or {}
     metadata = config.get("metadata") or {}
     options = config.get("options") or {}
+    training = config.get("training") or {}
     latest = rows[-1] if rows else {}
     return {
         "run": run["name"],
@@ -120,12 +131,17 @@ def summarize_run(run, windows=(10, 50)):
         "environment": (metadata.get("environment") or {}).get("name") or options.get("environment"),
         "device": options.get("device"),
         "worlds": options.get("envs"),
-        "configured_updates": options.get("updates"),
+        "configured_updates": training.get("target_update", options.get("updates")),
         "updates_recorded": len(rows),
         "first_update": rows[0]["update"] if rows else None,
         "latest_update": latest.get("update"),
         "player_transitions": latest.get("samples"),
         "completed_rounds": latest.get("completed_rounds"),
+        "round_label": ("rounds" if any("terminated_matches" not in row and "terminated_duels" not in row for row in rows)
+                else "matches" if any("terminated_matches" in row for row in rows)
+                and not any("terminated_duels" in row and "terminated_matches" not in row for row in rows)
+                else "duels" if any("terminated_duels" in row for row in rows)
+                and not any("terminated_matches" in row for row in rows) else "rounds"),
         "reward_weights": metadata.get("reward_weights"),
         "windows": window_reports,
         "warnings": run.get("warnings", []),
@@ -223,17 +239,20 @@ def format_report(report):
         f"{report['configured_updates'] or 'unknown'} | Player transitions: {report['player_transitions'] or 0:,}",
     ]
     if report["completed_rounds"] is not None:
-        lines.append(f"Completed duels: {report['completed_rounds']:,} (cumulative)")
+        lines.append(f"Completed {report['round_label']}: {report['completed_rounds']:,} (cumulative)")
 
     for window in report["windows"]:
         averages = window["average_metrics"]
         timeout_rate = window["timeout_fraction"]
         timeout_text = f"{timeout_rate:.1%}" if timeout_rate is not None else "n/a"
+        timeout_count = f"{window['timeouts']:,}" if window["timeouts"] is not None else "n/a"
+        ended = ", ".join(f"ended {label} " + (f"{window[key]:,}" if window[key] is not None else "n/a") for key, label in
+                  (("ended_duels", "duels"), ("ended_matches", "matches")) if key in window)
         lines.extend([
             f"Last {window['updates']} updates ({window['first_update']}-{window['last_update']}): "
             f"mean reward {window['reward_mean']:.5f}, positive {window['positive_reward_updates']}/"
-            f"{window['updates']}, ended duels {window['ended_duels']:,}, "
-            f"timeouts {window['timeouts']:,} ({timeout_text})",
+            f"{window['updates']}, " + (ended + ", " if ended else "") +
+            f"timeouts {timeout_count} ({timeout_text})",
             "  PPO: " + ", ".join(
                 f"{name} {averages[name]:.4g}" for name in METRIC_NAMES if averages[name] is not None),
         ])
@@ -243,6 +262,8 @@ def format_report(report):
             lines.append("  Reward / player step: " + ", ".join(
                 f"{name} {value:+.4g}" for name, value in contributions[:8]))
 
+    if any("ended_matches" in window for window in report["windows"]):
+        lines.append("Note: Timeouts are external truncations; Bridge match-clock endings count as terminated matches.")
     lines.append("Note: " + report["interpretation_note"])
     lines.extend(f"Warning: {warning}" for warning in report["warnings"])
     return "\n".join(lines)

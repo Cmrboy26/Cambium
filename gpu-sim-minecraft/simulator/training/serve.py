@@ -1,7 +1,9 @@
 """Serve a trained duel policy to the Minecraft mod over loopback HTTP."""
 
 import argparse
+import hashlib
 import hmac
+import io
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -21,6 +23,12 @@ from simulator.training.controllers import create_controller
 LIVE_SCRIPTED_CONTROLLERS = frozenset((
     "stationary_target", "basic_melee", "stationary_melee", "tactical_melee", "random_walk", "archer",
 ))
+
+
+def reject_bridge_checkpoint(manifest):
+    if any(isinstance(manifest.get(name), dict) and "experimental_bridge" in manifest[name]
+           for name in ("scenario", "environment")):
+        raise ValueError("Bridge checkpoints are not supported by the live duel adapter")
 
 
 def inference_observations(request, schema, contract_hash, players=2):
@@ -46,6 +54,7 @@ class Policy:
             raise ValueError("CUDA inference requested but unavailable")
         saved = torch.load(self.path, map_location=self.device, weights_only=True)
         manifest = saved.get("metadata", {})
+        reject_bridge_checkpoint(manifest)
         schema = next((candidate for candidate in SCHEMAS.values() if manifest.get("schema") == candidate), None)
         if schema is None:
             try:
@@ -160,6 +169,14 @@ class DuelPolicy:
                 path = Path(definition.get("path", ""))
                 definition["path"] = str(path if path.is_absolute() else self.path.parent / path)
                 definition.setdefault("deterministic", deterministic)
+                data = Path(definition["path"]).read_bytes()
+                saved = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+                if isinstance(saved, dict) and isinstance(saved.get("metadata"), dict):
+                    reject_bridge_checkpoint(saved["metadata"])
+                digest = hashlib.sha256(data).hexdigest()
+                if definition.get("sha256") is not None and definition["sha256"] != digest:
+                    raise ValueError("Checkpoint SHA256 differs from the resolved plan")
+                definition["sha256"] = digest
             controller = create_controller(definition, self.contract, 1, device, seed + index)
             self.controllers.append(controller)
             self.info["fighters"].append({"name": str(fighter.get("name", f"Fighter {index + 1}")),

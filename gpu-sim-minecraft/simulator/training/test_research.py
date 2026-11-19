@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -14,15 +15,15 @@ import torch
 from backend.fast_rl_model import ActorCritic
 from simulator.training.analyze_metrics import main as analyze_metrics
 from simulator.training._test_plans import example_plan
-from simulator.training.contract import from_legacy, resolve_players, resolve_scenario
+from simulator.training.contract import from_legacy, resolve_players, resolve_scenario, validate_contract
 from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
 from simulator.training.research import (BehaviorEvaluation, EpisodeMetrics, OpponentPool,
-                                         ResidentOpponentPool, SampledWorlds, collect, evaluate,
-                                         resident_unsupported)
+                                         ResidentOpponentPool, SampledWorlds, collect, evaluate, export_replay,
+                                         requires_new_worlds, research_metadata, resident_unsupported)
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
 from simulator.training.timing import CollectionTimer
@@ -34,6 +35,168 @@ def short_plan():
     for stage in value["stages"]:
         stage["advance"] = {"updates": 2}
     return value
+
+
+class BridgeResearchChecks(unittest.TestCase):
+    def setUp(self):
+        torch.set_num_threads(1)
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["max_ticks"] = 100
+        self.contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "relative.z"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward", "backward"]}]})
+        self.scenario = {"arenas": [{"environment": scene, "weight": 1}], "bridge": {
+            "mode": {"name": "bridge", "version": 1},
+            "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                      {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+            "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                     "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+            "task_rewards": {"score": 2, "win": 5, "loss": -3}}}
+        self.stage = {"name": "bridge", "scenario": self.scenario,
+                      "opponents": [{"id": "target", "weight": 1}], "controls": {"fixed": {}}}
+        self.definitions = {"target": {"type": "scripted", "controller": "stationary_target"}}
+        self.library = str(load_library()._name)
+
+    def worlds(self, count=1, max_ticks=100):
+        worlds = SampledWorlds(self.scenario, self.contract, count, "cpu", self.library, max_ticks, 42)
+        self.addCleanup(worlds.close)
+        worlds.configure(self.stage)
+        return worlds
+
+    def pool(self, count):
+        pool = OpponentPool(self.definitions, self.contract, count, "cpu", 42)
+        pool.configure(self.stage["opponents"], self.stage["controls"])
+        pool.reset(np.ones(count, dtype=bool))
+        return pool
+
+    def model(self):
+        model = ActorCritic(self.contract["observation_dim"], 8, action_sizes={"movement": 3})
+        with torch.no_grad():
+            model.value_head.weight.zero_()
+            model.value_head.bias.fill_(3)
+        return model
+
+    def test_scoring_outcomes_rewards_and_selective_reset(self):
+        original = deepcopy(self.scenario)
+        worlds = self.worlds(3)
+        self.assertEqual(self.scenario, original)
+        actions = np.zeros((3, 2, 1), dtype=np.int64)
+        actions[0, 0, 0] = 1
+        actions[1, 1, 0] = 2
+        rewards_sum = np.zeros((3, 2))
+        outcomes = {}
+        slots = np.zeros(3, dtype=int)
+        for _ in range(80):
+            _, rewards, terminated, truncated = worlds.step(actions)
+            rewards_sum += rewards
+            done = terminated | truncated
+            selected = np.flatnonzero(done)
+            names = worlds.outcomes(done, terminated, slots) if len(selected) else []
+            worlds.episode_metrics.step(rewards[:, 0], done, names, ["target"] * len(selected))
+            for world, outcome in zip(selected, names, strict=True):
+                outcomes[int(world)] = outcome
+            if done.any():
+                environment = worlds.groups[0][1]
+                idle_before = environment.bridge_state()[2]
+                worlds.reset(done)
+                self.assertEqual(environment.bridge_state()[2], idle_before)
+                actions[done] = 0
+            if 0 in outcomes and 1 in outcomes:
+                break
+        self.assertEqual(outcomes, {0: "win", 1: "loss"})
+        np.testing.assert_array_equal(rewards_sum[:2], [[9, -3], [-3, 9]])
+        metrics = worlds.episode_metrics.snapshot()
+        self.assertEqual(metrics["training_episodes"], 2)
+        self.assertEqual(metrics["training_win_rate"], 0.5)
+        self.assertEqual(metrics["training_loss_rate"], 0.5)
+        self.assertEqual(metrics["training_return"], 3)
+        self.assertIsNone(worlds.step_reward_totals(slots))
+        changed = deepcopy(self.stage)
+        changed["scenario"]["bridge"]["task_rewards"]["win"] = 10
+        with self.assertRaisesRegex(ValueError, "new environment batch"):
+            worlds.configure(changed)
+        changed = deepcopy(self.stage)
+        changed["rewards"] = {"weights": {"good_aim": 1}}
+        with self.assertRaisesRegex(ValueError, "duel reward"):
+            worlds.configure(changed)
+        manifest = research_metadata(worlds.groups[0][1], 8, {})
+        self.assertEqual(manifest["reward_semantics"], "bridge_score_win_loss_v1")
+        self.assertNotIn("reward_weights", manifest)
+        self.assertEqual(manifest["scenario"]["experimental_bridge"], original["bridge"])
+        self.assertEqual(self.scenario, original)
+
+    def test_stationary_opponent_collection_records_bridge_return(self):
+        worlds = self.worlds()
+        pool = self.pool(1)
+        pool.learner_slots[:] = 0
+        with patch.object(pool.controllers["target"], "act", wraps=pool.controllers["target"].act) as stationary:
+            rollout, _, _, _ = collect(self.model(), worlds, pool, worlds.observe(), 30,
+                                       torch.device("cpu"), {"movement": 1})
+        self.assertTrue(stationary.called)
+        self.assertNotIn("reward_types", rollout)
+        self.assertGreaterEqual(rollout["episode_metrics"]["training_episodes"], 1)
+        self.assertEqual(rollout["episode_metrics"]["training_win_rate"], 1)
+        self.assertEqual(rollout["episode_metrics"]["training_return"], 9)
+        self.assertGreaterEqual(rollout["bridge_events"]["bridge_goals_for"], 2)
+        self.assertEqual(rollout["bridge_events"]["bridge_goals_against"], 0)
+        self.assertGreaterEqual(rollout["bridge_events"]["bridge_wins"], 1)
+        self.assertEqual(rollout["bridge_events"]["bridge_losses"], 0)
+
+    def test_final_observation_bootstraps_cutoff_but_not_match_end(self):
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                self.scenario["bridge"]["match"]["max_ticks"] = 1 if terminal else 100
+                worlds = self.worlds(max_ticks=100 if terminal else 1)
+                pool = self.pool(1)
+                rollout, _, endings, timeouts = collect(self.model(), worlds, pool, worlds.observe(), 1,
+                                                        torch.device("cpu"), {"movement": 0})
+                self.assertEqual((endings, timeouts), (1, 0) if terminal else (0, 1))
+                self.assertEqual(rollout["next_values"].item(), 3)
+                self.assertAlmostEqual(rollout["advantages"].item(), -3 if terminal else -0.03, places=5)
+                metrics = rollout["episode_metrics"]
+                self.assertEqual(metrics["training_draw_rate" if terminal else "training_timeout_rate"], 1)
+
+    def test_unsupported_paths_are_explicit(self):
+        plan = {"stages": [self.stage], "opponents": self.definitions, "policy": self.contract}
+        self.assertIn("Bridge", resident_unsupported(plan, "cuda"))
+        with self.assertRaisesRegex(ValueError, "evaluation"):
+            evaluate(None, plan, {"scenario": self.scenario}, None, None, None)
+        with self.assertRaisesRegex(ValueError, "replay"):
+            export_replay(None, plan, self.stage, None, {}, None, None, 0, 0, ".")
+        sampled = deepcopy(self.scenario)
+        sampled["spawns"] = {"sample": "episode"}
+        with self.assertRaisesRegex(ValueError, "fixed spawns"):
+            SampledWorlds(sampled, self.contract, 1, "cpu", self.library, 100, 42)
+
+    def test_stage_reuse_respects_bridge_conditions_and_legacy_duels(self):
+        bridge = deepcopy(self.scenario)
+        self.assertFalse(requires_new_worlds(bridge, deepcopy(bridge)))
+        changed = deepcopy(bridge)
+        changed["bridge"]["task_rewards"]["score"] = 4
+        self.assertTrue(requires_new_worlds(bridge, changed))
+        duel = deepcopy(bridge)
+        duel.pop("bridge")
+        self.assertTrue(requires_new_worlds(duel, bridge))
+        self.assertTrue(requires_new_worlds(bridge, duel))
+        changed_duel = deepcopy(duel)
+        changed_duel["arenas"][0]["environment"]["players"][0]["yaw"] = 45
+        self.assertFalse(requires_new_worlds(duel, changed_duel))
+
+    def test_bridge_checkpoint_reset_counters_continue_on_resume(self):
+        original = self.worlds(2)
+        original.reset(np.array([True, False]))
+        saved = original.bridge_reset_episodes()
+        resumed = self.worlds(2)
+        resumed.restore_bridge_reset_episodes(saved)
+        np.testing.assert_array_equal(resumed.bridge_reset_episodes(), np.array(saved) + 1)
+        original.reset()
+        np.testing.assert_array_equal(resumed.observe(), original.observe())
+        np.testing.assert_array_equal(resumed.bridge_reset_episodes(), original.bridge_reset_episodes())
+        before = resumed.bridge_reset_episodes()
+        with self.assertRaisesRegex(ValueError, "reset episodes"):
+            resumed.restore_bridge_reset_episodes([1, -1])
+        self.assertEqual(resumed.bridge_reset_episodes(), before)
 
 
 class ResidentPolicyChecks(unittest.TestCase):
@@ -1130,6 +1293,11 @@ class ResearchChecks(unittest.TestCase):
             self.assertEqual(rollout["reward_types"]["good_aim"], expected)
             np.testing.assert_allclose(sum(rollout["reward_types"].values()),
                                        rollout["rewards"].sum(dtype=torch.float64).item(), atol=1e-6)
+
+    def test_bridge_does_not_request_duel_reward_breakdown(self):
+        worlds = SampledWorlds.__new__(SampledWorlds)
+        worlds.groups = [(np.array([0]), SimpleNamespace(bridge={}))]
+        self.assertIsNone(worlds.step_reward_totals(np.array([0])))
 
     def test_missing_native_breakdown_warns_without_fabricating_contributions(self):
         output = self.directory / "old-library"
