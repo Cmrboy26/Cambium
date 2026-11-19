@@ -1,6 +1,6 @@
 #pragma once
 
-#include "minecraft_sim/projectiles.hpp"
+#include "minecraft_sim/bridge_match.hpp"
 #include "minecraft_sim/terrain_budget.hpp"
 
 #include <cstddef>
@@ -31,6 +31,9 @@ public:
     BatchView deviceView() const;
     void validateDeviceBuffer(const void* device_buffer) const;
     void uploadControls(const Controls* controls, std::size_t count);
+    void configureBridge(const BridgeMatchRules& rules, const BridgeInitialPlayers* initial,
+                         const BridgeMatchState* states, std::size_t count, int external_cutoff);
+    void downloadBridge(BridgeMatchState* states, BridgeTickEvents* events, std::size_t count) const;
     void resetEnvironments(const int* ids, std::size_t count, const PlayerState* players,
                            const ProjectileWorldState* projectile_states = nullptr,
                            const app::ObservationActorMetadata* observation_metadata = nullptr);

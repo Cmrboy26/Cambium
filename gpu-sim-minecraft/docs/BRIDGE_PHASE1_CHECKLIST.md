@@ -6,15 +6,17 @@ features are foundations, not completed Bridge features.
 
 ## Next Action
 
-**Owner:** Unassigned for the next slice. **Blocked by:** None recorded.
+**Owner:** GitHub Copilot for the current terrain and lifecycle slice.
+**Blocked by:** Authored Bridge setups, resident collection and replay/live
+adapters are not implemented; in-game conformance and memory gates remain open.
 **First task:** P1-02-04.
 
-1. Connect the per-world composite terrain to every collision, ray, targeting
-  and observation path on CPU and CUDA, without full terrain transfers per tick.
-  The existing overlay remains low-level and does not expose Bridge setups.
-2. A static-arena match lifecycle may proceed independently against the
-  [versioned rules](bridge_mode_v1.md); keep unverified external rules and
-  the later setup/capability gate visible.
+1. Finish per-world terrain and building integration; the experimental host-staged
+  CUDA path mirrors compact edit events and has focused CPU/T4 fixture coverage.
+2. Implement eating, remaining building subsets, authored setup and PPO collector
+  paths; the experimental CPU/CUDA host batch is not those adapters.
+3. Measure memory against the configured cap and complete the remaining terrain,
+  resident, in-game and H100 validation gates before claiming full Bridge support.
 
 Starting points: [`BlockWorldView`](../simulator/include/minecraft_sim/geometry.hpp),
 the native [scene loader](../simulator/apps/scene.hpp), [CUDA batch](../simulator/src/cuda_backend.cu),
@@ -220,12 +222,51 @@ the composite terrain interface before parallel physics or observation work.
   process/device memory; measured-memory and Bridge gameplay gates remain open.
 - [ ] P1-02-04: Make collision, raycasting, targeting and observations read the
   same per-world composite terrain on CPU and CUDA. Preserve old static-duel
-  behavior and avoid full terrain transfers on each tick.
-- [ ] P1-02-05: Restore only selected overlays on full match reset; preserve
+  behavior and avoid full terrain transfers on each tick. **In progress:**
+  GitHub Copilot; per-world host reads and shared projectile world wiring are
+  added. The experimental host-staged CUDA batch mirrors compact ordered block
+  edit events; focused fixtures pass, but the resident Bridge path and complete
+  integration validation remain open.
+- [x] P1-02-05: Restore only selected overlays on full match reset; preserve
   placed blocks across goals by default and test the explicit alternate rule.
-- [ ] P1-02-06: Cover protected-block rejection, team identity, boundaries,
+  Evidence: the CPU/T4 validation below covers both policies and selective reset.
+- [x] P1-02-06: Cover protected-block rejection, team identity, boundaries,
   simultaneous edits, nonaligned batch sizes, world isolation and selective
-  reset with focused CPU fixtures and matching CUDA sequences.
+  reset with focused CPU fixtures and matching CUDA sequences. Evidence: the
+  CPU/T4 validation below runs shared sequences and a 137-world CUDA fixture.
+- **P1-02-05/06 evidence, 2026-11-19:** [Shared terrain fixtures](../simulator/tests/terrain_checks.hpp),
+  [match fixtures](../simulator/tests/bridge_match_checks.hpp),
+  [CUDA sequences](../simulator/tests/observation_cuda_checks.cu) and
+  [training API fixtures](../simulator/tests/training_checks.cpp) cover ordered
+  edits and resets, per-world isolation, and an actual placement and nonwinning
+  goal on the same tick with both persistence settings. The training API cases
+  check observations after goal and selected full resets. From the project root:
+
+  ```sh
+  cmake -S simulator -B simulator/build-bridge-validation-20261119-cpu -DBUILD_TESTING=ON
+  cmake --build simulator/build-bridge-validation-20261119-cpu -j 4
+  ctest --test-dir simulator/build-bridge-validation-20261119-cpu --output-on-failure
+  cmake -S simulator -B simulator/build-bridge-validation-20261119-t4 -DMCSIM_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DBUILD_TESTING=ON
+  cmake --build simulator/build-bridge-validation-20261119-t4 -j 4
+  cmake --build simulator/build-bridge-validation-20261119-t4 --target minecraft_sim_training_checks -j 4
+  ctest --test-dir simulator/build-bridge-validation-20261119-t4 --output-on-failure -R '^(shared_core_cuda_checks|training_api_cuda_checks|projectile_cuda_checks|observation_cuda_checks)$'
+  MCSIM_TEST_CPU_LIBRARY="$PWD/simulator/build-bridge-validation-20261119-cpu/minecraft_sim_training.so" MCSIM_TEST_CUDA_LIBRARY="$PWD/simulator/build-bridge-validation-20261119-t4/minecraft_sim_training.so" .venv-rosie/bin/python -B -m unittest -v simulator.training.test_cuda_observation simulator.training.test_research.ResidentOpponentChecks
+  ```
+
+  CPU CTest passed 6/6; T4 CTest passed 4/4. The Python CUDA/duel regression
+  ran 30 tests: 29 passed and the two-device check was skipped. T4 Slurm job
+  `302274` used `dh-node8`, Tesla T4 (15360 MiB), driver 610.43.02, CUDA
+  toolkit 12.9.86, and PyTorch 2.5.1+cu124 (CUDA 12.4). Both native libraries
+  report source hash `daadbc54c6578b6580697a0c520f941d5d3a815dcf6c09352841790d37798a5b`,
+  revision `5b4c02db424b` plus dirty worktree, and GNU 13.3.0; CPU used Linux
+  x86_64 on an Intel Xeon Gold 6240. Final fixture SHA-256 values, in link
+  order above: `a580a3503cb6144f904155ef8270077bd4e364a91bf35c59c52c7335cac1ad75`,
+  `0e46d055bca3d715f86fd3613ac178baf7a8a9df5c5664eea67259646db45597`,
+  `4f5f04e81b3993406d58dcd0d2f9b2fcbd46acb6435ee63d5487e9b0ddb18489`,
+  `de393de4209e523ebd5b9f2373e5dfb29125c034dfae08f575a2e728547194dc`.
+  NVCC reported `#20013-D` host/device constexpr warnings. Results are fixture
+  evidence for the experimental host-staged path, not resident Bridge, measured
+  memory, H100, live integration or real-game conformance.
 - [ ] P1-02-07: **Gate:** CPU and CUDA observe identical intended terrain and
   collision/ray results after edits and resets; static duel regression passes;
   recorded memory use respects the configured cap.
@@ -238,19 +279,45 @@ before building; the complete milestone also requires P1-02 persistence.
 - [ ] P1-03-00: Complete this milestone only after P1-03-01 through P1-03-07.
 - [ ] P1-03-01: Add per-world team scores, match clock, goal/cage phase and
   per-player respawn/kit state in shared CPU/CUDA-compatible ownership.
+  **In progress:** GitHub Copilot; static CPU/CUDA host batches own match state;
+  kit counts and refill state are written, but resident integration and validation remain open.
 - [ ] P1-03-02: Implement cages and their opening, goal detection and scoring,
   configurable first-to-N result, time cap and specified simultaneous/tie
-  behavior. Emit explicit score and match outcome events.
+  behavior. Emit explicit score and match outcome events. **In progress:**
+  GitHub Copilot; scoring, outcome and cage-enforced host-batch ticks are
+  written, but authored setup integration and validation remain open.
 - [ ] P1-03-03: Implement void/combat death and player-only respawn/refill
   without ending the match; clear the affected player's relevant state and
   preserve the other player's state according to the specification.
+  **In progress:** GitHub Copilot; internal player/projectile reset helpers are
+  wired to the host-batch tick with kit restoration; resident integration and validation remain open.
 - [ ] P1-03-04: Implement goal/round reset of both players and their kits while
   preserving scores, match clock and terrain as configured; implement a
   separate full match reset that restores the selected world's full state.
+  **In progress:** GitHub Copilot; internal player, projectile, RNG and terrain
+  reset helpers and kit restoration are wired to host batches; resident integration remains open.
+- **Partially validated slice, 2026-11-19:** Source baseline `5b4c02d` plus worktree
+  changes on Linux x86_64. The internal [match tick](../simulator/include/minecraft_sim/bridge_match.hpp)
+  follows the [Bridge mode proposal](bridge_mode_v1.md). Shared
+  [terrain](../simulator/tests/terrain_checks.hpp) and
+  [match](../simulator/tests/bridge_match_checks.hpp) fixtures cover edits,
+  reset policies, score/timeout ordering, lifecycle isolation and a short match.
+  The P1-02-05/06 evidence above records focused CPU/T4 runs; these do not
+  establish complete lifecycle coverage, in-game conformance or playable Bridge.
+- **Partially validated adapter slice, 2026-11-19:** The experimental direct
+  [training batch](../simulator/apps/training.cpp) and
+  [Python environment](../simulator/training/environment.py) expose explicit
+  static-arena Bridge configuration, score/outcome rewards, match events and
+  CPU/CUDA host-staged ticking. Focused native and Python fixtures passed; see
+  P1-02-05/06 above. Mutable host-staged terrain was added later; the
+  authored compiler, research collector, resident path, replay and live
+  controller remain unsupported.
 - [ ] P1-03-05: Connect match outcomes and minimal score/win/loss task events
   to the training API and metrics. Preserve final observations and the specified
   termination/truncation semantics; a death or nonwinning goal is not a match
-  terminal. Do not silently substitute duel rewards or endings.
+  terminal. Do not silently substitute duel rewards or endings. **In progress:**
+  GitHub Copilot; the direct `Environment` adapter exposes configured match
+  rewards and events, but research collection and validation remain open.
 - [ ] P1-03-06: Add independently specified cases for both sides, cage timing,
   player death, void, goal, simultaneous events, time-cap ties, selective reset
   and persistence, including shared CPU/CUDA state and result comparisons.
@@ -266,20 +333,45 @@ existing movement, combat and ordinary-bow behavior where applicable.
 - [ ] P1-04-00: Complete this milestone only after P1-04-01 through P1-04-08.
 - [ ] P1-04-01: Implement 26.3-derived eye-based full-cube face targeting,
   range, occlusion and boundary/tie behavior, with explicit entity/block action
-  arbitration and independently calculated expected hits.
+  arbitration and independently calculated expected hits. **In progress:**
+  GitHub Copilot; shared targeting and expected-hit fixtures are written;
+  validation and unsupported item-specific reach variants remain open.
 - [ ] P1-04-02: Implement held-use placement and repeat timing, selected-item
   and block counts, valid faces/support, occupied space, player collision,
-  height/no-build restrictions and consumption only on success.
+  height/no-build restrictions and consumption only on success. **In progress:**
+  GitHub Copilot; an opt-in full-cube subset is wired to host batches and
+  fixtures; authored setups, live adapters and validation remain open.
 - [ ] P1-04-03: Implement held-attack pickaxe breaking with the supported
   hardness/tool/speed subset, progress and completion; cover release,
   cancellation, target/item switches and protected-block rejection.
+  **In progress:** GitHub Copilot; configurable full-cube mining is wired to
+  host batches; exact material/tool coverage and validation remain open.
 - [ ] P1-04-04: Define hotbar selection and per-player counts/refills for sword,
   bow, pickaxe, blocks and apples. Resolve use/attack/slot precedence without
-  regressing existing melee, shields and projectiles.
+  regressing existing melee, shields and projectiles. **In progress:**
+  GitHub Copilot; experimental kits track counts and slots; building-enabled
+  batches implement a limited block/pickaxe subset, while apple use and
+  pickaxe entity combat are suppressed. Validation remains open.
 - [ ] P1-04-05: Implement supported golden-apple eating time, cancellation,
   absorption and regeneration; separately specify and implement the custom
   single-arrow refill timer. Do not claim general effects, inventory,
-  enchantment, durability, fluid or special-block simulation.
+  enchantment, durability, fluid or special-block simulation. **In progress:**
+  GitHub Copilot; the custom arrow refill timer is written; apple eating,
+  effects, authored setup integration and validation remain open.
+- **Partially validated kit slice, 2026-11-19:** The experimental host batch tracks
+  per-player kit counts, selected slots and the custom arrow refill timer on
+  CPU/CUDA; focused shared and adapter fixtures passed. Item actions, real-game
+  conformance, authored setups and resident collection remain open.
+- **Partially validated building slice, 2026-11-19:** The shared
+  [targeting](../simulator/include/minecraft_sim/geometry.hpp),
+  [building](../simulator/include/minecraft_sim/bridge_building.hpp) and
+  [host batch](../simulator/apps/training.cpp) contain an opt-in full-cube
+  subset with ordered edits and compact CUDA-to-host deltas. Focused CPU/T4
+  fixtures passed; see P1-02-05/06 above. Source basis: supplied decompiled Minecraft
+  26.3 tree, protocol 777, world version 5023, Java 25; decompiler identity and
+  source content hash are not recorded. No in-game capture, performance or
+  vanilla/Hypixel conformance is claimed. Tool effects, fluids, special shapes,
+  pickaxe entity combat, eating, replay and resident collection remain open.
 - [ ] P1-04-06: Trace and cite actual 26.3 methods/lines for targeting,
   placement, breaking and consumption. Keep Bridge-specific refill and other
   mode rules attributed to the Bridge specification.
@@ -295,6 +387,17 @@ existing movement, combat and ordinary-bow behavior where applicable.
 **Prerequisites:** Agree observation/action contracts with P1-01; grid extraction
 depends on P1-02 terrain and relevant P1-03/P1-04 state. The model interface can
 be developed in parallel once tensor shapes and compatibility are agreed.
+
+**Developer experience requirement:** A teammate experimenting with an
+architecture should be able to implement a Python model or factory, register it
+through a documented trusted extension point, select it and its options in
+setup JSON, validate the setup, and train and reload it without changing native
+physics, CUDA kernels, PPO internals, the training loop or the mod merely to
+switch models. This applies when the model uses an already-supported
+observation/action contract; genuinely new observations or actions remain
+separate simulator and contract work. Provide clear input/output shape,
+device and checkpoint requirements so this workflow is usable without an agent
+or repository-wide programming changes.
 
 - [ ] P1-05-00: Complete this milestone only after P1-05-01 through P1-05-08.
 - [ ] P1-05-01: Specify optional local voxel and lane observations: axes, origin,
@@ -313,9 +416,12 @@ be developed in parallel once tensor shapes and compatibility are agreed.
   rollout storage and PPO minibatches; keep categorical grids compact until
   needed and budget native plus PyTorch memory at the target world counts.
 - [ ] P1-05-05: Add a trusted, versioned model registry/factory and separate
-  architecture descriptor. Preserve the existing MLP's legacy state-dict keys;
-  implement a test-only alternate model to prove the extension interface.
-  External Python factories execute trusted code and must be explicitly trusted.
+  architecture descriptor selectable with model options in setup JSON. Define
+  the Python model's observation inputs, named action logits and value output,
+  shapes, device behavior and validation. Preserve the existing MLP's legacy
+  state-dict keys; implement a test-only alternate model to prove the extension
+  interface. External Python factories execute trusted code and must be
+  explicitly trusted.
 - [ ] P1-05-06: Route training, PPO, frozen/checkpoint opponents, evaluation,
   serving and inference packaging through the same model contract. Reject
   incompatible model/policy descriptors rather than silently reinitializing or
@@ -325,7 +431,10 @@ be developed in parallel once tensor shapes and compatibility are agreed.
   checkpoint identity, unsupported descriptors and memory bounds.
 - [ ] P1-05-08: **Gate:** MLP and test model train, save, reload, act as an
   opponent, evaluate and serve through the actual adapters; grid fixtures and
-  legacy compatibility pass. A production CNN remains future work.
+  legacy compatibility pass. Document and exercise a teammate workflow that
+  adds a Python model, selects it and its options in JSON, validates the setup,
+  trains on CPU and a supported CUDA backend, and reloads the checkpoint without
+  editing simulator or PPO internals. A production CNN remains future work.
 
 ## 6. GPU-Resident Bridge Training
 

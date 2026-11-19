@@ -54,6 +54,10 @@ struct Scene {
         : Scene(path.empty() ? defaultEnvironment() : readEnvironment(path)) {}
 
     explicit Scene(nlohmann::json environment) : definition(std::move(environment)) {
+        if (definition.contains("mode") || definition.contains("match") || definition.contains("goals")
+            || definition.contains("cages") || definition.contains("void_y") || definition.contains("experimental_bridge")) {
+            throw std::invalid_argument("Bridge scene fields are unsupported; use the explicit experimental Bridge API");
+        }
         if (definition.at("format") != "minecraft_sim_environment" || definition.at("version") != 1
             || definition.at("minecraft") != "26.3"
             || (definition.value("profile", "configured") != "unarmored_diamond_sword"

@@ -879,7 +879,8 @@ MCSIM_HD inline void resetProjectileWorld(ProjectileWorldState& state, std::uint
 // minecraft-26.3-src/net/minecraft/world/entity/LivingEntity.java, startUsingItem (3500), releaseUsingItem (3605), stopUsingItem (3618).
 // Simulator ordering invariant: each world owns one stable sidecar; selective reset clears only that sidecar and its caller-owned arrow slice.
 MCSIM_HD inline ProjectileTickResult processWorldTick(WorldView world, BlockWorldView blocks,
-                                                       ProjectileWorldState& projectile_state) {
+                                                       ProjectileWorldState& projectile_state,
+                                                       const bool* movement_locked = nullptr) {
     auto& world_state = world.mutableState();
     for (int player = 0; player < projectile_player_count; ++player) {
         world_state.projectile_health_dealt[player] = 0.0F;
@@ -977,7 +978,7 @@ MCSIM_HD inline ProjectileTickResult processWorldTick(WorldView world, BlockWorl
         }
         if (thrown_slots[index] < 0) ++capacity_failures;
     }
-    world.finishTick();
+    world.finishTick(movement_locked);
     auto result = tickProjectiles(world, blocks, projectile_state, released_slots[0], released_slots[1],
                                   thrown_slots[0], thrown_slots[1], wind_slots[0], wind_slots[1]);
     result.capacity_failures = capacity_failures;
@@ -987,6 +988,11 @@ MCSIM_HD inline ProjectileTickResult processWorldTick(WorldView world, BlockWorl
         world_state.projectile_arrow_progress[player] = result.arrow_progress[player];
     }
     return result;
+}
+
+MCSIM_HD inline ProjectileTickResult processWorldTick(WorldView world, ProjectileWorldState& projectile_state,
+                                                       const bool* movement_locked = nullptr) {
+    return processWorldTick(world, world.blocks(), projectile_state, movement_locked);
 }
 
 } // namespace minecraft_sim

@@ -92,7 +92,7 @@ int runDuel(int ticks, bool gpu, const std::filesystem::path& replay_path,
         } else
 #endif
         {
-            minecraft_sim::processWorldTick(batch.world(0), terrain->blocks, terrain->projectile_states[0]);
+            minecraft_sim::processWorldTick(batch.world(0), terrain->projectile_states[0]);
         }
         write_frame(actions);
         for (int player = 0; player < 2; ++player) {

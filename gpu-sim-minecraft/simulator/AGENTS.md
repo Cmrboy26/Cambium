@@ -69,8 +69,15 @@ views must outlive the batch; the owner cannot be copied or moved. Empty,
 team-0 and team-1 placed cells share `BlockWorldView::solid` with existing
 collision and ray logic. `setPlacedBlock` rejects protected base solids,
 out-of-bounds cells, invalid values and views without an overlay; placement
-support, occupied-space rules and simultaneous player arbitration are not
-implemented. `TerrainOverlays::reset` clears selected worlds; null selects all.
+support and collision rules are provided by the experimental Bridge tick.
+`TerrainOverlays::reset` clears selected worlds; null selects all.
+
+`applyTerrainEdits` resolves two low-level edits in player-index order, assigning
+team identity from that index and rejecting protected, outside, occupied or
+empty-removal cells as appropriate. The caller must serialize edits within a
+world and apply placement support, player collision, build-zone, targeting and
+inventory rules separately. `TerrainReset` distinguishes player respawn,
+goal-round and full-match terrain policies; goal-round persistence defaults on.
 
 `CudaBatch` copies enabled overlays to independent device storage and shares
 identical immutable bases when host views share the same base. Selected host and
@@ -78,9 +85,31 @@ fixed device resets clear only selected overlays. Raw device-view callers own
 stream ordering and may not mutate while another operation reads the view.
 Reset currently clears cells serially within each selected world; no full-map
 capacity or throughput claim is made. Host downloads and native captures do not
-serialize overlays. Setup JSON, the training adapter's public API, Bridge
-actions, replay and live integration do not expose mutable terrain yet; a
-successful low-level fixture is not a playable Bridge mode.
+serialize overlays. The experimental host-staged Bridge batch maintains its
+own host overlay from ordered per-tick device edit events, and clears selected
+worlds on applicable resets; it does not download the full overlay each tick.
+Authored setup JSON, replay and live integration do not expose mutable terrain;
+these experimental paths are not a validated playable Bridge mode.
+
+## Experimental Bridge Lifecycle
+
+`include/minecraft_sim/bridge_match.hpp` provides internal CPU/CUDA-compatible
+score, clock, cage countdown, death/goal ordering and match outcome state. Its
+per-player, round and full-match reset helpers restore supplied initial players,
+projectiles, controls, RNG and terrain according to the
+[Bridge mode v1 proposal](../docs/bridge_mode_v1.md).
+Callers must supply exactly two players, immutable initial snapshots, valid
+rules and per-world seeds. `processBridgeWorldTick` filters controls and locks
+movement while caged, runs the shared physics tick and applies match events;
+terminal events leave final state intact. Per-player kit counts, selected slots
+and an optional custom single-arrow refill timer follow the same reset lifecycle.
+The opt-in [building subset](include/minecraft_sim/bridge_building.hpp) supplies
+full-cube targeting, placement and configurable mining for per-world overlays.
+Golden-apple use and pickaxe entity combat are suppressed; effects, fluids,
+special block shapes and item durability are unsupported. Setup/compiler
+validation, resident collection and replay/live integration remain unimplemented.
+See the [training guide](training/AGENTS.md#experimental-bridge-batches).
+These internal functions do not make authored Bridge setups available.
 
 ## CUDA Stream Execution
 

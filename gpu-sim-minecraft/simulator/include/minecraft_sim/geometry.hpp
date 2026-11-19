@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace minecraft_sim {
 
@@ -44,6 +45,19 @@ struct Aabb {
 
 enum class Block : std::uint8_t { air, solid };
 enum class PlacedBlock : std::uint8_t { empty, team0, team1 };
+enum class TerrainReset : std::uint8_t { player_respawn, round, match };
+enum class TerrainEditAction : std::uint8_t { none, place, remove };
+
+struct TerrainEdit {
+    TerrainEditAction action = TerrainEditAction::none;
+    int x = 0;
+    int y = 0;
+    int z = 0;
+};
+
+struct TerrainEditResults {
+    bool applied[2]{};
+};
 
 struct BlockWorldView {
     const Block* cells = nullptr;
@@ -87,7 +101,30 @@ struct BlockWorldView {
         const auto count = std::int64_t(size_x) * size_y * size_z;
         for (std::int64_t index = 0; index < count; ++index) overlay[index] = PlacedBlock::empty;
     }
+
+    MCSIM_HD void resetPlacedBlocks(TerrainReset reason, bool persist_on_goal = true) const {
+        if (reason == TerrainReset::match || (reason == TerrainReset::round && !persist_on_goal)) {
+            clearPlacedBlocks();
+        }
+    }
 };
+
+MCSIM_HD inline TerrainEditResults applyTerrainEdits(BlockWorldView blocks, const TerrainEdit (&edits)[2]) {
+    TerrainEditResults results{};
+    for (int player = 0; player < 2; ++player) {
+        const auto& edit = edits[player];
+        const auto index = blocks.cellIndex(edit.x, edit.y, edit.z);
+        if (index < 0 || !blocks.overlay || blocks.cells[index] != Block::air) continue;
+        if (edit.action == TerrainEditAction::place && blocks.overlay[index] == PlacedBlock::empty) {
+            blocks.overlay[index] = player == 0 ? PlacedBlock::team0 : PlacedBlock::team1;
+            results.applied[player] = true;
+        } else if (edit.action == TerrainEditAction::remove && blocks.overlay[index] != PlacedBlock::empty) {
+            blocks.overlay[index] = PlacedBlock::empty;
+            results.applied[player] = true;
+        }
+    }
+    return results;
+}
 
 MCSIM_HD inline double component(Vec3 vector, int axis) {
     return axis == 0 ? vector.x : (axis == 1 ? vector.y : vector.z);
@@ -160,6 +197,123 @@ MCSIM_HD inline double clipCube(Aabb moving, Aabb obstacle, int axis, double dis
 
 MCSIM_HD inline int boundedCell(double coordinate, int lower, int upper) {
     return static_cast<int>(maximum(lower, minimum(upper, coordinate)));
+}
+
+enum class BlockFace : std::uint8_t { down, up, north, south, west, east };
+
+struct BlockTarget {
+    bool hit = false;
+    bool inside = false;
+    int x = 0;
+    int y = 0;
+    int z = 0;
+    BlockFace face = BlockFace::north;
+    double fraction = 1.0;
+    Vec3 position;
+};
+
+MCSIM_HD inline BlockFace oppositeBlockFace(BlockFace face) {
+    switch (face) {
+    case BlockFace::down: return BlockFace::up;
+    case BlockFace::up: return BlockFace::down;
+    case BlockFace::north: return BlockFace::south;
+    case BlockFace::south: return BlockFace::north;
+    case BlockFace::west: return BlockFace::east;
+    case BlockFace::east: return BlockFace::west;
+    }
+    return BlockFace::north;
+}
+
+MCSIM_HD inline BlockFace nearestBlockFace(Vec3 delta) {
+    const float values[6]{-static_cast<float>(delta.y), static_cast<float>(delta.y),
+                          -static_cast<float>(delta.z), static_cast<float>(delta.z),
+                          -static_cast<float>(delta.x), static_cast<float>(delta.x)};
+    float best = (std::numeric_limits<float>::denorm_min)();
+    BlockFace face = BlockFace::north;
+    for (int index = 0; index < 6; ++index) {
+        if (values[index] > best) {
+            best = values[index];
+            face = static_cast<BlockFace>(index);
+        }
+    }
+    return face;
+}
+
+// Minecraft 26.3: BlockGetter.traverseBlocks (112-175), VoxelShape.clip (159-178),
+// AABB.getDirection/clipPoint (339-399), Direction.getApproximateNearest (319-335).
+MCSIM_HD inline BlockTarget targetFullCube(BlockWorldView blocks, Vec3 origin, Vec3 delta) {
+    BlockTarget miss;
+    miss.position = {origin.x + delta.x, origin.y + delta.y, origin.z + delta.z};
+    if (!blocks.cells || delta.lengthSquared() < 1.0E-7) return miss;
+    const Vec3 from{origin.x - delta.x * 1.0E-7, origin.y - delta.y * 1.0E-7, origin.z - delta.z * 1.0E-7};
+    const Vec3 to{miss.position.x + delta.x * 1.0E-7, miss.position.y + delta.y * 1.0E-7,
+                  miss.position.z + delta.z * 1.0E-7};
+    constexpr double integer_lower = double((std::numeric_limits<int>::min)()) + 1.0;
+    constexpr double integer_upper = double((std::numeric_limits<int>::max)()) - 1.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!(component(from, axis) >= integer_lower && component(from, axis) <= integer_upper
+              && component(to, axis) >= integer_lower && component(to, axis) <= integer_upper)) return miss;
+    }
+    int cell[3]{static_cast<int>(::floor(from.x)), static_cast<int>(::floor(from.y)), static_cast<int>(::floor(from.z))};
+    const double traversed[3]{to.x - from.x, to.y - from.y, to.z - from.z};
+    int step[3]{};
+    double increment[3]{}, next[3]{};
+    for (int axis = 0; axis < 3; ++axis) {
+        step[axis] = traversed[axis] > 0.0 ? 1 : traversed[axis] < 0.0 ? -1 : 0;
+        increment[axis] = step[axis] == 0 ? (std::numeric_limits<double>::max)()
+            : double(step[axis]) / traversed[axis];
+        const double fraction = component(from, axis) - ::floor(component(from, axis));
+        next[axis] = increment[axis] * (step[axis] > 0 ? 1.0 - fraction : fraction);
+    }
+    for (;;) {
+        if (blocks.solid(cell[0], cell[1], cell[2])) {
+            const Vec3 test{origin.x + delta.x * 0.001, origin.y + delta.y * 0.001, origin.z + delta.z * 0.001};
+            BlockTarget result;
+            result.x = cell[0]; result.y = cell[1]; result.z = cell[2];
+            if (test.x >= cell[0] && test.x < double(cell[0]) + 1.0
+                && test.y >= cell[1] && test.y < double(cell[1]) + 1.0
+                && test.z >= cell[2] && test.z < double(cell[2]) + 1.0) {
+                result.hit = true;
+                result.inside = true;
+                result.fraction = 0.001;
+                result.face = oppositeBlockFace(nearestBlockFace(delta));
+                result.position = test;
+                return result;
+            }
+            double nearest = 1.0;
+            for (int axis = 0; axis < 3; ++axis) {
+                const double direction = component(delta, axis);
+                if (absolute(direction) <= 1.0E-7) continue;
+                const double plane = double(cell[axis]) + (direction < 0.0 ? 1.0 : 0.0);
+                const double candidate = (plane - component(origin, axis)) / direction;
+                if (candidate <= 0.0 || candidate >= nearest) continue;
+                bool within = true;
+                for (int offset = 1; offset <= 2; ++offset) {
+                    const int transverse = (axis + offset) % 3;
+                    const double coordinate = component(origin, transverse) + candidate * component(delta, transverse);
+                    within = within && coordinate > double(cell[transverse]) - 1.0E-7
+                        && coordinate < double(cell[transverse]) + 1.0 + 1.0E-7;
+                }
+                if (!within) continue;
+                nearest = candidate;
+                result.hit = true;
+                result.face = axis == 0 ? (direction > 0.0 ? BlockFace::west : BlockFace::east)
+                    : axis == 1 ? (direction > 0.0 ? BlockFace::down : BlockFace::up)
+                    : (direction > 0.0 ? BlockFace::north : BlockFace::south);
+            }
+            if (result.hit) {
+                result.fraction = nearest;
+                result.position = {origin.x + nearest * delta.x, origin.y + nearest * delta.y,
+                                   origin.z + nearest * delta.z};
+                return result;
+            }
+        }
+        if (!(next[0] <= 1.0 || next[1] <= 1.0 || next[2] <= 1.0)) return miss;
+        const int axis = next[0] < next[1] ? (next[0] < next[2] ? 0 : 2)
+            : (next[1] < next[2] ? 1 : 2);
+        cell[axis] += step[axis];
+        next[axis] += increment[axis];
+    }
 }
 
 MCSIM_HD inline double blockRayFraction(BlockWorldView blocks, Vec3 origin, Vec3 delta) {

@@ -3,6 +3,8 @@
 #include "../apps/rewards.hpp"
 #include "minecraft_sim/cuda_backend.hpp"
 #include "minecraft_sim/terrain.hpp"
+#include "bridge_match_checks.hpp"
+#include "terrain_checks.hpp"
 
 #include <cuda_runtime.h>
 
@@ -11,11 +13,60 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
 constexpr int feature_count = 102;
 constexpr int scenario_count = 3;
+
+__global__ void orderedTerrainScenario(minecraft_sim::BatchView batch, int* results) {
+    using namespace minecraft_sim;
+    const auto environment = blockIdx.x * blockDim.x + threadIdx.x;
+    if (environment >= static_cast<unsigned int>(batch.environment_count)) return;
+    const auto blocks = batch.block_worlds[environment];
+    bool result = bridge_match_checks::outcomes() && bridge_match_checks::lifecycle()
+        && bridge_match_checks::selectedWorldReset() && bridge_match_checks::tick(batch.math)
+        && bridge_match_checks::completeMatch(batch.math) && bridge_match_checks::externalCutoff(batch.math)
+        && bridge_match_checks::kitsAndRefill(batch.math)
+        && bridge_match_checks::building(batch.math)
+        && bridge_match_checks::simultaneousBuilding(batch.math)
+        && terrain_checks::blockTargeting()
+        && terrain_checks::orderedEditsAndResets(blocks)
+        && blocks.setPlacedBlock(0, 1, 0, PlacedBlock::team1);
+    blocks.resetPlacedBlocks(TerrainReset::player_respawn, false);
+    result = result && blocks.solid(0, 1, 0);
+    if (environment % 3 == 0) blocks.resetPlacedBlocks(TerrainReset::round, false);
+    if (environment % 3 == 1) blocks.resetPlacedBlocks(TerrainReset::round);
+    result = result && blocks.solid(0, 1, 0) == (environment % 3 != 0)
+        && blocks.solid(0, 0, 0);
+    results[environment] = result;
+}
+
+bool checkOrderedTerrainEdits() {
+    using namespace minecraft_sim;
+    constexpr int environments = 137;
+    std::array<Block, 8> base{Block::solid, Block::solid, Block::solid, Block::solid,
+                              Block::air, Block::air, Block::air, Block::air};
+    TerrainOverlays terrain({base.data(), 4, 2, 1, -2, 0, 0}, environments);
+    std::vector<PlayerState> players(environments * 2);
+    std::vector<Controls> queued(environments * 2), held(environments * 2);
+    std::vector<WorldState> worlds(environments);
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                   terrain.data(), {sine.data()}, nullptr};
+    CudaBatch device(host);
+    int* device_results = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_results), environments * sizeof(int)) != cudaSuccess) return false;
+    orderedTerrainScenario<<<(environments + CudaBatch::threads_per_block - 1) / CudaBatch::threads_per_block,
+                             CudaBatch::threads_per_block>>>(device.deviceView(), device_results);
+    std::array<int, environments> results{};
+    bool success = cudaGetLastError() == cudaSuccess
+        && cudaMemcpy(results.data(), device_results, sizeof(results), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (const int result : results) success = success && result == 1;
+    cudaFree(device_results);
+    return success;
+}
 
 __global__ void terrainScenario(minecraft_sim::BatchView batch, double* output, int phase) {
     using namespace minecraft_sim;
@@ -82,6 +133,146 @@ bool checkMutableTerrain() {
     device.resetEnvironments(&second, 1, players.data() + 2);
     result = result && sample(0) && actual[0] == 1.0 && actual[1] == 1.0 && actual[6] == 0.0;
     cudaFree(output);
+    return result;
+}
+
+__global__ void placeCompositeWalls(minecraft_sim::BatchView batch, int* results) {
+    using namespace minecraft_sim;
+    const int environment = blockIdx.x * blockDim.x + threadIdx.x;
+    if (environment >= batch.environment_count) return;
+    const auto blocks = batch.block_worlds[environment];
+    if (environment % 2 == 0) {
+        const auto team = environment % 4 == 0 ? PlacedBlock::team0 : PlacedBlock::team1;
+        results[environment] = blocks.setPlacedBlock(0, 1, 1, team)
+            && blocks.setPlacedBlock(0, 2, 1, team)
+            && !blocks.setPlacedBlock(0, 0, 1, team)
+            && !blocks.setPlacedBlock(2, 1, 1, team);
+    } else {
+        results[environment] = 1;
+    }
+}
+
+bool checkCompositeWorldConsumers() {
+    using namespace minecraft_sim;
+    constexpr int environments = 137;
+    constexpr int actor_count = environments * 2;
+    std::array<Block, 3 * 4 * 5> base{};
+    for (int z = 0; z < 5; ++z) {
+        for (int x = 0; x < 3; ++x) base[z * 12 + x] = Block::solid;
+    }
+    TerrainOverlays terrain({base.data(), 3, 4, 5, -1, 0, 0}, environments);
+    std::vector<PlayerState> players(actor_count);
+    std::vector<Controls> queued(actor_count), held(actor_count);
+    std::vector<WorldState> worlds(environments);
+    std::vector<ProjectileWorldState> projectiles(environments);
+    std::vector<ArrowState> arrows(environments * projectile_arrow_capacity);
+    std::vector<app::ObservationActorMetadata> actors(actor_count);
+    for (int environment = 0; environment < environments; ++environment) {
+        players[environment * 2].position = {0.5, 1.0, 0.5};
+        players[environment * 2].velocity.z = 0.6;
+        players[environment * 2 + 1].position = {0.5, 1.0, 2.5};
+        queued[environment * 2].attack = true;
+        auto& arrow = arrows[environment * projectile_arrow_capacity];
+        arrow.position = {0.5, 2.5, 0.5};
+        arrow.velocity = {0.0, 0.0, 1.0};
+        arrow.owner = 0;
+        arrow.active = true;
+        projectiles[environment].arrows = &arrow;
+        projectiles[environment].arrow_capacity = projectile_arrow_capacity;
+        for (int player = 0; player < 2; ++player) {
+            auto& actor = actors[environment * 2 + player];
+            actor.slot_count = 1;
+            actor.slots[0] = WeaponItem::diamond_sword;
+        }
+    }
+    const auto initial_players = players;
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                   terrain.data(), {sine.data()}, projectiles.data()};
+    CudaBatch device(host);
+    const app::ObservationProjection projection{10, 1.0F, 0.0F, 0.0F, 1.0F, false};
+    device.configureObservations(&projection, 1, actors.data(), actors.size());
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 100;
+    settings.shaping_weights[0] = 1.0F;
+    settings.shaping_weights[3] = 1.0F;
+    std::vector<app::DuelRewardState> reward_states(environments);
+    std::vector<app::DuelRewardStep> reward_results(environments);
+    device.configureRewards(settings, reward_states.data(), reward_states.size());
+    int* device_results = nullptr;
+    float* device_base = nullptr;
+    float* device_configured = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_results), environments * sizeof(int)) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_base), actor_count * 22 * sizeof(float)) != cudaSuccess
+        || cudaMalloc(reinterpret_cast<void**>(&device_configured), actor_count * sizeof(float)) != cudaSuccess) {
+        if (device_results) cudaFree(device_results);
+        if (device_base) cudaFree(device_base);
+        if (device_configured) cudaFree(device_configured);
+        return false;
+    }
+    placeCompositeWalls<<<2, CudaBatch::threads_per_block>>>(device.deviceView(), device_results);
+    std::vector<int> edit_results(environments);
+    bool result = cudaGetLastError() == cudaSuccess
+        && cudaMemcpy(edit_results.data(), device_results, environments * sizeof(int), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int environment = 0; environment < environments; ++environment) {
+        result = result && edit_results[environment] == 1;
+        if (environment % 2 == 0) {
+            const auto team = environment % 4 == 0 ? PlacedBlock::team0 : PlacedBlock::team1;
+            result = result && terrain.view(environment).setPlacedBlock(0, 1, 1, team)
+                && terrain.view(environment).setPlacedBlock(0, 2, 1, team);
+        }
+    }
+    std::vector<float> base_observations(actor_count * 22), configured(actor_count);
+    device.observeBaseSynchronized(device_base, base_observations.size(), nullptr);
+    device.observeConfiguredSynchronized(device_configured, configured.size(), nullptr);
+    device.evaluateRewardsOnStream(nullptr);
+    device.downloadRewardResults(reward_results.data(), reward_results.size());
+    result = result && cudaMemcpy(base_observations.data(), device_base, base_observations.size() * sizeof(float),
+                                 cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(configured.data(), device_configured, configured.size() * sizeof(float),
+                      cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int environment = 0; environment < environments; ++environment) {
+        const float expected = environment % 2 == 0 ? 0.01F : 1.0F;
+        result = result && std::abs(base_observations[environment * 44 + 10] - expected) < 1.0e-7F
+            && std::abs(configured[environment * 2] - expected) < 1.0e-7F
+            && reward_results[environment].rewards[0] == (environment % 2 == 0 ? 0.0F : 2.0F);
+        processWorldTick(host.world(environment), projectiles[environment]);
+        const auto& player = players[environment * 2];
+        const bool blocked = environment % 2 == 0;
+        result = result && player.last_attack.target == (blocked ? -1 : 1)
+            && player.last_attack.hit_block == blocked
+            && (blocked ? player.position.z < 0.71 : player.position.z > 1.0)
+            && arrows[environment * projectile_arrow_capacity].in_ground == blocked;
+    }
+    const auto expected_players = players;
+    const auto expected_arrows = arrows;
+    device.step();
+    device.download(host);
+    for (int environment = 0; environment < environments; ++environment) {
+        const auto index = environment * 2;
+        const auto arrow = environment * projectile_arrow_capacity;
+        result = result && players[index].last_attack.target == expected_players[index].last_attack.target
+            && players[index].last_attack.hit_block == expected_players[index].last_attack.hit_block
+            && std::abs(players[index].position.z - expected_players[index].position.z) < 1.0e-12
+            && arrows[arrow].in_ground == expected_arrows[arrow].in_ground
+            && std::abs(arrows[arrow].position.z - expected_arrows[arrow].position.z) < 1.0e-12;
+    }
+    const std::array<int, 2> reset_ids{0, environments - 1};
+    const std::array<PlayerState, 4> reset_players{initial_players[0], initial_players[1],
+        initial_players[(environments - 1) * 2], initial_players[(environments - 1) * 2 + 1]};
+    const std::array<ProjectileWorldState, 2> reset_projectiles{projectiles[0], projectiles[environments - 1]};
+    const std::array<app::ObservationActorMetadata, 4> reset_actors{actors[0], actors[1],
+        actors[(environments - 1) * 2], actors[(environments - 1) * 2 + 1]};
+    device.resetEnvironments(reset_ids.data(), reset_ids.size(), reset_players.data(),
+                             reset_projectiles.data(), reset_actors.data());
+    device.observeConfiguredSynchronized(device_configured, configured.size(), nullptr);
+    result = result && cudaMemcpy(configured.data(), device_configured, configured.size() * sizeof(float),
+                                  cudaMemcpyDeviceToHost) == cudaSuccess
+        && configured[0] == 1.0F && configured[(environments - 1) * 2] == 1.0F
+        && configured[4] < 0.01F;
+    cudaFree(device_results);
+    cudaFree(device_base);
+    cudaFree(device_configured);
     return result;
 }
 
@@ -825,8 +1016,12 @@ bool checkBatchedDeviceActions() {
 int main() {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) return 77;
-    if (!checkMutableTerrain() || !checkStaticTerrainSharing()) {
+    if (!checkMutableTerrain() || !checkStaticTerrainSharing() || !checkOrderedTerrainEdits()) {
         std::cerr << "CUDA mutable terrain isolation check failed\n";
+        return 1;
+    }
+    if (!checkCompositeWorldConsumers()) {
+        std::cerr << "CUDA composite world consumer check failed\n";
         return 1;
     }
     if (!checkFixedTerrainReset()) {

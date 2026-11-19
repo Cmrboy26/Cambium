@@ -19,6 +19,9 @@ void* mcsim_create_schema(int worlds, int use_cuda, const char* path, int max_ti
 void* mcsim_create_contract(int worlds, int use_cuda, const char* path, int max_ticks,
                            uint64_t seed, const float* weights, const char* contract);
 void mcsim_destroy(void* handle);
+int mcsim_configure_bridge(void* handle, const char* json_utf8);
+const char* mcsim_bridge_state(void* handle);
+const char* mcsim_bridge_kits(void* handle, int player);
 int mcsim_observe(void* handle, float* observations);
 /* Blocking diagnostic: raw 22-feature rows [worlds, 2, 22] in caller-owned
    CUDA device memory on the batch device. The caller must allocate count floats.
@@ -61,6 +64,7 @@ int mcsim_set_cuda_reset_episodes(void* handle, const uint64_t* episodes, size_t
 int mcsim_reset(void* handle, const uint8_t* mask, float* observations);
 int mcsim_step(void* handle, const int32_t* actions, float* observations, float* rewards,
                uint8_t* terminated, uint8_t* truncated);
+int mcsim_losses(void* handle, uint8_t* losses);
 
 /* Additive ABI 2 calls. Return 0 on success, -1 on error; obtain the
    thread-local error with mcsim_last_error(). The caller owns all buffers. */

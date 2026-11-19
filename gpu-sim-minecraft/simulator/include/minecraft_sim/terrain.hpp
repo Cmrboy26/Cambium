@@ -45,9 +45,10 @@ public:
     const BlockWorldView* data() const { return worlds_.data(); }
     std::size_t size() const { return worlds_.size(); }
 
-    void reset(const std::uint8_t* mask) const {
+    void reset(const std::uint8_t* mask, TerrainReset reason = TerrainReset::match,
+               bool persist_on_goal = true) const {
         for (std::size_t world = 0; world < worlds_.size(); ++world) {
-            if (!mask || mask[world]) worlds_[world].clearPlacedBlocks();
+            if (!mask || mask[world]) worlds_[world].resetPlacedBlocks(reason, persist_on_goal);
         }
     }
 

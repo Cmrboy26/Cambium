@@ -522,9 +522,152 @@ class InferenceChecks(unittest.TestCase):
 
 
 class TrainingChecks(unittest.TestCase):
+    def test_experimental_bridge_batch_and_unsupported_adapters(self):
+        path = ROOT / "simulator/tests/reset_environment.json"
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "relative.z"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "forward"]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        invalid = {**bridge, "match": {**bridge["match"], "arrow_refill_ticks": 80}}
+        with self.assertRaisesRegex(RuntimeError, "arrow refill"):
+            Environment(1, environment=path, contract=contract, bridge=invalid)
+        with tempfile.TemporaryDirectory() as directory:
+            scene = json.loads(path.read_text(encoding="utf-8"))
+            scene["mode"] = bridge["mode"]
+            unsupported_path = Path(directory) / "unsupported-bridge.json"
+            unsupported_path.write_text(json.dumps(scene), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Bridge scene fields are unsupported"):
+                Environment(1, environment=unsupported_path, contract=contract)
+        with Environment(2, environment=path, contract=contract, max_ticks=100, bridge=bridge) as environment:
+            self.assertEqual(environment.episode_scenario(0)["experimental_bridge"], bridge)
+            self.assertNotIn("reward_weights", environment.episode_scenario(0))
+            actions = np.zeros((2, 2, 1), dtype=np.int32)
+            actions[0, 0, 0] = 1
+            goal_rewards = []
+            for _ in range(30):
+                _, rewards, terminated, truncated = environment.step(actions)
+                states = environment.bridge_state()
+                self.assertEqual(states[1]["scores"], [0, 0])
+                if states[0]["scored"][0]:
+                    goal_rewards.append(rewards[0].tolist())
+                if terminated[0]:
+                    self.assertFalse(truncated[0])
+                    break
+            self.assertEqual(goal_rewards, [[2.0, 0.0], [7.0, -3.0]])
+            self.assertEqual(environment.bridge_state()[0]["outcome"], "team0")
+            np.testing.assert_array_equal(environment.losses(np.array([True, False]))[0], [False, True])
+            other_ticks = environment.bridge_state()[1]["ticks"]
+            environment.reset(np.array([True, False]))
+            self.assertEqual(environment.bridge_state()[0]["scores"], [0, 0])
+            self.assertEqual(environment.bridge_state()[1]["ticks"], other_ticks)
+            with self.assertRaisesRegex(RuntimeError, "Bridge replay"):
+                environment.replay_frame()
+            with self.assertRaisesRegex(RuntimeError, "Duel reward"):
+                environment.step_reward_totals()
+            with self.assertRaisesRegex(RuntimeError, "task rewards"):
+                environment.set_rewards({})
+            with self.assertRaisesRegex(RuntimeError, "resident Bridge"):
+                environment.register_cuda_resident()
+
     def test_compatibility_learning_rate_default_and_override(self):
         self.assertEqual(compatibility_arguments([]).lr, 0.0003)
         self.assertEqual(compatibility_arguments(["--lr", "0.001"]).lr, 0.001)
+
+    def test_experimental_bridge_kits_and_arrow_refill(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        for player in scene["players"]:
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:bow", "minecraft:air",
+                                             "minecraft:air", "minecraft:air"],
+                                 "selected": 1, "arrows": 1, "offhand": "minecraft:air"}
+        scene["players"][1]["position"][0] = -1.5
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "requires": ["bow"],
+                    "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "weapon", "values": [0, 1, 2, 3, 4]},
+                                {"name": "use_item", "values": [False, True]},
+                                {"name": "attack", "values": [False, True]}]}
+        kit = {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple"],
+               "blocks": 64, "golden_apples": 2}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 3},
+                  "kits": [kit, kit], "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-kits.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            with Environment(2, environment=path, contract=contract, max_ticks=100, bridge=bridge) as environment:
+                self.assertEqual(environment.bridge_kits(0)[0],
+                                 {"blocks": 64, "golden_apples": 2, "arrows": 1,
+                                  "arrow_refill_elapsed": 0, "selected_slot": 1,
+                                  "use_delay": 0, "break_delay": 0, "break_progress": 0.0})
+                actions = np.zeros((2, 2, 3), dtype=np.int32)
+                actions[:, :, 0] = 1
+                actions[0, 0, 1] = 1
+                actions[1, 0] = [2, 1, 1]
+                for _ in range(3):
+                    environment.step(actions)
+                actions[0, 0, 1] = 0
+                environment.step(actions)
+                self.assertEqual(environment.bridge_kits(0)[0]["arrows"], 0)
+                self.assertEqual(environment.bridge_kits(0)[0]["arrow_refill_elapsed"], 0)
+                for tick in range(1, 4):
+                    environment.step(actions)
+                    current = environment.bridge_kits(0)[0]
+                    self.assertEqual(current["arrows"], int(tick == 3))
+                    self.assertEqual(current["arrow_refill_elapsed"], 0 if tick == 3 else tick)
+                environment.reset(np.array([True, False]))
+                self.assertEqual(environment.bridge_kits(0)[0]["selected_slot"], 1)
+                self.assertEqual(environment.bridge_kits(0)[1]["selected_slot"], 2)
+                with self.assertRaises(ValueError):
+                    environment.bridge_kits(2)
+
+    def test_experimental_bridge_building_updates_world_observations(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["blocks"].append({"from": [0, 2, 1], "to": [0, 2, 1], "block": "minecraft:stone"})
+        scene["players"][1]["position"][0] = -2.5
+        for player in scene["players"]:
+            player["velocity"][1] = -0.0784000015258789
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air", "minecraft:air"],
+                                 "selected": 1, "arrows": 0, "offhand": "minecraft:air"}
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "arena.ray_world_0"}],
+                    "actions": [{"name": "weapon", "values": [0, 1, 2]},
+                                {"name": "use_item", "values": [False, True]},
+                                {"name": "attack", "values": [False, True]}]}
+        kit = {"slots": ["sword", "blocks", "pickaxe"], "blocks": 4, "golden_apples": 0}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "kits": [kit, kit], "task_rewards": {"score": 2, "win": 5, "loss": -3},
+                  "building": {"zones": [{"min": [-3, 0, -3], "max": [4, 4, 4]}],
+                               "block_range": 4.5, "entity_range": 3.0,
+                               "hardness": 1.0, "mining_speed": 15.0, "correct_tool": True}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-building.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            with Environment(2, environment=path, contract=contract, max_ticks=100, bridge=bridge) as environment:
+                actions = np.zeros((2, 2, 3), dtype=np.int32)
+                actions[0, 0] = [1, 1, 0]
+                observations, _, _, _ = environment.step(actions)
+                self.assertTrue(environment.bridge_state()[0]["placed"][0])
+                self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
+                self.assertAlmostEqual(float(observations[1, 0, 0]), 0.05, places=6)
+                observations = environment.reset(np.array([False, True]))
+                self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
+                actions[0, 0] = [2, 0, 1]
+                for _ in range(3):
+                    observations, _, _, _ = environment.step(actions)
+                self.assertTrue(environment.bridge_state()[0]["broke"][0])
+                self.assertAlmostEqual(float(observations[0, 0, 0]), 0.05, places=6)
 
     def test_native_capture_records_selected_pre_step_state(self):
         with tempfile.TemporaryDirectory() as directory:

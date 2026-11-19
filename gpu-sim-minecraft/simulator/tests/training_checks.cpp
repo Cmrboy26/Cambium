@@ -35,6 +35,305 @@ json frame(void* handle, int world) {
     return json::parse(value);
 }
 
+void checkBridgeBatch(const char* environment, int cuda) {
+    json policy{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1}, {"observations", {{{"feature", "relative.z"}}}},
+        {"actions", {{{"name", "movement"}, {"values", {"neutral", "forward"}}}}}};
+    json config{{"mode", {{"name", "bridge"}, {"version", 1}}},
+        {"goals", {{{"min", {0.0, 1.0, 2.4}}, {"max", {1.0, 3.0, 2.9}}},
+                   {{"min", {0.0, 1.0, -1.1}}, {"max", {1.0, 3.0, -0.8}}}}},
+        {"void_y", -2.0},
+        {"match", {{"goals_to_win", 2}, {"max_ticks", 100}, {"cage_ticks", 0},
+                   {"persist_blocks_on_goal", true}, {"arrow_refill_ticks", 0}}},
+        {"task_rewards", {{"score", 2.0}, {"win", 5.0}, {"loss", -3.0}}}};
+    const std::array<float, 10> weights{};
+    const auto descriptor = policy.dump();
+    Handle batch(mcsim_create_contract(2, cuda, environment, 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    require(batch != nullptr, "create experimental Bridge batch");
+    auto invalid = config;
+    invalid["match"]["arrow_refill_ticks"] = 80;
+    require(mcsim_configure_bridge(batch.get(), invalid.dump().c_str()) != 0,
+        "Bridge refill without a bow must be rejected");
+    require(!scenario(batch.get(), 0).contains("experimental_bridge"), "rejection leaves duel scenario unchanged");
+    require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) == 0, "configure static Bridge batch");
+    require(scenario(batch.get(), 0)["experimental_bridge"] == config, "resolved scenario records Bridge identity");
+    require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) != 0, "reject repeated Bridge configuration");
+    std::array<int32_t, 4> actions{1, 0, 0, 0};
+    std::array<float, 4> observations{}, rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    const auto status = [&] {
+        const auto* value = mcsim_bridge_state(batch.get());
+        require(value != nullptr, "Bridge state is available");
+        return json::parse(value);
+    };
+    bool first_goal = false;
+    bool match_end = false;
+    for (int tick = 0; tick < 30 && !match_end; ++tick) {
+        require(mcsim_step(batch.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0, "step static Bridge batch");
+        const auto states = status();
+        require(states[1]["scores"] == json::array({0, 0}) && states[1]["outcome"] == "ongoing",
+            "other Bridge world remains independent");
+        if (states[0]["scored"][0] == true) {
+            if (!first_goal) {
+                first_goal = true;
+                require(!terminated[0] && !truncated[0] && rewards[0] == 2.0F
+                    && states[0]["round_reset"] == true && states[0]["scores"][0] == 1,
+                    "nonwinning goal rewards and resets without termination");
+            } else {
+                match_end = true;
+                require(terminated[0] && !truncated[0] && rewards[0] == 7.0F && rewards[1] == -3.0F
+                    && states[0]["outcome"] == "team0" && states[0]["round_reset"] == false,
+                    "winning goal emits Bridge score and outcome rewards");
+            }
+        }
+    }
+    require(first_goal && match_end, "Bridge match reaches two goals");
+    std::array<uint8_t, 4> losses{};
+    require(mcsim_losses(batch.get(), losses.data()) == 0 && !losses[0] && losses[1],
+        "Bridge match losses reflect the outcome, not the last death");
+    std::array<double, 18> totals{};
+    require(mcsim_step_reward_totals(batch.get(), nullptr, totals.data()) != 0,
+        "Bridge cannot report duel reward totals");
+    require(mcsim_replay_frame(batch.get(), 0) == nullptr, "Bridge replay is explicitly unsupported");
+    const auto other_ticks = status()[1]["ticks"];
+    const std::array<uint8_t, 2> mask{1, 0};
+    require(mcsim_reset(batch.get(), mask.data(), observations.data()) == 0, "selective Bridge match reset");
+    const auto reset = status();
+    require(reset[0]["scores"] == json::array({0, 0}) && reset[0]["ticks"] == 0
+        && reset[1]["ticks"] == other_ticks, "selected reset preserves the other match");
+
+    Handle cutoff(mcsim_create_contract(2, cuda, environment, 1, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    require(cutoff && mcsim_configure_bridge(cutoff.get(), config.dump().c_str()) == 0,
+        "configure externally truncated Bridge batch");
+    auto players = scenario(cutoff.get(), 0)["players"];
+    players[0]["position"][2] = -1.41;
+    players[0]["velocity"][2] = 0.2;
+    const auto definitions = json::array({players, nullptr}).dump();
+    require(mcsim_reset_players(cutoff.get(), mask.data(), definitions.c_str(), observations.data()) == 0,
+        "assign a safe spawn immediately before the goal");
+    actions.fill(0);
+    require(mcsim_step(cutoff.get(), actions.data(), observations.data(), rewards.data(),
+        terminated.data(), truncated.data()) == 0, "step Bridge goal on external cutoff");
+    const auto* cutoff_json = mcsim_bridge_state(cutoff.get());
+    require(cutoff_json != nullptr, "read truncated Bridge state");
+    const auto cutoff_state = json::parse(cutoff_json);
+    require(!terminated[0] && truncated[0] && rewards[0] == 2.0F && cutoff_state[0]["scored"][0] == true
+        && cutoff_state[0]["round_reset"] == false && std::abs(observations[0] - 0.271F) < 1e-5F,
+        "external truncation retains the pre-reset goal observation");
+}
+
+void checkBridgeKits(const char* environment, int cuda) {
+    const std::array<float, 10> weights{};
+    json policy{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1}, {"requires", {"bow"}},
+        {"observations", {{{"feature", "self.health_fraction"}}}},
+        {"actions", {{{"name", "weapon"}, {"values", {0, 1, 2, 3, 4}}},
+                     {{"name", "use_item"}, {"values", {false, true}}},
+                     {{"name", "attack"}, {"values", {false, true}}}}}};
+    const auto descriptor = policy.dump();
+    json seed_policy = policy;
+    seed_policy["actions"][0]["values"] = {0, 1};
+    const auto seed_descriptor = seed_policy.dump();
+    Handle seed(mcsim_create_contract(1, cuda, environment, 100, 91, weights.data(), seed_descriptor.c_str()), mcsim_destroy);
+    require(seed != nullptr, "create Bridge kit test scene");
+    auto definition = scenario(seed.get(), 0);
+    for (auto& player : definition["players"]) {
+        player["loadout"] = {{"weapons", {"minecraft:diamond_sword", "minecraft:bow", "minecraft:air",
+                                          "minecraft:air", "minecraft:air"}},
+                             {"selected", 1}, {"arrows", 1}, {"offhand", "minecraft:air"}};
+    }
+    definition["players"][1]["position"][0] = -1.5;
+    const std::string path = cuda ? "training-bridge-kits-cuda.json" : "training-bridge-kits-cpu.json";
+    {
+        std::ofstream output(path);
+        require(static_cast<bool>(output), "open Bridge kit test scene");
+        output << definition;
+    }
+    Handle batch(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    auto incompatible_policy = policy;
+    incompatible_policy["observations"].push_back({{"feature", "self.weapon_slot_2.present"}});
+    const auto incompatible_descriptor = incompatible_policy.dump();
+    Handle incompatible(mcsim_create_contract(1, cuda, path.c_str(), 100, 91, weights.data(),
+                                               incompatible_descriptor.c_str()), mcsim_destroy);
+    std::filesystem::remove(path);
+    require(batch != nullptr && incompatible != nullptr, "create Bridge kit training batches");
+    const json kit{{"slots", {"sword", "bow", "pickaxe", "blocks", "golden_apple"}},
+                   {"blocks", 64}, {"golden_apples", 2}};
+    json config{{"mode", {{"name", "bridge"}, {"version", 1}}},
+        {"goals", {{{"min", {0.0, 1.0, 2.4}}, {"max", {1.0, 3.0, 2.9}}},
+                   {{"min", {0.0, 1.0, -1.1}}, {"max", {1.0, 3.0, -0.8}}}}},
+        {"void_y", -2.0},
+        {"match", {{"goals_to_win", 2}, {"max_ticks", 100}, {"cage_ticks", 0},
+                   {"persist_blocks_on_goal", true}, {"arrow_refill_ticks", 3}}},
+        {"kits", {kit, kit}}, {"task_rewards", {{"score", 2.0}, {"win", 5.0}, {"loss", -3.0}}}};
+    require(mcsim_configure_bridge(incompatible.get(), config.dump().c_str()) != 0,
+        "reserved Bridge items cannot masquerade as empty weapon observations");
+    auto invalid = config;
+    invalid["kits"][0]["slots"][2] = "bow";
+    require(mcsim_configure_bridge(batch.get(), invalid.dump().c_str()) != 0,
+        "reject duplicate or mismatched Bridge kit slots");
+    invalid = config;
+    invalid["kits"][0]["slots"][0] = "bow";
+    invalid["kits"][0]["slots"][1] = "sword";
+    require(mcsim_configure_bridge(batch.get(), invalid.dump().c_str()) != 0,
+        "reject Bridge slots that disagree with the scene");
+    require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) == 0, "configure Bridge kits and refill");
+    const auto kits = [&](int player) {
+        const auto* value = mcsim_bridge_kits(batch.get(), player);
+        require(value != nullptr, "read Bridge kits");
+        return json::parse(value);
+    };
+    require(kits(0)[0]["arrows"] == 1 && kits(0)[0]["blocks"] == 64
+        && kits(0)[0]["golden_apples"] == 2 && kits(0)[0]["selected_slot"] == 1,
+        "initial Bridge kit matches its scene loadout");
+    std::array<int32_t, 12> actions{1, 1, 0, 1, 0, 0, 2, 1, 1, 1, 0, 0};
+    std::array<float, 4> observations{}, rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    const std::array<uint8_t, 2> mask{1, 0};
+    auto bad_players = scenario(batch.get(), 0)["players"];
+    bad_players[0]["loadout"]["weapons"][1] = "minecraft:diamond_axe";
+    bad_players[0]["loadout"]["arrows"] = 0;
+    const auto bad_reset = json::array({bad_players, nullptr}).dump();
+    require(mcsim_reset_players(batch.get(), mask.data(), bad_reset.c_str(), observations.data()) != 0
+        && kits(0)[0]["arrows"] == 1, "invalid sampled kit reset leaves existing state intact");
+    const auto step = [&] {
+        require(mcsim_step(batch.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0 && !terminated[0] && !truncated[0],
+            "step Bridge kits");
+    };
+    for (int tick = 0; tick < 3; ++tick) step();
+    require(kits(0)[1]["selected_slot"] == 2 && kits(0)[1]["blocks"] == 64,
+        "other world's unsupported pickaxe action preserves its kit");
+    actions[1] = 0;
+    step();
+    require(kits(0)[0]["arrows"] == 0 && kits(0)[0]["arrow_refill_elapsed"] == 0,
+        "last arrow firing tick does not count towards refill");
+    for (int tick = 1; tick <= 3; ++tick) {
+        step();
+        const auto current = kits(0);
+        require(current[0]["arrows"] == (tick == 3 ? 1 : 0)
+            && current[0]["arrow_refill_elapsed"] == (tick == 3 ? 0 : tick),
+            "Bridge arrow refill follows subsequent empty ticks");
+    }
+    require(mcsim_reset(batch.get(), mask.data(), observations.data()) == 0, "reset one Bridge kit world");
+    require(kits(0)[0]["arrows"] == 1 && kits(0)[0]["selected_slot"] == 1
+        && kits(0)[1]["selected_slot"] == 2, "kit reset leaves another world unchanged");
+    require(mcsim_bridge_kits(batch.get(), 2) == nullptr, "reject invalid Bridge kit perspective");
+}
+
+void checkBridgeBuilding(const char* environment, int cuda) {
+    const std::array<float, 10> weights{};
+    json policy{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1}, {"observations", {{{"feature", "arena.ray_world_0"}}}},
+        {"actions", {{{"name", "weapon"}, {"values", {0, 1, 2}}},
+                     {{"name", "use_item"}, {"values", {false, true}}},
+                     {{"name", "attack"}, {"values", {false, true}}}}}};
+    json seed_policy = policy;
+    seed_policy["actions"][0]["values"] = {0, 1};
+    const auto seed_descriptor = seed_policy.dump();
+    Handle seed(mcsim_create_contract(1, cuda, environment, 100, 91, weights.data(), seed_descriptor.c_str()), mcsim_destroy);
+    require(seed != nullptr, "create Bridge building test scene");
+    auto definition = scenario(seed.get(), 0);
+    definition["blocks"].push_back({{"from", {0, 2, 1}}, {"to", {0, 2, 1}}, {"block", "minecraft:stone"}});
+    definition["players"][1]["position"][0] = -2.5;
+    for (auto& player : definition["players"]) {
+        player["velocity"][1] = -0.0784000015258789;
+        player["loadout"] = {{"weapons", {"minecraft:diamond_sword", "minecraft:air", "minecraft:air"}},
+                             {"selected", 1}, {"arrows", 0}, {"offhand", "minecraft:air"}};
+    }
+    const std::string path = cuda ? "training-bridge-building-cuda.json" : "training-bridge-building-cpu.json";
+    {
+        std::ofstream output(path);
+        require(static_cast<bool>(output), "open Bridge building test scene");
+        output << definition;
+    }
+    const auto descriptor = policy.dump();
+    Handle batch(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    Handle persistent(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    Handle clearing(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    std::filesystem::remove(path);
+    require(batch != nullptr && persistent != nullptr && clearing != nullptr, "create Bridge building training batches");
+    const json kit{{"slots", {"sword", "blocks", "pickaxe"}}, {"blocks", 4}, {"golden_apples", 0}};
+    json config{{"mode", {{"name", "bridge"}, {"version", 1}}},
+        {"goals", {{{"min", {0.0, 1.0, 2.4}}, {"max", {1.0, 3.0, 2.9}}},
+                   {{"min", {0.0, 1.0, -1.1}}, {"max", {1.0, 3.0, -0.8}}}}},
+        {"void_y", -2.0},
+        {"match", {{"goals_to_win", 2}, {"max_ticks", 100}, {"cage_ticks", 0},
+                   {"persist_blocks_on_goal", true}, {"arrow_refill_ticks", 0}}},
+        {"kits", {kit, kit}}, {"task_rewards", {{"score", 2.0}, {"win", 5.0}, {"loss", -3.0}}},
+        {"building", {{"zones", {{{"min", {-3, 0, -3}}, {"max", {4, 4, 4}}}}},
+                      {"block_range", 4.5}, {"entity_range", 3.0}, {"hardness", 1.0},
+                      {"mining_speed", 15.0}, {"correct_tool", true}}}};
+    const auto check_goal_reset = [&](Handle& goal_batch, bool persist) {
+        auto goal_config = config;
+        goal_config["match"]["persist_blocks_on_goal"] = persist;
+        require(mcsim_configure_bridge(goal_batch.get(), goal_config.dump().c_str()) == 0,
+            "configure Bridge goal terrain policy");
+        auto players = scenario(goal_batch.get(), 0)["players"];
+        players[0]["velocity"][2] = 0.2;
+        const auto definitions = json::array({players, nullptr}).dump();
+        const std::array<uint8_t, 2> first{1, 0}, second{0, 1};
+        std::array<float, 4> observations{}, rewards{};
+        std::array<uint8_t, 2> terminated{}, truncated{};
+        const std::array<int32_t, 12> actions{1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        require(mcsim_reset_players(goal_batch.get(), first.data(), definitions.c_str(), observations.data()) == 0,
+            "set up a scoring placement in one world");
+        require(mcsim_step(goal_batch.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0, "step scoring placement");
+        const auto* raw = mcsim_bridge_state(goal_batch.get());
+        require(raw != nullptr, "read scoring placement events");
+        const auto events = json::parse(raw);
+        require(events[0]["placed"][0] == true && events[0]["scored"][0] == true
+            && events[0]["round_reset"] == true && !terminated[0] && !truncated[0],
+            "a nonwinning goal follows the placement on the same tick");
+        const float expected = persist ? 0.03F : 0.05F;
+        require(std::abs(observations[0] - expected) < 1E-6F && std::abs(observations[2] - 0.05F) < 1E-6F,
+            "goal reset applies the configured terrain policy only to its world");
+        require(mcsim_reset(goal_batch.get(), second.data(), observations.data()) == 0
+            && std::abs(observations[0] - expected) < 1E-6F, "other match reset preserves goal terrain");
+        require(mcsim_reset(goal_batch.get(), first.data(), observations.data()) == 0
+            && std::abs(observations[0] - 0.05F) < 1E-6F, "full match reset clears selected terrain");
+    };
+    check_goal_reset(persistent, true);
+    check_goal_reset(clearing, false);
+    auto invalid = config;
+    invalid["building"]["zones"][0]["min"][0] = -4;
+    require(mcsim_configure_bridge(batch.get(), invalid.dump().c_str()) != 0,
+        "reject build zones outside arena bounds");
+    require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) == 0, "configure mutable Bridge batch");
+    std::array<int32_t, 12> actions{1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    std::array<float, 4> observations{}, rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    const auto step = [&] {
+        require(mcsim_step(batch.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0 && !terminated[0] && !truncated[0],
+            "step mutable Bridge batch");
+    };
+    const auto status = [&] {
+        const auto* value = mcsim_bridge_state(batch.get());
+        require(value != nullptr, "read Bridge building events");
+        return json::parse(value);
+    };
+    step();
+    require(status()[0]["placed"][0] == true && std::abs(observations[0] - 0.03F) < 1E-6F
+        && std::abs(observations[2] - 0.05F) < 1E-6F,
+        "placed terrain affects only the edited world's observation");
+    const std::array<uint8_t, 2> other{0, 1};
+    require(mcsim_reset(batch.get(), other.data(), observations.data()) == 0
+        && std::abs(observations[0] - 0.03F) < 1E-6F, "other-world reset preserves placed terrain");
+    actions[0] = 2;
+    actions[1] = 0;
+    actions[2] = 1;
+    step();
+    require(status()[0]["broke"][0] == false, "breaking begins without immediate completion");
+    step();
+    require(status()[0]["broke"][0] == false, "partial break preserves the block");
+    step();
+    require(status()[0]["broke"][0] == true && std::abs(observations[0] - 0.05F) < 1E-6F,
+        "broken terrain disappears from observations");
+}
+
 void checkResetPlayers(const char* environment, int cuda) {
     json contract{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
         {"ticks_per_action", 1}, {"requires", {"bow"}}, {"observations", json::array()},
@@ -822,6 +1121,9 @@ int main(int argc, char** argv) {
         const int cuda = argc == 3 ? 1 : 0;
         if (cuda && !mcsim_cuda_available()) return 77;
         checkLargeArena(argv[1], cuda);
+        checkBridgeBatch(argv[1], cuda);
+        checkBridgeKits(argv[1], cuda);
+        checkBridgeBuilding(argv[1], cuda);
         checkResetPlayers(argv[1], cuda);
         checkFallDamageReset(argv[1], cuda);
         checkEmptySlots(argv[1], cuda);

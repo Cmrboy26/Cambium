@@ -108,7 +108,7 @@ class Environment:
     """Explicit-reset batch; step returns final observations, never auto-reset states."""
 
     def __init__(self, environments=16, device="cpu", environment=None, library=None,
-                 max_ticks=None, seed=1, weights=None, schema="v1", contract=None):
+                 max_ticks=None, seed=1, weights=None, schema="v1", contract=None, bridge=None):
         if device not in ("cpu", "cuda"):
             raise ValueError("device must be cpu or cuda")
         if not 1 <= environments <= 65536 or not 0 <= seed < 2**64:
@@ -229,6 +229,13 @@ class Environment:
         self._cuda_resident_buffers = None
         self._cuda_resident_pointers = None
         self._cuda_resident_ready = False
+        self.bridge = None
+        if bridge is not None:
+            try:
+                self.configure_bridge(bridge)
+            except Exception:
+                self.close()
+                raise
 
     def _check(self, result):
         if result != 0:
@@ -240,6 +247,63 @@ class Environment:
         owner = getattr(self, "_cuda_observation_thread", None)
         if owner is not None and owner != threading.get_ident():
             raise RuntimeError("CUDA observation environments must be used from their registration thread")
+
+    def configure_bridge(self, configuration):
+        """Enable the experimental static-arena Bridge batch and reset all worlds."""
+        self._require_open()
+        if self.bridge is not None:
+            raise RuntimeError("Bridge is already configured")
+        if self._cuda_resident_ready:
+            raise RuntimeError("CUDA resident Bridge collection is not implemented")
+        bridge_version = self.build_info.get("bridge_host_batch_version", 0)
+        if bridge_version < 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for experimental Bridge batches")
+        if not isinstance(configuration, dict):
+            raise ValueError("Bridge configuration must be an object")
+        match = configuration.get("match")
+        if bridge_version < 2 and ("kits" in configuration or
+                                   (isinstance(match, dict) and match.get("arrow_refill_ticks", 0) != 0)):
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge kits and arrow refill")
+        if bridge_version < 3 and "building" in configuration:
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge building")
+        encoded = json.dumps(configuration, allow_nan=False).encode("utf-8")
+        configure = self.native.mcsim_configure_bridge
+        configure.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        configure.restype = ctypes.c_int
+        self._check(configure(self._handle, encoded))
+        self.bridge = json.loads(encoded)
+        self.definition = json.loads(self.native.mcsim_environment(self._handle))
+        self.scenario = json.loads(self.native.mcsim_scenario(self._handle))
+
+    def bridge_state(self):
+        """Return the latest score, match outcome and per-tick events for each world."""
+        self._require_open()
+        if self.bridge is None:
+            raise RuntimeError("Bridge is not configured")
+        function = self.native.mcsim_bridge_state
+        function.argtypes = [ctypes.c_void_p]
+        function.restype = ctypes.c_char_p
+        result = function(self._handle)
+        if result is None:
+            raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
+        return json.loads(result)
+
+    def bridge_kits(self, player):
+        """Return privileged per-world kit state for one player index."""
+        self._require_open()
+        if self.bridge is None:
+            raise RuntimeError("Bridge is not configured")
+        if self.build_info.get("bridge_host_batch_version", 0) < 2:
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge kit diagnostics")
+        if type(player) is not int or player not in (0, 1):
+            raise ValueError("Bridge player must be 0 or 1")
+        function = self.native.mcsim_bridge_kits
+        function.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        function.restype = ctypes.c_char_p
+        result = function(self._handle, player)
+        if result is None:
+            raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
+        return json.loads(result)
 
     @contextmanager
     def profile_collection(self, timer):
@@ -443,6 +507,8 @@ class Environment:
     def register_cuda_resident(self):
         """Register fixed-reset CUDA step outputs; host-state operations become unavailable."""
         self._require_open()
+        if self.bridge is not None:
+            raise RuntimeError("CUDA resident Bridge collection is not implemented")
         if self.device != "cuda":
             raise ValueError("CUDA resident stepping requires a CUDA environment")
         if self._cuda_observations is None or self._cuda_actions is None:
@@ -694,10 +760,15 @@ class Environment:
         result = function(self._handle, environment)
         if result is None:
             raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
-        return {**json.loads(result), "reward_weights": self.weights.copy(), "max_ticks": self.max_ticks}
+        scenario = json.loads(result)
+        if self.bridge is None:
+            scenario["reward_weights"] = self.weights.copy()
+        return {**scenario, "max_ticks": self.max_ticks}
 
     def set_max_ticks(self, max_ticks):
         self._require_open()
+        if self.bridge is not None:
+            raise RuntimeError("Bridge external cutoff is fixed at configuration time")
         if type(max_ticks) is not int or not 1 <= max_ticks <= MAX_MAX_TICKS:
             raise ValueError("Episode limit must be an integer in [1,1000000]")
         function = getattr(self.native, "mcsim_set_max_ticks", None)
@@ -711,6 +782,8 @@ class Environment:
 
     def set_rewards(self, weights):
         self._require_open()
+        if self.bridge is not None:
+            raise RuntimeError("Bridge uses its explicitly configured task rewards")
         resolved = resolve_reward_weights({}, weights)
         if not all(np.isfinite(value) for value in resolved.values()):
             raise ValueError("Reward weights must be finite")

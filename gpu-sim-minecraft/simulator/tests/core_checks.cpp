@@ -6,6 +6,8 @@
 #include "../apps/observation.hpp"
 #include "../apps/rewards.hpp"
 #include "../apps/replay.hpp"
+#include "bridge_match_checks.hpp"
+#include "terrain_checks.hpp"
 #include <fstream>
 
 #if defined(MCSIM_HAS_CUDA)
@@ -51,6 +53,7 @@ void checkMutableTerrain() {
     const BlockWorldView static_world{base.data(), 4, 2, 1, -2, 0, 0};
     TerrainOverlays terrain(static_world, 2);
     const auto first = terrain.view(0), second = terrain.view(1);
+    require(terrain_checks::orderedEditsAndResets(first), "ordered terrain edits and reset policy");
     const Vec3 origin{-2.0, 1.5, 0.5}, delta{4.0, 0.0, 0.0};
     const Aabb first_cell{{0.1, 1.1, 0.1}, {0.9, 1.9, 0.9}};
     near(blockRayFraction(first, origin, delta), 1.0, 0.0, "initial first-world ray");
@@ -68,6 +71,13 @@ void checkMutableTerrain() {
     require(!static_world.setPlacedBlock(0, 1, 0, PlacedBlock::team0), "static edit rejected");
     require(!first.setPlacedBlock(0, 1, 0, static_cast<PlacedBlock>(3)), "invalid team rejected");
     const std::array<std::uint8_t, 2> reset_mask{1, 0};
+    terrain.reset(reset_mask.data(), TerrainReset::player_respawn, false);
+    require(first.solid(0, 1, 0) && second.solid(1, 1, 0), "respawn preserves overlays");
+    terrain.reset(reset_mask.data(), TerrainReset::round);
+    require(first.solid(0, 1, 0) && second.solid(1, 1, 0), "default goal reset preserves overlays");
+    terrain.reset(reset_mask.data(), TerrainReset::round, false);
+    require(!first.solid(0, 1, 0) && second.solid(1, 1, 0), "goal clear affects only selected overlay");
+    require(first.setPlacedBlock(0, 1, 0, PlacedBlock::team0), "replace first-world block");
     terrain.reset(reset_mask.data());
     near(blockRayFraction(first, origin, delta), 1.0, 0.0, "selected reset clears first ray");
     near(blockRayFraction(second, origin, delta), 0.75, 0.0, "selected reset preserves second ray");
@@ -99,6 +109,76 @@ void checkMutableTerrain() {
         try { (void)parseTerrainBudget(value); } catch (const std::invalid_argument&) { invalid_rejected = true; }
         require(invalid_rejected, "invalid terrain budget rejected");
     }
+}
+
+void checkCompositeWorldConsumers() {
+    using namespace minecraft_sim;
+    constexpr int environments = 3;
+    std::array<Block, 3 * 4 * 5> base{};
+    for (int z = 0; z < 5; ++z) {
+        for (int x = 0; x < 3; ++x) base[z * 12 + x] = Block::solid;
+    }
+    TerrainOverlays terrain({base.data(), 3, 4, 5, -1, 0, 0}, environments);
+    std::array<PlayerState, environments * 2> players{};
+    std::array<Controls, environments * 2> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<ProjectileWorldState, environments> projectiles{};
+    std::array<ArrowState, environments> arrows{};
+    BatchView batch{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                    terrain.data(), {testTable().data()}, projectiles.data()};
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 100;
+    settings.shaping_weights[0] = 1.0F;
+    settings.shaping_weights[3] = 1.0F;
+    for (int environment = 0; environment < environments; ++environment) {
+        players[environment * 2].position = {0.5, 1.0, 0.5};
+        players[environment * 2].velocity.z = 0.6;
+        players[environment * 2 + 1].position = {0.5, 1.0, 2.5};
+        queued[environment * 2].attack = true;
+        arrows[environment].position = {0.5, 2.5, 0.5};
+        arrows[environment].velocity = {0.0, 0.0, 1.0};
+        arrows[environment].owner = 0;
+        arrows[environment].active = true;
+        projectiles[environment].arrows = &arrows[environment];
+        projectiles[environment].arrow_capacity = 1;
+        if (environment != 1) {
+            const auto team = environment == 0 ? PlacedBlock::team0 : PlacedBlock::team1;
+            require(terrain.view(environment).setPlacedBlock(0, 1, 1, team)
+                && terrain.view(environment).setPlacedBlock(0, 2, 1, team), "place composite wall");
+        }
+    }
+    for (int environment = 0; environment < environments; ++environment) {
+        const bool blocked = environment != 1;
+        float observation[22]{};
+        app::baseWorldObservation(players[environment * 2], players[environment * 2 + 1],
+                                  terrain.view(environment), observation);
+        near(observation[10], blocked ? 0.01 : 1.0, 1.0e-7, "per-world observation ray");
+        app::DuelRewardState reward_state;
+        const auto reward = app::duelRewards(players.data() + environment * 2, worlds[environment],
+            terrain.view(environment), projectiles[environment], settings, reward_state);
+        near(reward.rewards[0], blocked ? 0.0 : 2.0, 0.0, "per-world aim reward visibility");
+        require(batch.world(environment).pickAttackTarget(0) == (blocked ? -1 : 1),
+                "per-world melee targeting");
+        processWorldTick(batch.world(environment), projectiles[environment]);
+        const auto& player = players[environment * 2];
+        require(player.last_attack.target == (blocked ? -1 : 1)
+            && player.last_attack.hit_block == blocked, "per-world attack tick");
+        require(blocked ? player.position.z < 0.71 : player.position.z > 1.0,
+                "per-world movement collision");
+        require(arrows[environment].in_ground == blocked, "per-world projectile collision");
+        if (blocked) near(arrows[environment].position.z, 1.0 - double(0.05F), 1.0e-12,
+                          "placed-block projectile impact");
+    }
+    const std::array<std::uint8_t, environments> mask{1, 0, 0};
+    terrain.reset(mask.data());
+    require(!terrain.view(0).solid(0, 2, 1) && terrain.view(2).solid(0, 2, 1)
+        && terrain.view(0).solid(0, 0, 1), "selective reset preserves other overlay and protected base");
+    const auto remaining = terrain.view(2);
+    const auto index = remaining.cellIndex(0, 2, 1);
+    require(remaining.overlay[index] == PlacedBlock::team1
+        && remaining.setPlacedBlock(0, 2, 1, PlacedBlock::empty)
+        && remaining.setPlacedBlock(0, 2, 1, PlacedBlock::team0)
+        && remaining.overlay[index] == PlacedBlock::team0, "ordered edits preserve team identity");
 }
 
 void checkPolicyFixtures() {
@@ -2077,7 +2157,18 @@ int main(int argc, char** argv) {
 #endif
             throw std::invalid_argument("Unsupported check mode");
         }
+        require(bridge_match_checks::outcomes(), "Bridge match outcome ordering");
+        require(bridge_match_checks::lifecycle(), "Bridge match lifecycle resets");
+        require(bridge_match_checks::selectedWorldReset(), "Bridge match selective world reset");
+        require(bridge_match_checks::tick({testTable().data()}), "Bridge cage and world tick");
+        require(bridge_match_checks::completeMatch({testTable().data()}), "Bridge full internal match");
+        require(bridge_match_checks::kitsAndRefill({testTable().data()}), "Bridge kit and arrow refill lifecycle");
+        require(bridge_match_checks::building({testTable().data()}), "Bridge block targeting, placement and breaking");
+        require(bridge_match_checks::simultaneousBuilding({testTable().data()}), "Bridge ordered simultaneous building");
+        require(bridge_match_checks::externalCutoff({testTable().data()}), "Bridge external cutoff retains final state");
+        require(terrain_checks::blockTargeting(), "full-cube block target faces and boundaries");
         checkMutableTerrain();
+        checkCompositeWorldConsumers();
         checkPolicyFixtures();
         checkEquipmentObservation();
         checkShapingReward();

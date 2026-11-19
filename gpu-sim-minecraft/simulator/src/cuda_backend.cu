@@ -122,13 +122,16 @@ void rejectEventManagedGraphCapture(cudaStream_t stream) {
 }
 
 __global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* arrow_summaries,
-                                    app::ObservationActorMetadata* observation_actors, const int* action_status) {
+                                    app::ObservationActorMetadata* observation_actors, const int* action_status,
+                                    const BridgeMatchRules* bridge_rules, const BridgeInitialPlayers* bridge_initial,
+                                    BridgeMatchState* bridge_states, BridgeTickEvents* bridge_events,
+                                    int bridge_external_cutoff) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(batch.environment_count) || (action_status && *action_status != 0)) {
         return;
     }
     const int offset = static_cast<int>(index) * batch.players_per_environment;
-    if (observation_actors) {
+    if (observation_actors && !bridge_rules) {
         for (int player = 0; player < batch.players_per_environment; ++player) {
             const auto& control = batch.queued_controls[offset + player];
             if (control.select_weapon && control.selected_slot >= 0) {
@@ -137,17 +140,25 @@ __global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* ar
         }
     }
     auto world = batch.world(static_cast<int>(index));
-    if (batch.projectile_states) {
-        const auto blocks = batch.block_worlds ? batch.block_worlds[index] : BlockWorldView{};
-        processWorldTick(world, blocks, batch.projectile_states[index]);
+    if (bridge_rules) {
+        bridge_events[index] = processBridgeWorldTick(world, batch.projectile_states[index],
+            bridge_initial[index].players, *bridge_rules, bridge_states[index], bridge_external_cutoff);
+    } else if (batch.projectile_states) {
+        processWorldTick(world, batch.projectile_states[index]);
     } else {
         world.processTick();
     }
     if (observation_actors) {
         for (int player = 0; player < batch.players_per_environment; ++player) {
+            if (bridge_rules) observation_actors[offset + player].selected_slot = batch.players[offset + player].selected_weapon_slot;
             auto& observed = observation_actors[offset + player].observed_opponent_disable;
-            if (observed > 0) --observed;
-            if (batch.players[offset + player].last_attack.shield_disabled) observed = 99;
+            if (bridge_rules && (bridge_events[index].round_reset || bridge_events[index].respawn[player])
+                && !bridge_events[index].terminated && bridge_states[index].ticks < bridge_external_cutoff) {
+                observed = 0;
+            } else {
+                if (observed > 0) --observed;
+                if (batch.players[offset + player].last_attack.shield_disabled) observed = 99;
+            }
         }
     }
     if (arrow_summaries && batch.projectile_states) {
@@ -271,7 +282,7 @@ __global__ void resetFixedWorlds(BatchView batch, const std::uint8_t* mask,
                                  ArrowObservationSummary* summaries, const int* status) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(batch.environment_count) || *status != 0 || !mask[index]) return;
-    if (batch.block_worlds) batch.block_worlds[index].clearPlacedBlocks();
+    if (batch.block_worlds) batch.block_worlds[index].resetPlacedBlocks(TerrainReset::match);
     const auto episode = episodes[index]++;
     const bool simulate_fall_damage = batch.worlds[index].simulate_fall_damage;
     batch.worlds[index] = {};
@@ -306,7 +317,7 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
         return;
     }
     const int destination = ids[index];
-    if (batch.block_worlds) batch.block_worlds[destination].clearPlacedBlocks();
+    if (batch.block_worlds) batch.block_worlds[destination].resetPlacedBlocks(TerrainReset::match);
     const bool simulate_fall_damage = batch.worlds[destination].simulate_fall_damage;
     batch.worlds[destination] = {};
     batch.worlds[destination].simulate_fall_damage = simulate_fall_damage;
@@ -354,6 +365,11 @@ struct CudaBatch::Storage {
     DeviceBuffer<Controls> queued;
     DeviceBuffer<Controls> held;
     DeviceBuffer<WorldState> worlds;
+    DeviceBuffer<BridgeMatchRules> bridge_rules;
+    DeviceBuffer<BridgeInitialPlayers> bridge_initial;
+    DeviceBuffer<BridgeMatchState> bridge_states;
+    DeviceBuffer<BridgeTickEvents> bridge_events;
+    int bridge_external_cutoff = 0;
     DeviceBuffer<ProjectileWorldState> projectile_states;
     DeviceBuffer<ProjectileWorldState> reset_projectile_states;
     DeviceBuffer<ArrowState> projectile_arrows;
@@ -579,6 +595,37 @@ void CudaBatch::uploadControls(const Controls* controls, std::size_t count) {
     }
     if (storage_->observation_state_ready) checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
     storage_->queued.upload(controls);
+}
+
+void CudaBatch::configureBridge(const BridgeMatchRules& rules, const BridgeInitialPlayers* initial,
+                                const BridgeMatchState* states, std::size_t count, int external_cutoff) {
+    if (!initial || !states || count != static_cast<std::size_t>(storage_->view.environment_count)
+        || storage_->view.players_per_environment != 2 || !storage_->view.projectile_states || external_cutoff <= 0) {
+        throw std::invalid_argument("Invalid CUDA Bridge batch configuration");
+    }
+    validateCurrentDevice(storage_->device);
+    if (storage_->observation_state_ready) checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    if (storage_->observation_read_pending) checkCuda(cudaEventSynchronize(storage_->observation_read_done));
+    if (!storage_->bridge_rules.data) {
+        storage_->bridge_rules.allocate(1);
+        storage_->bridge_initial.allocate(count);
+        storage_->bridge_states.allocate(count);
+        storage_->bridge_events.allocate(count);
+    }
+    storage_->bridge_rules.upload(&rules);
+    storage_->bridge_initial.upload(initial);
+    storage_->bridge_states.upload(states);
+    storage_->bridge_external_cutoff = external_cutoff;
+}
+
+void CudaBatch::downloadBridge(BridgeMatchState* states, BridgeTickEvents* events, std::size_t count) const {
+    if (!states || !events || !storage_->bridge_rules.data || count != storage_->bridge_states.count) {
+        throw std::invalid_argument("Invalid CUDA Bridge state output");
+    }
+    validateCurrentDevice(storage_->device);
+    if (storage_->observation_state_ready) checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    storage_->bridge_states.download(states);
+    storage_->bridge_events.download(events);
 }
 
 void CudaBatch::configureObservations(const app::ObservationProjection* projection, std::size_t features,
@@ -931,6 +978,9 @@ void CudaBatch::advanceOnStream(int ticks, void* stream, bool check_action_statu
     if (ticks <= 0) {
         throw std::invalid_argument("Tick count must be positive");
     }
+    if (storage_->bridge_rules.data && (ticks != 1 || check_action_status)) {
+        throw std::invalid_argument("Bridge supports only single-tick host-staged stepping");
+    }
     const auto cuda_stream = static_cast<cudaStream_t>(stream);
     if (storage_->observation_state_ready) {
         rejectEventManagedGraphCapture(cuda_stream);
@@ -951,7 +1001,9 @@ void CudaBatch::advanceOnStream(int ticks, void* stream, bool check_action_statu
         advanceEnvironments<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
                               cuda_stream>>>(
             storage_->view, summaries, storage_->observation_actors.data,
-            check_action_status ? storage_->action_status.data : nullptr);
+            check_action_status ? storage_->action_status.data : nullptr,
+            storage_->bridge_rules.data, storage_->bridge_initial.data,
+            storage_->bridge_states.data, storage_->bridge_events.data, storage_->bridge_external_cutoff);
         checkCuda(cudaGetLastError());
     }
     if (storage_->observation_state_ready) {

@@ -15,6 +15,100 @@ optimization is not implemented. Historical shared-self-play code is isolated in
 [compatibility_training.py](compatibility_training.py) for regression fixtures;
 it is not the public training entry point. Common PPO/GAE lives in [ppo.py](ppo.py).
 
+## Experimental Bridge Batches
+
+`Environment(..., bridge=configuration)` opts into a direct, host-staged
+Bridge experiment. It is not accepted by setup JSON, curricula, replay, the live
+adapter or the PPO research collector. CPU and CUDA batches use the shared
+Bridge tick and own match state independently per world. CUDA transfers controls,
+player state, match state and compact ordered terrain edit events through the
+host; it does not transfer a terrain grid per tick. Resident Bridge collection
+is explicitly rejected. Normal duel batches are unchanged.
+
+The configuration is a JSON-compatible object with exactly these fields:
+
+```json
+{
+  "mode": {"name": "bridge", "version": 1},
+  "goals": [
+    {"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+    {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}
+  ],
+  "void_y": -2,
+  "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+            "persist_blocks_on_goal": true, "arrow_refill_ticks": 0},
+  "task_rewards": {"score": 2.0, "win": 5.0, "loss": -3.0}
+}
+```
+
+These goal boxes fit `simulator/tests/reset_environment.json`; other arenas
+must supply their own valid boxes and safe spawns. A positive
+`arrow_refill_ticks` requires a bow in both scene loadouts; zero disables
+refill. Once the last arrow is fired, the timer starts on the next match tick
+and restores one arrow at the end of the configured number of empty ticks.
+`bridge_state()` returns scores, clock, cage, outcomes and the last tick's
+score/death/reset/place/break events. `step()`
+returns the configured score/win/loss rewards, never duel reward weights.
+The Bridge match clock produces `terminated`; the constructor's separate
+`max_ticks` is an external `truncated` cutoff, retaining the final observation.
+`reset(mask)` resets only selected matches. `configure_bridge(configuration)`
+also enables the mode on an existing batch and resets all worlds.
+
+Optional `kits` is a two-element array, one per player, whose objects contain
+`slots`, `blocks` and `golden_apples`. Slot names are `empty`, `sword`, `bow`,
+`pickaxe`, `blocks` or `golden_apple`; nonempty names are unique. Counts are
+integers from 0 to 64 and require the corresponding slot when positive. A kit
+must match the scene loadout exactly: sword and bow slots contain the matching
+weapon, while all other kit slots contain `minecraft:air` placeholders. The
+scene loadout still owns the initial selected slot and initial arrow count.
+For example, the following kit corresponds to scene weapons
+`["minecraft:diamond_sword", "minecraft:bow", "minecraft:air", "minecraft:air", "minecraft:air"]`:
+
+```json
+{"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple"],
+ "blocks": 64, "golden_apples": 2}
+```
+
+`bridge_kits(player)` is privileged diagnostic state for one player index,
+including item counts, selected slot and refill progress; it is not a policy
+observation. Death restores only that player's kit, a nonwinning goal restores
+both, and a full reset restores selected matches. Without the optional building
+configuration, pickaxe and block actions are suppressed. Golden-apple eating,
+effects and structured score observations remain unimplemented.
+For reserved non-weapon slots, the adapter rejects legacy equipment observations,
+weapon charge/attribute features and weapon-slot features for those slots rather
+than reporting their `minecraft:air` placeholders as the actual kit items.
+
+Optional `building` requires explicit kits and takes one to eight half-open
+build zones, `block_range`, `entity_range`, `hardness`, `mining_speed` and
+`correct_tool`. For example:
+
+```json
+{"zones": [{"min": [-3, 0, -3], "max": [4, 4, 4]}],
+ "block_range": 4.5, "entity_range": 3.0,
+ "hardness": 0.8, "mining_speed": 1.0, "correct_tool": true}
+```
+
+Zones must lie inside the arena. Only ordinary full cubes are targeted; base
+blocks are protected and only placed overlays can be broken. Placement consumes
+one block only on success and checks player occupancy and the zone. Mining uses
+the explicitly supplied hardness/speed/tool values and the grounded/airborne
+multiplier; it does not implement tool materials, effects, fluids, enchantment,
+durability or drops. Pickaxe attacks against entities are suppressed. Held use
+repeats after four ticks; mining cancels on release or target/slot change.
+This is an experimental subset, not a claim of captured vanilla or Hypixel parity.
+Configure building before registering CUDA observation buffers.
+
+Resolved scenarios include `experimental_bridge` and are intentionally rejected
+by the ordinary scene loader until the authored capability gate exists. Duel
+reward totals, behavior metrics and replay serialization reject Bridge rather
+than reporting misleading data. The additive native calls are
+`mcsim_configure_bridge`, `mcsim_bridge_state` and `mcsim_bridge_kits`;
+`mcsim_build_info` advertises
+`bridge_host_batch_version: 3` for mutable building. Focused CPU and T4 checks
+cover the experimental host batch; see the [Phase 1 tracker](../../docs/BRIDGE_PHASE1_CHECKLIST.md)
+for evidence and remaining integration and conformance gates.
+
 The native library exposes a small C ABI through `ctypes`, without pybind11 or
 Python development headers. CPU worlds use OpenMP when available, sequential
 execution otherwise. Host collection stages CUDA controls/state through host

@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
                 std::cout << "BEGIN world=" << start + index << std::endl;
                 const std::array<std::uint64_t, 2> random_before{
                     batch.players[index * 2].random.state, batch.players[index * 2 + 1].random.state};
-                processWorldTick(batch.world(index), blocks[index], batch.projectile_states[index]);
+                processWorldTick(batch.world(index), batch.projectile_states[index]);
                 const auto& player = batch.players[index * 2];
                 std::cout << std::setprecision(17) << "DONE world=" << start + index << " player0="
                           << player.position.x << ',' << player.position.y << ',' << player.position.z << std::endl;

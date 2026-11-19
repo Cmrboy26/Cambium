@@ -542,7 +542,7 @@ public:
     }
 
     MCSIM_HD void tick(BlockWorldView blocks, MathView math, PlayerState* players = nullptr,
-                       int player_count = 0, bool prepared = false) {
+                       int player_count = 0, bool prepared = false, bool movement_locked = false) {
         if (!prepared) {
             prepareTick();
         }
@@ -565,7 +565,8 @@ public:
         }
         const Vec3 movement_input = processMovementInputs(math);
         const Vec3 previous_position = state_->position;
-        travel(blocks, math, movement_input);
+        if (movement_locked) state_->velocity = {};
+        else travel(blocks, math, movement_input);
         if (state_->on_ground && state_->sprinting) {
             const double distance_x = state_->position.x - previous_position.x;
             const double distance_z = state_->position.z - previous_position.z;
@@ -573,7 +574,7 @@ public:
             const int rounded_distance = static_cast<int>(::floor(double(centimeters) + 0.5));
             if (rounded_distance > 0) addExhaustion(0.1F * rounded_distance * 0.01F);
         }
-        for (int index = 0; index < player_count; ++index) {
+        for (int index = 0; !movement_locked && index < player_count; ++index) {
             auto& other = players[index];
             if (&other != state_ && state_->alive() && other.alive() && other.pushable
                 && state_->bounds().intersects(other.bounds())) {
@@ -873,6 +874,11 @@ public:
 
     MCSIM_HD const Controls& queuedInput(int index) const { return queued_[index]; }
 
+    MCSIM_HD void clearInputs(int index) const {
+        queued_[index] = {};
+        held_[index] = {};
+    }
+
     MCSIM_HD int pickAttackTarget(int attacker, bool* hit_block = nullptr) const {
         if (hit_block) {
             *hit_block = false;
@@ -909,6 +915,7 @@ public:
     MCSIM_HD const WorldState& state() const { return *state_; }
     MCSIM_HD WorldState& mutableState() const { return *state_; }
     MCSIM_HD MathView math() const { return math_; }
+    MCSIM_HD BlockWorldView blocks() const { return blocks_; }
 
     // Source: minecraft-26.3-src/net/minecraft/client/Minecraft.java, handleKeybinds;
     // item-button release suppresses attacks for the sample that ends active use.
@@ -933,7 +940,7 @@ public:
         }
     }
 
-    MCSIM_HD void finishTick() {
+    MCSIM_HD void finishTick(const bool* movement_locked = nullptr) {
         for (int index = 0; index < player_count_; ++index) {
             auto& state = players_[index];
             if (!state.last_attack.attempted || !state.alive()) {
@@ -952,7 +959,8 @@ public:
             }
         }
         for (int index = 0; index < player_count_; ++index) {
-            player(index).tick(blocks_, math_, players_, player_count_, true);
+            player(index).tick(blocks_, math_, players_, player_count_, true,
+                               movement_locked && movement_locked[index]);
         }
         ++state_->tick;
     }
