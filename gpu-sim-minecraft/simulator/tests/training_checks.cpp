@@ -123,6 +123,125 @@ void checkBridgeBatch(const char* environment, int cuda) {
         "external truncation retains the pre-reset goal observation");
 }
 
+void checkBridgeFixedOpponentMatch(const char* environment, int cuda) {
+    const std::array<float, 10> weights{};
+    const json policy{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
+        {"ticks_per_action", 1},
+        {"observations", {{{"feature", "relative.x"}}, {{"feature", "relative.z"}},
+                          {{"feature", "self.health_fraction"}}, {{"feature", "self.velocity.z"}}}},
+        {"actions", {{{"name", "movement"}, {"values", {"neutral", "forward"}}}}}};
+    const auto descriptor = policy.dump();
+    Handle seed(mcsim_create_contract(1, cuda, environment, 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    require(seed != nullptr, "create fixed-opponent Bridge scene source");
+    auto definition = scenario(seed.get(), 0);
+    definition["players"][0]["position"] = {0.5, 1.0, -1.5};
+    definition["players"][1]["position"] = {-1.5, 1.0, 1.5};
+    for (auto& player : definition["players"]) {
+        player["velocity"] = {0.0, 0.0, 0.0};
+        player["on_ground"] = true;
+        player["health"] = 20.0;
+    }
+    definition["players"][0]["yaw"] = 0.0;
+    const std::string path = cuda ? "training-bridge-match-cuda.json" : "training-bridge-match-cpu.json";
+    {
+        std::ofstream output(path);
+        require(static_cast<bool>(output), "open fixed-opponent Bridge scene");
+        output << definition;
+    }
+    Handle batch(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    std::filesystem::remove(path);
+    require(batch != nullptr, "create fixed-opponent Bridge batch");
+    const json config{{"mode", {{"name", "bridge"}, {"version", 1}}},
+        {"goals", {{{"min", {0.0, 1.0, 2.4}}, {"max", {1.0, 3.0, 2.9}}},
+                   {{"min", {0.0, 1.0, -1.16}}, {"max", {1.0, 3.0, -0.8}}}}},
+        {"void_y", -2.0},
+        {"match", {{"goals_to_win", 3}, {"max_ticks", 100}, {"cage_ticks", 2},
+                   {"persist_blocks_on_goal", true}, {"arrow_refill_ticks", 0}}},
+        {"task_rewards", {{"score", 2.0}, {"win", 5.0}, {"loss", -3.0}}}};
+    require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) == 0,
+        "configure fixed-opponent Bridge match");
+    const auto status = [&] {
+        const auto* value = mcsim_bridge_state(batch.get());
+        require(value != nullptr, "read fixed-opponent Bridge state");
+        return json::parse(value);
+    };
+    std::array<int32_t, 4> actions{1, 0, 1, 0};
+    std::array<float, 16> observations{};
+    std::array<float, 4> rewards{};
+    std::array<uint8_t, 2> terminated{}, truncated{};
+    const std::array<float, 8> spawn_observations{-0.2F, 0.3F, 1.0F, 0.0F,
+                                                   0.2F, -0.3F, 1.0F, 0.0F};
+    const std::array<float, 8> final_observations{-0.2F, 0.2902F, 1.0F, 0.053508F,
+                                                   0.2F, -0.2902F, 1.0F, 0.0F};
+    const auto check_observations = [&](int world, const std::array<float, 8>& expected, const char* message) {
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            require(std::abs(observations[world * expected.size() + index] - expected[index]) < 2E-5F, message);
+        }
+    };
+    require(mcsim_observe(batch.get(), observations.data()) == 0, "observe initial Bridge match");
+    check_observations(0, spawn_observations, "initial first-world observations");
+    check_observations(1, spawn_observations, "initial second-world observations");
+    require(status()[0]["cage_remaining"] == 2 && status()[1]["cage_remaining"] == 2,
+        "both matches start with two locked ticks");
+
+    for (int tick = 1; tick <= 9; ++tick) {
+        require(mcsim_step(batch.get(), actions.data(), observations.data(), rewards.data(),
+            terminated.data(), truncated.data()) == 0, "step fixed-opponent Bridge match");
+        const auto states = status();
+        const bool scored = tick % 3 == 0;
+        const bool winning = tick == 9;
+        require(states[0]["ticks"] == tick && states[0]["scores"] == json::array({tick / 3, 0})
+            && states[0]["scored"] == json::array({scored, false})
+            && states[0]["died"] == json::array({false, false})
+            && states[0]["round_reset"] == (scored && !winning)
+            && states[0]["cage_remaining"] == (scored && !winning ? 2 : (scored ? 0 : 2 - tick % 3))
+            && states[0]["outcome"] == (winning ? "team0" : "ongoing"),
+            "first match score, clock, cage and round events follow the expected timeline");
+        require(terminated[0] == winning && !truncated[0]
+            && rewards[0] == (winning ? 7.0F : (scored ? 2.0F : 0.0F))
+            && rewards[1] == (winning ? -3.0F : 0.0F),
+            "first match emits only the expected score and outcome rewards");
+        const bool other_scored = tick == 3;
+        require(states[1]["ticks"] == tick && states[1]["scores"] == json::array({tick >= 3 ? 1 : 0, 0})
+            && states[1]["scored"] == json::array({other_scored, false})
+            && states[1]["round_reset"] == other_scored && states[1]["outcome"] == "ongoing"
+            && !terminated[1] && !truncated[1]
+            && rewards[2] == (other_scored ? 2.0F : 0.0F) && rewards[3] == 0.0F,
+            "other match scores once and remains independent and ongoing");
+        check_observations(0, winning ? final_observations : spawn_observations,
+            "first match exposes reset or final observations at the correct time");
+        check_observations(1, spawn_observations, "stationary other match remains at its spawns");
+        if (tick == 3) actions[2] = 0;
+    }
+
+    std::array<uint8_t, 4> losses{};
+    require(mcsim_losses(batch.get(), losses.data()) == 0
+        && losses == std::array<uint8_t, 4>{0, 1, 0, 0}, "winning match reports only the losing opponent");
+    const auto other_state = status()[1];
+    require(mcsim_step(batch.get(), actions.data(), observations.data(), rewards.data(),
+        terminated.data(), truncated.data()) != 0, "finished match cannot advance before reset");
+    const std::array<uint8_t, 2> first_world{1, 0};
+    require(mcsim_reset(batch.get(), first_world.data(), observations.data()) == 0,
+        "selectively reset the finished Bridge match");
+    const auto reset = status();
+    require(reset[0]["ticks"] == 0 && reset[0]["scores"] == json::array({0, 0})
+        && reset[0]["cage_remaining"] == 2 && reset[0]["outcome"] == "ongoing"
+        && reset[1] == other_state, "full match reset preserves the other world's complete event state");
+    check_observations(0, spawn_observations, "selected reset restores both player observations");
+    check_observations(1, spawn_observations, "selected reset preserves other world observations");
+    require(mcsim_step(batch.get(), actions.data(), observations.data(), rewards.data(),
+        terminated.data(), truncated.data()) == 0, "step both matches after selective reset");
+    const auto resumed = status();
+    require(resumed[0]["ticks"] == 1 && resumed[0]["cage_remaining"] == 1
+        && resumed[0]["scores"] == json::array({0, 0}) && !terminated[0] && !truncated[0]
+        && resumed[1]["ticks"] == 10 && resumed[1]["scores"] == json::array({1, 0})
+        && resumed[1]["outcome"] == "ongoing" && !terminated[1] && !truncated[1],
+        "reset match restarts its cage while the other match continues");
+    check_observations(0, spawn_observations, "restarted cage locks the scorer again");
+    check_observations(1, spawn_observations, "other match continues with its fixed opponent");
+    std::cout << "PASS: fixed-opponent Bridge match and selective CPU/CUDA reset\n";
+}
+
 void checkBridgeKits(const char* environment, int cuda) {
     const std::array<float, 10> weights{};
     json policy{{"format", "minecraft_sim_policy"}, {"version", 1}, {"minecraft", "26.3"},
@@ -143,6 +262,7 @@ void checkBridgeKits(const char* environment, int cuda) {
                                           "minecraft:air", "minecraft:air"}},
                              {"selected", 1}, {"arrows", 1}, {"offhand", "minecraft:air"}};
     }
+    definition["players"][0]["health"] = 10;
     definition["players"][1]["position"][0] = -1.5;
     const std::string path = cuda ? "training-bridge-kits-cuda.json" : "training-bridge-kits-cpu.json";
     {
@@ -220,6 +340,25 @@ void checkBridgeKits(const char* environment, int cuda) {
     require(kits(0)[0]["arrows"] == 1 && kits(0)[0]["selected_slot"] == 1
         && kits(0)[1]["selected_slot"] == 2, "kit reset leaves another world unchanged");
     require(mcsim_bridge_kits(batch.get(), 2) == nullptr, "reject invalid Bridge kit perspective");
+    actions = {4, 1, 0, 1, 0, 0, 4, 1, 0, 1, 0, 0};
+    for (int tick = 0; tick < 31; ++tick) {
+        if (tick == 10) actions[7] = 0;
+        step();
+    }
+    require(kits(0)[0]["golden_apples"] == 2 && kits(0)[1]["golden_apples"] == 2
+        && observations[0] == 0.5F && observations[2] == 0.5F,
+        "apple use does not finish early and release cancels the other world");
+    step();
+    require(kits(0)[0]["golden_apples"] == 1 && kits(0)[1]["golden_apples"] == 2
+        && observations[0] == 0.5F, "only the held apple is consumed on tick 32");
+    actions[1] = 0;
+    step();
+    require(std::abs(observations[0] - 0.55F) < 1E-6F && observations[2] == 0.5F,
+        "golden apple regeneration affects only the consuming world");
+    require(mcsim_reset(batch.get(), mask.data(), observations.data()) == 0
+        && kits(0)[0]["golden_apples"] == 2 && kits(0)[1]["golden_apples"] == 2
+        && observations[0] == 0.5F && observations[2] == 0.5F,
+        "selected match reset restores the apple kit and clears its effects");
 }
 
 void checkBridgeBuilding(const char* environment, int cuda) {
@@ -1246,6 +1385,7 @@ int main(int argc, char** argv) {
         if (cuda && !mcsim_cuda_available()) return 77;
         checkLargeArena(argv[1], cuda);
         checkBridgeBatch(argv[1], cuda);
+        checkBridgeFixedOpponentMatch(argv[1], cuda);
         checkBridgeKits(argv[1], cuda);
         checkBridgeBuilding(argv[1], cuda);
         checkResetPlayers(argv[1], cuda);

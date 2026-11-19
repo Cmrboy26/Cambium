@@ -942,7 +942,8 @@ struct TrainingBatch {
                 for (int player = 0; player < 2; ++player) {
                     const auto index = offset + player;
                     selected_slots[index] = players[index].selected_weapon_slot;
-                    const bool restored = !finished[environment] && (events.round_reset || events.respawn[player]);
+                    const bool restored = !finished[environment]
+                        && (events.round_reset || events.respawn[0] || events.respawn[1]);
                     if (restored) observed_opponent_disable[index] = 0;
                     else {
                         if (observed_opponent_disable[index] > 0) --observed_opponent_disable[index];

@@ -152,7 +152,8 @@ __global__ void advanceEnvironments(BatchView batch, ArrowObservationSummary* ar
         for (int player = 0; player < batch.players_per_environment; ++player) {
             if (bridge_rules) observation_actors[offset + player].selected_slot = batch.players[offset + player].selected_weapon_slot;
             auto& observed = observation_actors[offset + player].observed_opponent_disable;
-            if (bridge_rules && (bridge_events[index].round_reset || bridge_events[index].respawn[player])
+            if (bridge_rules && (bridge_events[index].round_reset || bridge_events[index].respawn[0]
+                                 || bridge_events[index].respawn[1])
                 && !bridge_events[index].terminated && bridge_states[index].ticks < bridge_external_cutoff) {
                 observed = 0;
             } else {

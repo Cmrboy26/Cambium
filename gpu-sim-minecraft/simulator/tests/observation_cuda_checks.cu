@@ -4,6 +4,7 @@
 #include "minecraft_sim/cuda_backend.hpp"
 #include "minecraft_sim/terrain.hpp"
 #include "bridge_match_checks.hpp"
+#include "golden_apple_checks.hpp"
 #include "terrain_checks.hpp"
 
 #include <cuda_runtime.h>
@@ -31,6 +32,7 @@ __global__ void orderedTerrainScenario(minecraft_sim::BatchView batch, int* resu
         && bridge_match_checks::kitsAndRefill(batch.math)
         && bridge_match_checks::building(batch.math)
         && bridge_match_checks::simultaneousBuilding(batch.math)
+        && golden_apple_checks::run(batch.math) == 0
         && terrain_checks::blockTargeting()
         && terrain_checks::orderedEditsAndResets(blocks)
         && blocks.setPlacedBlock(0, 1, 0, PlacedBlock::team1);

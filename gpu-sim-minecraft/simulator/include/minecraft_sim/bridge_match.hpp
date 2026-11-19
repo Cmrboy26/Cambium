@@ -151,6 +151,10 @@ MCSIM_HD inline void restoreBridgePlayer(WorldView world, ProjectileWorldState& 
     const auto random = current.random;
     current = initial;
     current.random = random;
+    current.golden_apple_use_ticks = 0;
+    current.golden_apple_regeneration_ticks = 0;
+    current.golden_apple_absorption_ticks = 0;
+    current.golden_apple_consumed = false;
     world.clearInputs(player);
     projectiles.bows[player] = {};
     projectiles.bows[player].ordinary_arrows = current.ordinary_arrow_count;
@@ -247,6 +251,17 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
         auto& building = state.kits[player].building;
         if (building.use_delay > 0) --building.use_delay;
         const int slot = controls.select_weapon ? controls.selected_slot : world.player(player).state().selected_weapon_slot;
+        // Minecraft 26.3: Minecraft.handleKeybinds (1939-1973); LivingEntity.updatingUsingItem (3428-3436).
+        auto& actor = world.player(player).state();
+        const bool was_eating = actor.golden_apple_use_ticks > 0;
+        const bool same_slot = !controls.select_weapon || controls.selected_slot == actor.selected_weapon_slot;
+        const bool apple_selected = kit.explicit_hotbar && slot >= 0 && slot < kit.slot_count
+            && kit.slots[slot] == BridgeHotbarItem::golden_apple;
+        if (was_eating && (!controls.use_item || !same_slot || !apple_selected || !actor.alive())) {
+            actor.golden_apple_use_ticks = 0;
+            controls.attack = false;
+            controls.use_item = false;
+        }
         if (kit.explicit_hotbar) {
             if (slot < 0 || slot >= kit.slot_count) {
                 controls.select_weapon = false;
@@ -281,6 +296,14 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
                 cancelBridgeBreaking(building);
                 if (kit.slots[slot] == BridgeHotbarItem::golden_apple) {
                     controls.attack = false;
+                    // Minecraft 26.3: Consumable.startConsuming/consumeTicks (61-73, 101-103).
+                    if (controls.use_item && actor.alive() && state.kits[player].golden_apples > 0
+                        && actor.golden_apple_use_ticks == 0 && !actor.using_shield
+                        && !projectiles.bows[player].using_bow
+                        && (!rules.building.enabled || building.use_delay == 0)) {
+                        actor.golden_apple_use_ticks = 32;
+                        if (rules.building.enabled) building.use_delay = 4;
+                    }
                     controls.use_item = false;
                 } else if (rules.building.enabled && controls.use_item) {
                     const auto actor = world.player(player);
@@ -305,6 +328,9 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
         }
     }
     for (int player = 0; player < 2; ++player) {
+        if (world.player(player).state().golden_apple_consumed && state.kits[player].golden_apples > 0) {
+            --state.kits[player].golden_apples;
+        }
         tickBridgeKit(state.kits[player], world.player(player).state(), projectiles.bows[player],
                       arrows_before_tick[player], rules.arrow_refill_ticks);
     }

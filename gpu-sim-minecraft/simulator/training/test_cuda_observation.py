@@ -38,6 +38,378 @@ class CUDAObservationChecks(unittest.TestCase):
         output = environment.observe_cuda_async()
         np.testing.assert_allclose(output.cpu().numpy(), expected, rtol=0, atol=1e-6)
 
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+                         and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_bridge_lifecycle_matches_cpu_and_cuda(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        for player in scene["players"]:
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air"],
+                                 "selected": 0, "arrows": 0, "offhand": "minecraft:air"}
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1,
+                    "observations": [{"feature": "relative.z"}, {"feature": "self.health_fraction"},
+                                     {"feature": "opponent.health_fraction"}, {"feature": "self.on_ground"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                                {"name": "weapon", "values": [0, 1]}]}
+        kit = {"slots": ["sword", "golden_apple"], "blocks": 0, "golden_apples": 2}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, -2.9], "max": [1, 3, -2.4]},
+                            {"min": [0, 1, 2.4], "max": [1, 3, 2.9]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 2,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "kits": [kit, kit], "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-lifecycle.json"
+            for scorer in (0, 1):
+                scene["players"][scorer]["position"][0] = 0.5
+                scene["players"][1 - scorer]["position"][0] = -1.5
+                path.write_text(json.dumps(scene), encoding="utf-8")
+                with self.subTest(scorer=scorer), \
+                        Environment(2, device="cpu", environment=path, contract=contract, max_ticks=100,
+                                    seed=7, bridge=bridge, library=os.environ["MCSIM_TEST_CPU_LIBRARY"]) as cpu, \
+                        Environment(2, device="cuda", environment=path, contract=contract, max_ticks=100,
+                                    seed=7, bridge=bridge, library=os.environ["MCSIM_TEST_CUDA_LIBRARY"]) as cuda:
+                    all_worlds = np.array([True, True])
+                    selected_world = np.array([True, False])
+
+                    def compare_state():
+                        states = cpu.bridge_state()
+                        self.assertEqual(cuda.bridge_state(), states)
+                        for player in (0, 1):
+                            self.assertEqual(cuda.bridge_kits(player), cpu.bridge_kits(player))
+                        np.testing.assert_allclose(cuda.observe(), cpu.observe(), rtol=0, atol=1e-6,
+                                                   equal_nan=False)
+                        for mask in (all_worlds, selected_world):
+                            np.testing.assert_array_equal(cuda.losses(mask), cpu.losses(mask))
+                        return states
+
+                    initial_observations = cpu.observe()
+                    initial_states = compare_state()
+                    self.assertEqual([state["cage_remaining"] for state in initial_states], [2, 2])
+                    np.testing.assert_array_equal(cpu.losses(all_worlds), np.zeros((2, 2), dtype=bool))
+                    actions = np.zeros((2, 2, 2), dtype=np.int32)
+                    actions[:, :, 1] = 1
+                    actions[0, scorer, 0] = 1
+                    scores_seen = 0
+                    for tick in range(50):
+                        cpu_result = cpu.step(actions)
+                        cuda_result = cuda.step(actions)
+                        for expected, actual in zip(cpu_result[:2], cuda_result[:2]):
+                            np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6, equal_nan=False)
+                        for expected, actual in zip(cpu_result[2:], cuda_result[2:]):
+                            np.testing.assert_array_equal(actual, expected)
+                        observations, rewards, terminated, truncated = cpu_result
+                        states = compare_state()
+                        np.testing.assert_array_equal(truncated, [False, False])
+                        self.assertEqual(states[1]["scores"], [0, 0])
+                        self.assertFalse(terminated[1])
+                        if tick < 2:
+                            self.assertEqual(states[0]["cage_remaining"], 1 - tick)
+                            np.testing.assert_allclose(observations, initial_observations, rtol=0, atol=1e-6,
+                                                       equal_nan=False)
+                        if states[0]["scored"][scorer]:
+                            scores_seen += 1
+                            expected_scores = [0, 0]
+                            expected_scores[scorer] = scores_seen
+                            self.assertEqual(states[0]["scores"], expected_scores)
+                            self.assertEqual(states[0]["scored"], [scorer == 0, scorer == 1])
+                            expected_rewards = np.zeros((2, 2), dtype=np.float32)
+                            expected_rewards[0, scorer] = 2 if scores_seen == 1 else 7
+                            if scores_seen == 2:
+                                expected_rewards[0, 1 - scorer] = -3
+                            np.testing.assert_array_equal(rewards, expected_rewards)
+                            if scores_seen == 1:
+                                self.assertTrue(states[0]["round_reset"])
+                                self.assertEqual(states[0]["cage_remaining"], 2)
+                                self.assertFalse(terminated[0])
+                                np.testing.assert_allclose(observations[0], initial_observations[0],
+                                                           rtol=0, atol=1e-6, equal_nan=False)
+                                for player in (0, 1):
+                                    self.assertEqual(cpu.bridge_kits(player)[0]["selected_slot"], 0)
+                                    self.assertEqual(cpu.bridge_kits(player)[1]["selected_slot"], 1)
+                            else:
+                                self.assertFalse(states[0]["round_reset"])
+                                self.assertTrue(terminated[0])
+                                self.assertEqual(states[0]["outcome"], f"team{scorer}")
+                                break
+                        else:
+                            np.testing.assert_array_equal(rewards, np.zeros((2, 2), dtype=np.float32))
+                            self.assertFalse(terminated[0])
+                    else:
+                        self.fail("Bridge match did not finish within 50 ticks")
+                    self.assertEqual(scores_seen, 2)
+                    expected_losses = np.zeros((2, 2), dtype=bool)
+                    expected_losses[0, 1 - scorer] = True
+                    np.testing.assert_array_equal(cpu.losses(all_worlds), expected_losses)
+                    other_state = states[1]
+                    other_kits = [cpu.bridge_kits(player)[1] for player in (0, 1)]
+                    other_observation = observations[1].copy()
+                    cpu_reset = cpu.reset(selected_world)
+                    cuda_reset = cuda.reset(selected_world)
+                    np.testing.assert_allclose(cuda_reset, cpu_reset, rtol=0, atol=1e-6, equal_nan=False)
+                    reset_states = compare_state()
+                    self.assertEqual(reset_states[0], initial_states[0])
+                    self.assertEqual(reset_states[1], other_state)
+                    self.assertEqual([cpu.bridge_kits(player)[1] for player in (0, 1)], other_kits)
+                    np.testing.assert_allclose(cpu_reset[0], initial_observations[0], rtol=0, atol=1e-6,
+                                               equal_nan=False)
+                    np.testing.assert_allclose(cpu_reset[1], other_observation, rtol=0, atol=1e-6,
+                                               equal_nan=False)
+                    np.testing.assert_array_equal(cpu.losses(all_worlds), np.zeros((2, 2), dtype=bool))
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+                         and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_bridge_death_and_time_cap_trajectories_match_cpu_and_cuda(self):
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1,
+                    "observations": [{"feature": "relative.y"}, {"feature": "relative.z"},
+                                     {"feature": "self.health_fraction"},
+                                     {"feature": "opponent.health_fraction"},
+                                     {"feature": "self.velocity.y"}, {"feature": "self.on_ground"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "backward"]},
+                                {"name": "weapon", "values": [0, 1]},
+                                {"name": "attack", "values": [False, True]}]}
+        kit = {"slots": ["sword", "golden_apple"], "blocks": 0, "golden_apples": 2}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [-2.5, 1, -2.5], "max": [-2, 3, -2]},
+                            {"min": [-2.5, 1, 2], "max": [-2, 3, 2.5]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "kits": [kit, kit], "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-death-parity.json"
+            for kind in ("melee", "void", "time_cap", "external_cap", "score_time_cap"):
+                for target in (0, 1):
+                    scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+                    scene["players"][0]["position"][2] = -0.5
+                    for player in scene["players"]:
+                        player["velocity"][1] = -0.0784000015258789
+                        player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air"],
+                                             "selected": 0, "arrows": 0, "offhand": "minecraft:air"}
+                    rules = {**bridge, "match": dict(bridge["match"])}
+                    if kind == "melee":
+                        scene["players"][target]["health"] = 1
+                    elif kind in ("time_cap", "external_cap"):
+                        scene["blocks"] = [{"from": [0, 0, -3], "to": [3, 0, 3],
+                                            "block": "minecraft:stone"}]
+                        scene["players"][target]["position"][0] = -1.5
+                        scene["players"][target]["velocity"][1] = -0.3
+                        scene["players"][target]["on_ground"] = False
+                        scene["players"][1 - target]["position"][0] = 1.5
+                        rules["void_y"] = 0.5
+                        if kind == "time_cap":
+                            rules["match"]["max_ticks"] = 2
+                    elif kind == "score_time_cap":
+                        scene["players"][0]["velocity"][2] = 0.3
+                        scene["players"][1]["velocity"][2] = -0.3
+                        rules["goals"] = [{"min": [0, 1, 0.95], "max": [1, 3, 1.05]},
+                                          {"min": [0, 1, -0.05], "max": [1, 3, 0.05]}]
+                        rules["match"]["max_ticks"] = 1
+                    path.write_text(json.dumps(scene), encoding="utf-8")
+                    external_limit = 2 if kind in ("time_cap", "external_cap") else 1 if kind == "score_time_cap" else 100
+                    with self.subTest(kind=kind, target=target), \
+                            Environment(2, device="cpu", environment=path, contract=contract, max_ticks=external_limit,
+                                        seed=7, bridge=rules, library=os.environ["MCSIM_TEST_CPU_LIBRARY"]) as cpu, \
+                            Environment(2, device="cuda", environment=path, contract=contract, max_ticks=external_limit,
+                                        seed=7, bridge=rules, library=os.environ["MCSIM_TEST_CUDA_LIBRARY"]) as cuda:
+                        def compare_state():
+                            states = cpu.bridge_state()
+                            self.assertEqual(cuda.bridge_state(), states)
+                            for player in (0, 1):
+                                self.assertEqual(cuda.bridge_kits(player), cpu.bridge_kits(player))
+                            np.testing.assert_allclose(cuda.observe(), cpu.observe(), rtol=0, atol=1e-6,
+                                                       equal_nan=False)
+                            return states
+
+                        initial_observations = cpu.observe()
+                        initial_states = compare_state()
+                        initial_kits = [cpu.bridge_kits(player) for player in (0, 1)]
+                        actions = np.zeros((2, 2, 3), dtype=np.int32)
+                        actions[:, :, 1] = 1
+                        if kind == "melee":
+                            actions[:, 1 - target, 1] = 0
+                        elif kind == "void":
+                            actions[0, target, 0] = 1
+                        for tick in range(80):
+                            if kind == "melee" and tick == 1:
+                                actions[0, 1 - target, 2] = 1
+                            cpu_result = cpu.step(actions)
+                            cuda_result = cuda.step(actions)
+                            for expected, actual in zip(cpu_result[:2], cuda_result[:2]):
+                                np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6, equal_nan=False)
+                            for expected, actual in zip(cpu_result[2:], cuda_result[2:]):
+                                np.testing.assert_array_equal(actual, expected)
+                            observations, rewards, terminated, truncated = cpu_result
+                            states = compare_state()
+                            np.testing.assert_allclose(observations, cpu.observe(), rtol=0, atol=1e-6,
+                                                       equal_nan=False)
+                            expected_reward = 2 if kind == "score_time_cap" else 0
+                            np.testing.assert_array_equal(rewards, np.full((2, 2), expected_reward, dtype=np.float32))
+                            np.testing.assert_array_equal(truncated, [kind == "external_cap" and tick == 1] * 2)
+                            for state in states:
+                                self.assertEqual(state["scores"], [1, 1] if kind == "score_time_cap" else [0, 0])
+                                self.assertEqual(state["scored"], [kind == "score_time_cap"] * 2)
+                                self.assertFalse(state["round_reset"])
+                            if states[0]["died"][target] or kind == "score_time_cap":
+                                break
+                            np.testing.assert_array_equal(terminated, [False, False])
+                            self.assertEqual(states[0]["respawn"], [False, False])
+                        else:
+                            self.fail(f"{kind} did not cause death within 80 ticks")
+
+                        expected_deaths = ([False, False] if kind == "score_time_cap"
+                                           else [target == 0, target == 1])
+                        self.assertEqual(states[0]["died"], expected_deaths)
+                        self.assertEqual(states[0]["ticks"], tick + 1)
+                        if kind == "time_cap":
+                            self.assertEqual(tick, 1)
+                            np.testing.assert_array_equal(terminated, [True, True])
+                            for state in states:
+                                self.assertEqual(state["outcome"], "draw")
+                                self.assertEqual(state["died"], expected_deaths)
+                                self.assertEqual(state["respawn"], [False, False])
+                            self.assertEqual(cpu.bridge_kits(target)[0]["selected_slot"], 1)
+                            self.assertLess(observations[0, target, 4], initial_observations[0, target, 4])
+                        elif kind == "external_cap":
+                            self.assertEqual(tick, 1)
+                            np.testing.assert_array_equal(terminated, [False, False])
+                            for state in states:
+                                self.assertEqual(state["outcome"], "ongoing")
+                                self.assertEqual(state["died"], expected_deaths)
+                                self.assertEqual(state["respawn"], [False, False])
+                            self.assertEqual(cpu.bridge_kits(target)[0]["selected_slot"], 1)
+                            self.assertLess(observations[0, target, 4], initial_observations[0, target, 4])
+                        elif kind == "score_time_cap":
+                            self.assertEqual(tick, 0)
+                            np.testing.assert_array_equal(terminated, [True, True])
+                            for state in states:
+                                self.assertEqual(state["outcome"], "draw")
+                                self.assertEqual(state["died"], [False, False])
+                                self.assertEqual(state["respawn"], [False, False])
+                        else:
+                            np.testing.assert_array_equal(terminated, [False, False])
+                            self.assertEqual(states[0]["outcome"], "ongoing")
+                            self.assertEqual(states[0]["respawn"], expected_deaths)
+                            self.assertEqual(states[1]["died"], [False, False])
+                            self.assertEqual(states[1]["respawn"], [False, False])
+                            self.assertEqual(cpu.bridge_kits(target)[0], initial_kits[target][0])
+                            self.assertEqual(cpu.bridge_kits(target)[1]["selected_slot"], 1)
+                            self.assertEqual(cpu.bridge_kits(1 - target)[0]["selected_slot"],
+                                             0 if kind == "melee" else 1)
+                            self.assertEqual(observations[0, target, 2], initial_observations[0, target, 2])
+                            self.assertEqual(observations[0, target, 4], initial_observations[0, target, 4])
+                            self.assertEqual(observations[0, target, 5], initial_observations[0, target, 5])
+
+                        other_state = states[1]
+                        other_kits = [cpu.bridge_kits(player)[1] for player in (0, 1)]
+                        other_observation = observations[1].copy()
+                        mask = np.array([True, False])
+                        cpu_reset = cpu.reset(mask)
+                        cuda_reset = cuda.reset(mask)
+                        np.testing.assert_allclose(cuda_reset, cpu_reset, rtol=0, atol=1e-6, equal_nan=False)
+                        reset_states = compare_state()
+                        self.assertEqual(reset_states[0], initial_states[0])
+                        self.assertEqual(reset_states[1], other_state)
+                        for player in (0, 1):
+                            self.assertEqual(cpu.bridge_kits(player)[0], initial_kits[player][0])
+                            self.assertEqual(cpu.bridge_kits(player)[1], other_kits[player])
+                        np.testing.assert_allclose(cpu_reset[0], initial_observations[0], rtol=0, atol=1e-6,
+                                                   equal_nan=False)
+                        np.testing.assert_allclose(cpu_reset[1], other_observation, rtol=0, atol=1e-6,
+                                                   equal_nan=False)
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_bridge_respawn_clears_observed_shield_disable_only_in_affected_world(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["players"][0]["position"][2] = -0.5
+        for player in scene["players"]:
+            player["velocity"][1] = -0.0784000015258789
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:diamond_axe"],
+                                 "selected": 0, "arrows": 0, "offhand": "minecraft:shield"}
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "requires": ["movement", "melee", "equipment", "shield"],
+                    "observations": [{"feature": "self.shield_disabled"},
+                                     {"feature": "opponent.shield_disabled_observed"},
+                                     {"feature": "self.shield_cooldown_fraction"},
+                                     {"feature": "self.shield_using"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "backward"]},
+                                {"name": "weapon", "values": [0, 1]},
+                                {"name": "shield", "values": [False, True]},
+                                {"name": "attack", "values": [False, True]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [-2.5, 1, -2.5], "max": [-2, 3, -2]},
+                            {"min": [-2.5, 1, 2], "max": [-2, 3, 2.5]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 150, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-shield.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            for target in (0, 1):
+                attacker = 1 - target
+                with self.subTest(target=target), Environment(
+                        3, device="cuda", environment=path, contract=contract, max_ticks=150,
+                        bridge=bridge, library=os.environ.get("MCSIM_TEST_CUDA_LIBRARY")) as environment:
+                    self.compare_configured(environment)
+                    actions = np.zeros((3, 2, 4), dtype=np.int32)
+                    actions[:2, attacker, 1] = 1
+                    actions[:, target, 2] = 1
+                    for _ in range(6):
+                        raised, _, terminated, truncated = environment.step(actions)
+                    np.testing.assert_array_equal(raised[:, target, 3], 1)
+                    self.assertFalse(terminated.any() or truncated.any())
+                    actions[:2, attacker, 3] = 1
+                    disabled, _, terminated, truncated = environment.step(actions)
+                    self.assertFalse(terminated.any() or truncated.any())
+                    np.testing.assert_array_equal(disabled[:, target, 0], [1, 1, 0])
+                    np.testing.assert_array_equal(disabled[:, attacker, 1], [1, 1, 0])
+                    np.testing.assert_allclose(disabled[:2, target, 2], 0.99, rtol=0, atol=1e-6)
+                    self.compare_configured(environment)
+
+                    actions[:, :, 3] = 0
+                    actions[:, target, 2] = 0
+                    actions[:2, target, 1] = 1
+                    actions[:, attacker, 2] = 1
+                    for _ in range(6):
+                        raised, _, terminated, truncated = environment.step(actions)
+                    np.testing.assert_array_equal(raised[:, attacker, 3], 1)
+                    self.assertFalse(terminated.any() or truncated.any())
+                    actions[:2, target, 3] = 1
+                    disabled, _, terminated, truncated = environment.step(actions)
+                    self.assertFalse(terminated.any() or truncated.any())
+                    np.testing.assert_array_equal(disabled[:, :, 0], [[1, 1], [1, 1], [0, 0]])
+                    np.testing.assert_array_equal(disabled[:, :, 1], [[1, 1], [1, 1], [0, 0]])
+                    np.testing.assert_allclose(disabled[:2, attacker, 2], 0.99, rtol=0, atol=1e-6)
+                    self.compare_configured(environment)
+
+                    actions[:, :, 3] = 0
+                    actions[:, attacker, 2] = 0
+                    actions[0, target, 0] = 1
+                    for _ in range(80):
+                        observed, _, terminated, truncated = environment.step(actions)
+                        states = environment.bridge_state()
+                        self.assertFalse(terminated.any() or truncated.any())
+                        self.assertFalse(any(states[world]["round_reset"] for world in range(3)))
+                        self.assertFalse(any(states[world]["respawn"][player]
+                                             for world in (1, 2) for player in (0, 1)))
+                        if states[0]["respawn"][target]:
+                            break
+                    else:
+                        self.fail("Target did not respawn after walking into the void")
+                    self.assertEqual(states[0]["died"], [target == 0, target == 1])
+                    self.assertEqual(states[0]["respawn"], [target == 0, target == 1])
+                    np.testing.assert_array_equal(observed[:, target, 0], [0, 1, 0])
+                    np.testing.assert_array_equal(observed[:, attacker, 0], [1, 1, 0])
+                    np.testing.assert_array_equal(observed[:, :, 1], [[0, 0], [1, 1], [0, 0]])
+                    self.assertEqual(observed[0, target, 2], 0)
+                    self.assertGreater(observed[0, attacker, 2], 0)
+                    self.assertGreater(observed[1, target, 2], 0)
+                    np.testing.assert_allclose(environment.observe(), observed, rtol=0, atol=1e-6)
+                    self.compare_configured(environment)
+
     @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
                          "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
     def test_bridge_building_device_observations_follow_edits_and_resets(self):

@@ -56,10 +56,11 @@ Implemented slice:
   difficulty-dependent starvation.
 
 Not implemented: step-up, penetration resolution, fluids, special blocks,
-climbing, effects, enchantments, inventory/durability, food consumption and timed
-effects. Flight eligibility/movement attributes are supplied state, not the
-systems underlying them. Spawn states must be finite and collision-free; views
-need valid buffers/dimensions. Task rewards/resets belong in the training wrapper.
+climbing, general effects, enchantments, inventory/durability, general food
+consumption and timed effects. The experimental golden-apple subset is described
+below. Flight eligibility/movement attributes are supplied state, not the systems
+underlying them. Spawn states must be finite and collision-free; views need valid
+buffers/dimensions. Task rewards/resets belong in the training wrapper.
 
 ## Experimental Terrain Overlays
 
@@ -105,8 +106,9 @@ terminal events leave final state intact. Per-player kit counts, selected slots
 and an optional custom single-arrow refill timer follow the same reset lifecycle.
 The opt-in [building subset](include/minecraft_sim/bridge_building.hpp) supplies
 full-cube targeting, placement and configurable mining for per-world overlays.
-Golden-apple use and pickaxe entity combat are suppressed; effects, fluids,
-special block shapes and item durability are unsupported. Setup/compiler
+Golden apples have experimental held-use, absorption and regeneration behavior;
+pickaxe entity combat, general effects, fluids, special block shapes and item
+durability are unsupported. Setup/compiler
 validation, resident collection and replay/live integration remain unimplemented.
 See the [training guide](training/AGENTS.md#experimental-bridge-batches).
 These internal functions do not make authored Bridge setups available.

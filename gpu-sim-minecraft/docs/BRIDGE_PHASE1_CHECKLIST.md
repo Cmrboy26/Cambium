@@ -1,20 +1,22 @@
 # Phase 1 Bridge: Implementation Checklist
 
-**Status:** In progress; Bridge mode is not implemented. This is the shared
-implementation tracker for the seven Phase 1 milestones. Existing duel
-features are foundations, not completed Bridge features.
+**Status:** In progress; complete Bridge mode is not implemented. An experimental
+host-staged basic match runs on CPU/CUDA. This is the shared implementation
+tracker for the seven Phase 1 milestones; existing duel features are foundations,
+not completed Bridge features.
 
 ## Next Action
 
 **Owner:** GitHub Copilot for the current terrain and lifecycle slice.
 **Blocked by:** Authored Bridge setups, resident collection and replay/live
-adapters are not implemented; in-game conformance and memory gates remain open.
+adapters are not implemented; in-game conformance remains open. The terrain
+memory gate needs a decision on peak versus per-preflight cap accounting.
 **First task:** P1-02-07.
 
-1. Measure terrain memory use against the configured cap and complete the
-  remaining P1-02-07 gate; the host-staged composite terrain path is covered.
-2. Implement eating, remaining building subsets, authored setup and PPO collector
-  paths; the experimental CPU/CUDA host batch is not those adapters.
+1. Resolve the P1-02-07 peak accounting discrepancy and finish the terrain gate;
+  the host-staged composite terrain path is covered.
+2. Finish match lifecycle cases, remaining building/item subsets, authored setup
+  and PPO collector paths; the experimental host batch is not those adapters.
 3. Complete the remaining resident, in-game and H100 validation gates before
   claiming full Bridge support.
 
@@ -342,7 +344,24 @@ the composite terrain interface before parallel physics or observation work.
   memory, H100, live integration or real-game conformance.
 - [ ] P1-02-07: **Gate:** CPU and CUDA observe identical intended terrain and
   collision/ray results after edits and resets; static duel regression passes;
-  recorded memory use respects the configured cap.
+  recorded memory use respects the configured cap. **Blocked:** GitHub Copilot;
+  the documented cap is per preflight, while measured aggregate requested terrain
+  payload briefly exceeds it during CUDA batch replacement.
+- **P1-02-07 measurement, 2026-11-19:** For a 32 x 48 x 96 base and 16
+  independent overlays, allocation tracing on the integrated source measured
+  147456 bytes for the host base and 2359296 for host overlays. The CPU
+  preflight accepted a 2506752-byte cap and rejected 2506751. On T4, the
+  7520256-byte CUDA preflight accepted and 7520255 was rejected. Its source,
+  staging and new device payloads each accounted for 2506752 bytes, but the
+  old 147456-byte device base remained allocated during replacement: peak
+  attributed requested terrain payload was 7667712 bytes. Host usable sizes
+  included allocator overhead; GPU allocation extents were queried via the
+  CUDA driver, not measured physical residency. The cap documented in the
+  [native guide](../simulator/AGENTS.md#json-environments) is per preflight,
+  not an aggregate process/device limit. Decide whether this gate requires
+  aggregate peak enforcement or explicitly scoped per-preflight accounting;
+  do not call the observed peak within the cap. The temporary probe and traces
+  are not durable repository artifacts.
 
 ## 3. Match Lifecycle
 
@@ -353,17 +372,20 @@ before building; the complete milestone also requires P1-02 persistence.
 - [ ] P1-03-01: Add per-world team scores, match clock, goal/cage phase and
   per-player respawn/kit state in shared CPU/CUDA-compatible ownership.
   **In progress:** GitHub Copilot; static CPU/CUDA host batches own match state;
-  kit counts and refill state are written, but resident integration and validation remain open.
+  kit counts and refill state are written and host fixtures pass, but resident
+  integration and its validation remain open.
 - [ ] P1-03-02: Implement cages and their opening, goal detection and scoring,
   configurable first-to-N result, time cap and specified simultaneous/tie
   behavior. Emit explicit score and match outcome events. **In progress:**
   GitHub Copilot; scoring, outcome and cage-enforced host-batch ticks are
-  written, but authored setup integration and validation remain open.
+  written and host fixtures pass, but authored setup integration and its
+  validation remain open.
 - [ ] P1-03-03: Implement void/combat death and player-only respawn/refill
   without ending the match; clear the affected player's relevant state and
   preserve the other player's state according to the specification.
   **In progress:** GitHub Copilot; internal player/projectile reset helpers are
-  wired to the host-batch tick with kit restoration; resident integration and validation remain open.
+  wired to the host-batch tick with kit restoration and host fixtures pass;
+  resident integration and its validation remain open.
 - [ ] P1-03-04: Implement goal/round reset of both players and their kits while
   preserving scores, match clock and terrain as configured; implement a
   separate full match reset that restores the selected world's full state.
@@ -391,12 +413,55 @@ before building; the complete milestone also requires P1-02 persistence.
   terminal. Do not silently substitute duel rewards or endings. **In progress:**
   GitHub Copilot; the direct `Environment` adapter exposes configured match
   rewards and events, but research collection and validation remain open.
-- [ ] P1-03-06: Add independently specified cases for both sides, cage timing,
+- [x] P1-03-06: Add independently specified cases for both sides, cage timing,
   player death, void, goal, simultaneous events, time-cap ties, selective reset
   and persistence, including shared CPU/CUDA state and result comparisons.
-- [ ] P1-03-07: **Gate:** a complete basic Bridge match runs against a fixed
+- [x] P1-03-07: **Gate:** a complete basic Bridge match runs against a fixed
   opponent on CPU and CUDA with expected scores, resets and match outcome;
   existing duel termination and checkpoint behavior remain unchanged.
+- **P1-03-06/07 evidence, 2026-11-19:** The experimental host-staged batch
+  completed a three-goal match against a stationary fixed opponent on CPU and
+  T4, with independently specified score, cage, reward, reset and terminal
+  observation expectations. A separate two-goal fixture drives both scoring
+  perspectives across the arena and compares CPU/CUDA state, kits,
+  observations, rewards and endings. Mirrored combat and void deaths,
+  simultaneous scores, timeout ties, truncation and selective resets are also
+  compared. Shared fixtures independently cover projectile, terrain, RNG and
+  player preservation. Respawning either player now clears both observer
+  shield-disable caches without resetting the surviving player's shield state;
+  a CUDA host/device observation fixture covers both perspectives and world
+  isolation. These are synthetic static-arena matches, not authored setups,
+  resident Bridge, full item validation or in-game conformance.
+
+  On Linux x86_64, GNU 13.3.0 and Tesla T4 (Slurm job 302294 on `dh-node8`,
+  driver 610.43.02, CUDA 12.9.86, PyTorch 2.5.1+cu124), CPU and CUDA native
+  libraries both reported source hash
+  `ad96884af86b0dea6ca00c3f76fd2400676f466d878f33105070e863d5dee84c`
+  at baseline `b85153061ef5` plus worktree changes. CPU `ctest --test-dir
+  simulator/build-bridge-integrated-20261119-cpu --output-on-failure` passed
+  6/6. T4 `ctest --test-dir simulator/build-bridge-integrated-20261119-t4
+  --output-on-failure -R '^(shared_core_cuda_checks|training_api_cuda_checks|projectile_cuda_checks|observation_cuda_checks)$'`
+  passed 4/4. The Python `simulator.training.test_experiments` and
+  `simulator.training.test_training.TrainingChecks` suites ran 85 tests with
+  one CUDA-only skip, selecting the CPU library for default environments;
+  this includes legacy duel termination and checkpoint/resume coverage. With
+  `MCSIM_TEST_CPU_LIBRARY` and `MCSIM_TEST_CUDA_LIBRARY` selecting those two
+  builds, `.venv-rosie/bin/python -B -m unittest -v
+  simulator.training.test_cuda_observation
+  simulator.training.test_research.ResidentOpponentChecks` ran 34 tests with
+  one two-device skip. NVCC emitted existing host/device constexpr warnings.
+  The fixture SHA-256 values are `ab1752aef1293deca5d64c293ff23756daeccce5ab238329cb6ecad8d8f9a837`
+  for [shared match checks](../simulator/tests/bridge_match_checks.hpp),
+  `e6067bd8edc09663d52503a8b46493cc51270f41db676072949b654facbe298f` for
+  [training checks](../simulator/tests/training_checks.cpp), and
+  `f72c4edb8d8c341f282f8e2c094243cf6be0c4eb55dc803bc84ed926a1916b5f` for
+  [CUDA Python checks](../simulator/training/test_cuda_observation.py).
+
+  The CPU Python suite was run from the project root with:
+
+  ```sh
+  MCSIM_TEST_CPU_LIBRARY="$PWD/simulator/build-bridge-integrated-20261119-cpu/minecraft_sim_training.so" .venv-rosie/bin/python -B -c 'import os, unittest; import simulator.training.environment as env; original = env.load_library; env.load_library = lambda library=None, device="cpu": original(library or os.environ["MCSIM_TEST_CPU_LIBRARY"], device); unittest.main(module=None, argv=["unittest", "-v", "simulator.training.test_experiments", "simulator.training.test_training.TrainingChecks"])'
+  ```
 
 ## 4. Building And Items
 
@@ -423,14 +488,52 @@ existing movement, combat and ordinary-bow behavior where applicable.
   bow, pickaxe, blocks and apples. Resolve use/attack/slot precedence without
   regressing existing melee, shields and projectiles. **In progress:**
   GitHub Copilot; experimental kits track counts and slots; building-enabled
-  batches implement a limited block/pickaxe subset, while apple use and
-  pickaxe entity combat are suppressed. Validation remains open.
+  batches implement a limited block/pickaxe subset, and golden-apple use is
+  experimental; pickaxe entity combat and broader validation remain open.
 - [ ] P1-04-05: Implement supported golden-apple eating time, cancellation,
   absorption and regeneration; separately specify and implement the custom
   single-arrow refill timer. Do not claim general effects, inventory,
   enchantment, durability, fluid or special-block simulation. **In progress:**
-  GitHub Copilot; the custom arrow refill timer is written; apple eating,
-  effects, authored setup integration and validation remain open.
+  GitHub Copilot; the custom arrow refill timer and an experimental golden-apple
+  eating, absorption and regeneration subset are implemented. Authored setup,
+  real-game conformance and broader validation remain open.
+- **P1-03/P1-04 integration, 2026-11-19:** Shared
+  [lifecycle](../simulator/tests/bridge_match_checks.hpp) and
+  [golden-apple](../simulator/tests/golden_apple_checks.hpp) fixtures cover
+  mirrored respawns, 32-tick eating, cancellation, effects, damage and resets.
+  The [training API fixture](../simulator/tests/training_checks.cpp) also checks
+  consumption, cancellation, regeneration, world isolation and selected reset.
+  CPU CTest passed 6/6; T4 CTest passed 4/4. The CPU training class ran 49
+  checks, with its CUDA-only case skipped; 36 setup checks passed. CUDA/Python
+  observation and resident-duel suites ran 31 checks, with one two-device
+  check skipped. From the project root:
+
+  ```sh
+  cmake -S simulator -B simulator/build-bridge-integrated-20261119-cpu -DBUILD_TESTING=ON -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON="$PWD/simulator/build-bridge-validation-20261119-cpu/_deps/nlohmann_json-src"
+  cmake --build simulator/build-bridge-integrated-20261119-cpu -j 4
+  ctest --test-dir simulator/build-bridge-integrated-20261119-cpu --output-on-failure
+  .venv-rosie/bin/python -B -m unittest -v simulator.training.test_experiments
+  cmake -S simulator -B simulator/build-bridge-integrated-20261119-t4 -DMCSIM_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DBUILD_TESTING=ON -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON="$PWD/simulator/build-bridge-validation-20261119-t4/_deps/nlohmann_json-src"
+  cmake --build simulator/build-bridge-integrated-20261119-t4 -j 4
+  ctest --test-dir simulator/build-bridge-integrated-20261119-t4 --output-on-failure -R '^(shared_core_cuda_checks|training_api_cuda_checks|projectile_cuda_checks|observation_cuda_checks)$'
+  MCSIM_TEST_CPU_LIBRARY="$PWD/simulator/build-bridge-integrated-20261119-cpu/minecraft_sim_training.so" MCSIM_TEST_CUDA_LIBRARY="$PWD/simulator/build-bridge-integrated-20261119-t4/minecraft_sim_training.so" .venv-rosie/bin/python -B -m unittest -v simulator.training.test_cuda_observation simulator.training.test_research.ResidentOpponentChecks
+  ```
+
+  T4 job `302292` ran on `dh-node8`, Tesla T4 (15360 MiB), driver 610.43.02,
+  CUDA 12.9.86, GNU 13.3.0 and PyTorch 2.5.1+cu124. Both native libraries
+  report source hash `c2490332db3b52e0584216d83790e1444c471b46b6ea9a47f593976dfb48e8a9`
+  and revision `b85153061ef5` plus worktree changes. The new shared apple,
+  lifecycle, training API and CUDA observation fixture SHA-256 values are
+  `2755c19609e4683fb7726553b6d74f2038aa37e6bd6384c261f6b62a5bb59022`,
+  `57a5d463b1c8cb23de5d7c4ac602d2d4821ae4e732a17921b85436d0e60deb54`,
+  `b68659543eba2fc0f04784505bf62237b6bcfc318f38c16df95e1149faf72b4d`, and
+  `78226e7dcc6650959e53c3150b7113a58280eef62b3685cad686ce493db3ec4e`.
+  NVCC reported `#20013-D` host/device constexpr warnings. The CPU training
+  checks explicitly selected the integrated native library; fresh raw capture
+  creation also passed, but the changed player layout requires old captures to
+  be regenerated. Source basis: supplied decompiled Minecraft 26.3 tree;
+  decompiler identity remains unknown. These results are not live-game or
+  Hypixel conformance, resident Bridge or a complete lifecycle gate.
 - **Partially validated kit slice, 2026-11-19:** The experimental host batch tracks
   per-player kit counts, selected slots and the custom arrow refill timer on
   CPU/CUDA; focused shared and adapter fixtures passed. Item actions, real-game
@@ -444,7 +547,8 @@ existing movement, combat and ordinary-bow behavior where applicable.
   26.3 tree, protocol 777, world version 5023, Java 25; decompiler identity and
   source content hash are not recorded. No in-game capture, performance or
   vanilla/Hypixel conformance is claimed. Tool effects, fluids, special shapes,
-  pickaxe entity combat, eating, replay and resident collection remain open.
+  pickaxe entity combat, complete eating validation, replay and resident
+  collection remain open.
 - [ ] P1-04-06: Trace and cite actual 26.3 methods/lines for targeting,
   placement, breaking and consumption. Keep Bridge-specific refill and other
   mode rules attributed to the Bridge specification.
@@ -478,6 +582,9 @@ or repository-wide programming changes.
   phase, visibility and numeric types. A 9 x 5 x 9 local window and a
   3 x 4 x 7 x 16 lane summary are candidates, not fixed requirements. Declare
   lane data global/omniscient if it includes information outside local view.
+  **In progress:** GitHub Copilot; a detailed
+  [provisional specification](bridge_mode_v1.md#proposed-structured-terrain-observations)
+  needs agreement on dimensions, yaw quantization and omniscient visibility.
 - [ ] P1-05-02: Add permitted score, inventory, arrow, cage/respawn and match
   observations; define held place/break actions and any finer look choices.
   Preserve semantic action order and avoid hidden opponent inventory leakage.

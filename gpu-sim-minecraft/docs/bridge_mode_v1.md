@@ -136,9 +136,149 @@ terrain, players, projectile state, timers, score or RNG.
 The proposed observation contract may expose each team's score, remaining
 match/cage time, own inventory and refill state, visible player equipment,
 and explicitly defined local terrain. It must not expose hidden opponent
-inventory. Any lane summary using nonlocal information must be labeled global
-and omniscient. Sampling phase, axes, perspective, categories and numeric
-types for structured observations require the separate observation task.
+inventory. The following structured observations are provisional design
+choices, not implemented primitives or accepted policy descriptors. Their
+geometry, dimensions and omniscient visibility are assumptions to agree on
+before implementation, not claims about Hypixel or the current catalogue.
+
+### Proposed Structured Terrain Observations
+
+The two observations below are independently optional. Each actor receives its
+own perspective of the same per-world composite terrain snapshot. Shapes below
+are per actor, without batch or player axes; a two-player batch may present
+them as `[batch, 2, ...]`, with player 0 then player 1. Axis order is exactly as
+listed, and the last index varies fastest when flattened. These tensors are
+separate from scalar inputs: the current scalar policy contract allows at most
+128 expanded inputs and cannot simply flatten these grids into that contract.
+Their descriptors, transport, model projection and compatibility identity
+require later coordinated work. Unsupported consumers must reject them.
+
+Sample both players from one consistent pre-control, pre-tick snapshot, after
+any prior tick's ordered edits, scoring and applicable respawns or round reset.
+At match initialization sample after initialization; at match end sample the
+final post-tick state before a full reset overwrites it. An external truncation
+similarly retains its final pre-reset snapshot. Sampling must not mutate terrain
+or let one actor's sampling see a different tick than the other's.
+
+Both views are terrain-state observations, not camera visibility: they include
+occluded blocks, including blocks behind walls. The local view is omniscient
+within its window; the lane view is **global and omniscient** over the entire
+finite base grid, including beyond the local window. Neither reveals entities,
+items or hidden opponent inventory. A future live adapter must obtain the same
+authoritative terrain and placed-block ownership, including unloaded or
+otherwise unavailable areas, or reject the observation; it must not replace
+unknown data with air or claim camera-limited equivalence. These proposals
+cover the Bridge full-cube terrain subset only; unsupported block states or
+unknown ownership must be rejected, not silently mapped to a category.
+
+For both tensors, a protected base solid has no team owner. A placed overlay
+solid belongs to the team that placed it and is `self` for that team and
+`opponent` for the other. The base is immutable, each overlay is per world,
+and an overlay on a protected base is invalid. The categories describe the
+composite after all prior ordered edits; empty in-bounds cells are air.
+
+#### Local Voxel Window
+
+Proposed shape is `[5, 9, 9]`, axes `[up, right, forward]`, with `uint8`
+category values. Indices `(u, r, f)` have offsets `(u-2, r-4, f-4)` in blocks.
+The origin is the integer block containing the actor's feet position:
+`(floor(x), floor(y), floor(z))`, with mathematical floor even for negatives.
+Interpret finite feet coordinates as their exact stored binary64 values and
+perform cell-coordinate arithmetic without overflow.
+Each output is exactly one whole world cell, not a resampled volume or ray.
+Pitch is ignored. The actor's finite, unwrapped yaw is the stored binary32
+degree value, interpreted exactly; quantize to the nearest multiple of 90
+degrees, with exact halfway ties toward increasing yaw:
+`q = floor(yaw / 90 + 1/2) mod 4`, using mathematical arithmetic and a
+nonnegative modulo. Thus 45 degrees selects 90, while -45 selects 0. No
+epsilon, implementation-dependent trigonometry or integer overflow may change
+the result, including for large finite yaw values.
+
+| `q` | Forward `(dx, dz)` | Right `(dx, dz)` |
+| --- | --- | --- |
+| 0 | `(0, 1)` | `(1, 0)` |
+| 1 | `(-1, 0)` | `(0, 1)` |
+| 2 | `(0, -1)` | `(-1, 0)` |
+| 3 | `(1, 0)` | `(0, -1)` |
+
+For origin `(ox, oy, oz)`, the sampled cell is
+`(ox + (r-4)*right.x + (f-4)*forward.x, oy + u-2,
+oz + (r-4)*right.z + (f-4)*forward.z)`. The array rotates, never the world.
+Team perspective changes ownership labels but does not add a team rotation;
+the player's own yaw determines the frame.
+
+| Value | Cell category |
+| --- | --- |
+| 0 | In-bounds air |
+| 1 | Protected base solid |
+| 2 | Self-team placed solid |
+| 3 | Opponent-team placed solid |
+| 4 | Outside the finite base grid |
+
+Value 4 is an observation boundary marker, not a collision solid: the terrain
+contract still reads outside as air and rejects edits there. Do not clamp,
+wrap or treat an outside cell as in-bounds air. Grid bounds for this proposal
+are integer half-open block coordinates `[minX,maxX)`, `[minY,maxY)`,
+`[minZ,maxZ)` with positive extents. Out-of-bounds applies on any axis.
+
+#### Global Lane Summary
+
+Proposed shape is `[3, 4, 7, 16]`, axes `[category, up, right, forward]`,
+with unsigned `uint32` raw counts, not normalized fractions. Category channels
+0, 1 and 2 count protected base, self-placed and opponent-placed solid cells,
+respectively. Air contributes no count; each valid solid contributes exactly
+one count to exactly one bin. There is no outside channel: only finite-grid
+cells are iterated. Bins without cells or solids are zero. With the current
+262144-cell ceiling, even a bin containing the entire grid fits `uint32`.
+This summarizes block counts, not occupied fraction, highest surface, goal
+state, entities or line of sight; arena dimensions are needed to distinguish
+empty bins from bins containing only air.
+
+The fixed frame is independent of player position, yaw and pitch. Let `D` be
+the horizontal vector from the center of the actor team's own goal box to the
+center of the opposing goal box. Select the signed world cardinal axis with
+the larger absolute component of `D` as forward; on an exact nonzero tie
+select X, and if both components are zero select +Z. Goal centers and
+comparisons are the exact mathematical values of the configured finite
+coordinates, with no epsilon. Set right `(rx, rz) = (forward.z, -forward.x)`
+and up to +Y. This is a rotation by a multiple of 90 degrees, not a reflection
+or a rotation of arena geometry. Each team computes its own frame; opposite
+nonzero goal vectors give opposite forward and right axes.
+
+For each in-bounds integer cell, convert its X/Z coordinates to zero-based
+oriented offsets. For an oriented axis along +X use `x-minX`, along -X use
+`maxX-1-x`, along +Z use `z-minZ`, and along -Z use `maxZ-1-z`. Its extent is
+the corresponding X or Z grid extent. Let these offsets and extents be
+`(R, W)` for right and `(F, L)` for forward; let `U = y-minY` and
+`H = maxY-minY`. The cell's indices are
+`(floor(4*U/H), floor(7*R/W), floor(16*F/L))`. All calculations are exact
+nonnegative integer arithmetic with sufficient width; a bin boundary goes to
+the index given by the formula, never to two bins. Small extents can leave
+some bins empty. No cells outside the grid contribute, even though outside
+terrain reads as air. Cell iteration order must not affect these exact counts.
+
+#### Worked Examples
+
+- Local window: feet `(-1.2, 64.7, -2.01)` give origin `(-2, 64, -3)`.
+   Index `(2, 5, 6)` has offsets `(up=0, right=1, forward=2)`. At yaw 0,
+   right is +X and forward +Z, yielding cell `(-1, 64, -1)`. At yaw 45,
+   the halfway rule selects 90: right is +Z and forward -X, yielding
+   `(-4, 64, -2)`. Yaw 90 yields that same cell. At yaw -45, the tie selects
+   0 and yields `(-1, 64, -1)`. Lookups use the category of each resulting
+   cell, or 4 if any coordinate lies outside the grid.
+- Local boundary: for the grid in the next example, feet `(-6.2,-3.1,-15.1)`
+   have origin `(-7,-4,-16)`. At yaw 0, index `(2,3,4)` samples `(-8,-4,-16)`
+   and is 4; `(2,4,4)` samples the in-bounds origin and is 0 if that cell is
+   air. The grid's lower boundary is inclusive.
+- Lane: let grid bounds be `[-7,7) x [-4,4) x [-16,16)` and goal centers
+   `(0,0,-12)` for team 0 and `(0,0,12)` for team 1. A team-0 placed block
+   at `(-6,-3,-13)` has, for team 0, `(U,R,F) = (1,1,3)` and extents
+   `(H,W,L) = (8,14,32)`, giving bin `(0,0,1)` and channel 1. For team 1,
+   forward is -Z and right is -X: `(U,R,F) = (1,12,28)`, giving bin
+   `(0,6,14)` and channel 2. Thus the same block contributes one to
+   `[1,0,0,1]` for team 0 and `[2,0,6,14]` for team 1; it is not counted
+   twice within either observation. For example, `x=7` is outside the grid
+   and contributes nothing to either lane summary.
 
 The following are proposed responsibilities and fields, not accepted JSON:
 

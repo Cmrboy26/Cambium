@@ -7,6 +7,7 @@
 #include "../apps/rewards.hpp"
 #include "../apps/replay.hpp"
 #include "bridge_match_checks.hpp"
+#include "golden_apple_checks.hpp"
 #include "terrain_checks.hpp"
 #include <fstream>
 
@@ -44,6 +45,44 @@ void near(double actual, double expected, double tolerance, const char* message)
                << ", expected=" << expected << ", tolerance=" << tolerance;
         throw std::runtime_error(detail.str());
     }
+}
+
+void checkGoldenAppleBoundary() {
+    using namespace minecraft_sim;
+    PlayerState players[2]{}, initial[2]{};
+    initial[0].position = {0.0, 10.0, 0.0};
+    initial[1].position = {5.0, 10.0, 0.0};
+    Controls queued[2]{}, held[2]{};
+    WorldState world_state;
+    WorldView world(players, queued, held, &world_state, 2, {}, {testTable().data()});
+    ProjectileWorldState projectiles;
+    BridgeMatchRules rules;
+    rules.cage_ticks = 0;
+    rules.void_y = -10000.0;
+    rules.goals[0] = {{-100.0, -10000.0, -1.0}, {-99.0, 100.0, 1.0}};
+    rules.goals[1] = {{100.0, -10000.0, -1.0}, {101.0, 100.0, 1.0}};
+    rules.kits[0].explicit_hotbar = true;
+    rules.kits[0].slot_count = 1;
+    rules.kits[0].slots[0] = BridgeHotbarItem::golden_apple;
+    rules.kits[0].golden_apples = 2;
+    BridgeMatchState match;
+    resetBridgeMatch(world, projectiles, initial, rules, match, 1);
+    players[0].health = 10.0F;
+    for (int tick = 0; tick < 31; ++tick) {
+        queued[0].use_item = true;
+        processBridgeWorldTick(world, projectiles, initial, rules, match);
+    }
+    require(match.kits[0].golden_apples == 2 && players[0].golden_apple_use_ticks == 1
+        && players[0].absorption == 0.0F, "apple remains unconsumed before tick 32");
+    queued[0].use_item = true;
+    processBridgeWorldTick(world, projectiles, initial, rules, match);
+    require(match.kits[0].golden_apples == 1 && players[0].golden_apple_use_ticks == 0
+        && players[0].absorption == 4.0F && players[0].health == 10.0F
+        && players[0].golden_apple_regeneration_ticks == 100, "apple completes on tick 32");
+    queued[0].use_item = false;
+    processBridgeWorldTick(world, projectiles, initial, rules, match);
+    require(players[0].health == 11.0F && players[0].golden_apple_regeneration_ticks == 99
+        && match.kits[0].golden_apples == 1, "regeneration starts on next tick");
 }
 
 void checkMutableTerrain() {
@@ -2166,6 +2205,9 @@ int main(int argc, char** argv) {
         require(bridge_match_checks::building({testTable().data()}), "Bridge block targeting, placement and breaking");
         require(bridge_match_checks::simultaneousBuilding({testTable().data()}), "Bridge ordered simultaneous building");
         require(bridge_match_checks::externalCutoff({testTable().data()}), "Bridge external cutoff retains final state");
+        checkGoldenAppleBoundary();
+        const int apple_check = golden_apple_checks::run({testTable().data()});
+        if (apple_check != 0) throw std::runtime_error("Golden apple shared check " + std::to_string(apple_check));
         require(terrain_checks::blockTargeting(), "full-cube block target faces and boundaries");
         checkMutableTerrain();
         checkCompositeWorldConsumers();

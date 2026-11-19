@@ -110,6 +110,10 @@ struct PlayerState {
     bool shield_equipped = false;
     bool using_shield = false;
     bool using_bow = false;
+    int golden_apple_use_ticks = 0;
+    int golden_apple_regeneration_ticks = 0;
+    int golden_apple_absorption_ticks = 0;
+    bool golden_apple_consumed = false;
     int shield_use_ticks = 0;
     int shield_cooldown = 0;
     int item_use_delay = 0;
@@ -512,7 +516,7 @@ public:
         state_->last_attack = {};
         state_->last_blocked_damage = 0.0F;
         state_->last_shield_disabled = false;
-        state_->attack_suppressed = state_->using_shield || state_->using_bow;
+        state_->attack_suppressed = state_->using_shield || state_->using_bow || state_->golden_apple_use_ticks > 0;
         if (state_->item_use_delay > 0) {
             --state_->item_use_delay;
         }
@@ -546,6 +550,7 @@ public:
         if (!prepared) {
             prepareTick();
         }
+        tickGoldenApple();
         if (held_->use_item && !state_->using_shield && !state_->using_bow
             && state_->weapon != WeaponItem::bow && state_->item_use_delay == 0 && state_->alive()) {
             state_->item_use_delay = 4;
@@ -586,6 +591,35 @@ public:
     }
 
 private:
+    // Minecraft 26.3: LivingEntity.baseTick/tick (503, 2752), MobEffectInstance.tickServer (218-232),
+    // RegenerationMobEffect (12-24), AbsorptionMobEffect (12-24), Consumables.GOLDEN_APPLE (37-43).
+    MCSIM_HD void tickGoldenApple() {
+        state_->golden_apple_consumed = false;
+        if (state_->golden_apple_regeneration_ticks > 0) {
+            if (state_->golden_apple_regeneration_ticks % 25 == 0) heal(1.0F);
+            --state_->golden_apple_regeneration_ticks;
+        }
+        if (state_->golden_apple_absorption_ticks > 0) {
+            if (state_->absorption <= 0.0F || --state_->golden_apple_absorption_ticks == 0) {
+                state_->golden_apple_absorption_ticks = 0;
+                state_->absorption = 0.0F;
+            }
+        }
+        if (state_->golden_apple_use_ticks > 0) {
+            if (!state_->alive()) state_->golden_apple_use_ticks = 0;
+            else if (--state_->golden_apple_use_ticks == 0) {
+                state_->golden_apple_consumed = true;
+                state_->golden_apple_regeneration_ticks = 100;
+                state_->golden_apple_absorption_ticks = 2400;
+                state_->absorption = static_cast<float>(maximum(state_->absorption, 4.0F));
+                if (world_ && (world_->simulate_food || world_->natural_regeneration)) {
+                    state_->food_level = static_cast<int>(minimum(state_->food_level + 4, 20));
+                    state_->food_saturation = static_cast<float>(minimum(state_->food_saturation + 9.6F, state_->food_level));
+                }
+            }
+        }
+    }
+
     MCSIM_HD bool fitsPose(BlockWorldView blocks, PlayerPose pose) const {
         auto box = state_->bounds(pose);
         box.lower.x += 1.0E-7;
@@ -605,11 +639,11 @@ private:
             && (state_->previous_sneak || !fitsPose(blocks, PlayerPose::standing));
         const bool forward = held_->forward && !held_->backward;
         const bool possible = state_->alive() && (state_->food_level > 6 || state_->may_fly) && !state_->mobility_restricted;
-        if (state_->previous_sneak || held_->backward || state_->using_shield || state_->using_bow) {
+        if (state_->previous_sneak || held_->backward || state_->using_shield || state_->using_bow || state_->golden_apple_use_ticks > 0) {
             state_->sprint_trigger_time = 0;
         }
         if (!state_->sprinting && forward && possible && !state_->crouching
-            && !state_->using_shield && !state_->using_bow
+            && !state_->using_shield && !state_->using_bow && state_->golden_apple_use_ticks == 0
             && state_->pose != PlayerPose::crawling) {
             if (!state_->previous_forward) {
                 if (state_->sprint_trigger_time > 0) {
@@ -658,7 +692,7 @@ private:
         if (raw_length >= 1.0E-4F) {
             strafe = (strafe / raw_length) * 0.98F;
             forward = (forward / raw_length) * 0.98F;
-            if (state_->using_shield || state_->using_bow) {
+            if (state_->using_shield || state_->using_bow || state_->golden_apple_use_ticks > 0) {
                 strafe *= 0.2F;
                 forward *= 0.2F;
             }

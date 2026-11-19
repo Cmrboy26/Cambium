@@ -73,8 +73,12 @@ For example, the following kit corresponds to scene weapons
 including item counts, selected slot and refill progress; it is not a policy
 observation. Death restores only that player's kit, a nonwinning goal restores
 both, and a full reset restores selected matches. Without the optional building
-configuration, pickaxe and block actions are suppressed. Golden-apple eating,
-effects and structured score observations remain unimplemented.
+configuration, pickaxe and block actions are suppressed. Holding use with a
+golden apple selected consumes one after 32 ticks; release, slot change, death
+or cage filtering cancels use. The experimental subset grants four absorption
+points and regeneration for 100 ticks, with absorption lasting up to 2400 ticks.
+Death, goal and match resets clear the affected players' transient effects.
+General effects and structured score observations remain unimplemented.
 For reserved non-weapon slots, the adapter rejects legacy equipment observations,
 weapon charge/attribute features and weapon-slot features for those slots rather
 than reporting their `minecraft:air` placeholders as the actual kit items.
@@ -98,6 +102,10 @@ durability or drops. Pickaxe attacks against entities are suppressed. Held use
 repeats after four ticks; mining cancels on release or target/slot change.
 This is an experimental subset, not a claim of captured vanilla or Hypixel parity.
 Configure building before registering CUDA observation buffers.
+
+Golden-apple state changes the native `PlayerState` layout. Rebuild all native
+consumers together; older raw native captures are not compatible and must be
+recaptured with the matching build.
 
 Resolved scenarios include `experimental_bridge` and are intentionally rejected
 by the ordinary scene loader until the authored capability gate exists. Duel
