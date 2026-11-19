@@ -9,14 +9,14 @@ features are foundations, not completed Bridge features.
 **Owner:** GitHub Copilot for the current terrain and lifecycle slice.
 **Blocked by:** Authored Bridge setups, resident collection and replay/live
 adapters are not implemented; in-game conformance and memory gates remain open.
-**First task:** P1-02-04.
+**First task:** P1-02-07.
 
-1. Finish per-world terrain and building integration; the experimental host-staged
-  CUDA path mirrors compact edit events and has focused CPU/T4 fixture coverage.
+1. Measure terrain memory use against the configured cap and complete the
+  remaining P1-02-07 gate; the host-staged composite terrain path is covered.
 2. Implement eating, remaining building subsets, authored setup and PPO collector
   paths; the experimental CPU/CUDA host batch is not those adapters.
-3. Measure memory against the configured cap and complete the remaining terrain,
-  resident, in-game and H100 validation gates before claiming full Bridge support.
+3. Complete the remaining resident, in-game and H100 validation gates before
+  claiming full Bridge support.
 
 Starting points: [`BlockWorldView`](../simulator/include/minecraft_sim/geometry.hpp),
 the native [scene loader](../simulator/apps/scene.hpp), [CUDA batch](../simulator/src/cuda_backend.cu),
@@ -220,13 +220,86 @@ the composite terrain interface before parallel physics or observation work.
   CUDA builds reported cluster clock-skew warnings; affected targets were
   compiled and tested. The cap bounds specified terrain payloads, not total
   process/device memory; measured-memory and Bridge gameplay gates remain open.
-- [ ] P1-02-04: Make collision, raycasting, targeting and observations read the
+- [x] P1-02-04: Make collision, raycasting, targeting and observations read the
   same per-world composite terrain on CPU and CUDA. Preserve old static-duel
-  behavior and avoid full terrain transfers on each tick. **In progress:**
-  GitHub Copilot; per-world host reads and shared projectile world wiring are
-  added. The experimental host-staged CUDA batch mirrors compact ordered block
-  edit events; focused fixtures pass, but the resident Bridge path and complete
-  integration validation remain open.
+  behavior and avoid full terrain transfers on each tick. Evidence below covers
+  the implemented host-staged path; resident Bridge is separately tracked in P1-06.
+- **P1-02-04 host-staged evidence, 2026-11-19:** The shared
+  [match fixture](../simulator/tests/bridge_match_checks.hpp) now creates and
+  breaks a block through Bridge ticks, then probes the same overlay for
+  targeting, rays, collision, movement, melee and arrows before/after edits.
+  These physics probes use separate test player/projectile state, not the
+  training batch's actual subsequent actions. The
+  [CUDA observation fixture](../simulator/training/test_cuda_observation.py)
+  checks independently expected rays in host, raw CUDA and configured CUDA
+  observations after real place/break actions and selective resets in two
+  worlds. CPU native CTest passed 6/6; T4 native CTest passed 4/4. The Python
+  CUDA/duel regression ran 31 tests: 30 passed, one two-device check skipped.
+  The focused CPU Python Bridge building fixture also passed with the CPU
+  library explicitly selected. Commands from the project root:
+
+  ```sh
+  cmake --build simulator/build-bridge-validation-20261119-cpu -j 4
+  ctest --test-dir simulator/build-bridge-validation-20261119-cpu --output-on-failure
+  cmake --build simulator/build-bridge-validation-20261119-t4 --target minecraft_sim_observation_cuda_checks -j 4
+  cmake --build simulator/build-bridge-validation-20261119-t4 --target minecraft_sim_checks minecraft_sim_training_checks minecraft_sim_projectile_cuda_checks -j 4
+  ctest --test-dir simulator/build-bridge-validation-20261119-t4 --output-on-failure -R '^(shared_core_cuda_checks|training_api_cuda_checks|projectile_cuda_checks|observation_cuda_checks)$'
+  MCSIM_TEST_CPU_LIBRARY="$PWD/simulator/build-bridge-validation-20261119-cpu/minecraft_sim_training.so" MCSIM_TEST_CUDA_LIBRARY="$PWD/simulator/build-bridge-validation-20261119-t4/minecraft_sim_training.so" .venv-rosie/bin/python -B -m unittest -v simulator.training.test_cuda_observation simulator.training.test_research.ResidentOpponentChecks
+  ```
+
+  T4 job `302282` used `dh-node8`, Tesla T4 (15360 MiB), driver 610.43.02,
+  CUDA toolkit 12.9.86, GNU 13.3.0 and PyTorch 2.5.1+cu124. The CPU and CUDA
+  native libraries report source hash
+  `daadbc54c6578b6580697a0c520f941d5d3a815dcf6c09352841790d37798a5b`,
+  revision `5b4c02db424b` plus dirty worktree. The match and Python fixture
+  SHA-256 values were respectively
+  `1cd28bdeae7c9dc4b1d7f8e29974bdaa56d94b6e84d5f6373893ae4a4227a94c` and
+  `c639d5280f195391a5b735d1df45e2f3e170d4a0cd964f65bfe83f1c8f4396ce`.
+  NVCC reported `#20013-D` host/device constexpr warnings.
+
+  Nsight Systems 2025.1.3.140 profiled the new Python test on that T4 with
+  `--trace=cuda,nvtx --sample=none`; an NVTX `bridge_step` range wrapped each
+  `Environment.step`. An exported SQLite trace showed five ranges, each with
+  one 112-byte host-to-device copy and device-to-host copies of 96, 112, 256,
+  256 and 1504 bytes. The two-world 7 x 4 x 7 fixture has a 196-byte shared
+  base and two 196-byte overlays. No copy of those full-grid sizes appeared
+  inside the marked steps; source inspection identifies control/state/event
+  transfers and no per-step terrain download. Initialization, resets and
+  observation calls were outside the ranges. The temporary trace is not a
+  durable artifact, and this bounded observation does not prove behavior for
+  all arena sizes, resident Bridge or real-game conformance.
+- **P1-02-04 completion, 2026-11-19:** The actual CPU/CUDA
+  [training API fixture](../simulator/tests/training_checks.cpp) now compares
+  two worlds through same-tick placement and player movement or melee: only
+  the edited world clips movement and blocks a fully charged sword hit. It also
+  fires actual bows in both worlds, verifies the placed block stops an arrow,
+  breaks that block through the match tick and confirms a later arrow hits.
+  The earlier shared and device-observation fixtures above cover targeting,
+  independently expected rays, selected resets, nonaligned CUDA batches and
+  host/device observation agreement. The recorded T4 trace and source inspection
+  cover the host-staged per-tick terrain transfer criterion. From the project root:
+
+  ```sh
+  cmake -S simulator -B simulator/build-bridge-validation-20261119-cpu -DBUILD_TESTING=ON
+  cmake --build simulator/build-bridge-validation-20261119-cpu -j 4
+  ctest --test-dir simulator/build-bridge-validation-20261119-cpu --output-on-failure
+  cmake -S simulator -B simulator/build-bridge-validation-20261119-t4 -DMCSIM_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DBUILD_TESTING=ON
+  cmake --build simulator/build-bridge-validation-20261119-t4 --target minecraft_sim_training_checks -j 4
+  ctest --test-dir simulator/build-bridge-validation-20261119-t4 --output-on-failure -R '^(shared_core_cuda_checks|training_api_cuda_checks|projectile_cuda_checks|observation_cuda_checks)$'
+  MCSIM_TEST_CPU_LIBRARY="$PWD/simulator/build-bridge-validation-20261119-cpu/minecraft_sim_training.so" MCSIM_TEST_CUDA_LIBRARY="$PWD/simulator/build-bridge-validation-20261119-t4/minecraft_sim_training.so" .venv-rosie/bin/python -B -m unittest -v simulator.training.test_cuda_observation simulator.training.test_research.ResidentOpponentChecks
+  ```
+
+  CPU CTest passed 6/6, T4 CTest passed 4/4, and the CUDA/Python duel and
+  observation suite passed 30 of 31 tests; the two-device check was skipped.
+  T4 job `302283` used `dh-node8`, Tesla T4 (15360 MiB), driver 610.43.02,
+  CUDA 12.9.86, PyTorch 2.5.1+cu124 and GNU 13.3.0. Both native libraries
+  report source hash `daadbc54c6578b6580697a0c520f941d5d3a815dcf6c09352841790d37798a5b`
+  and revision `42968419ef63` with dirty test/documentation worktree. The
+  final training fixture SHA-256 is
+  `db2e39cb451bdb4531f8f67b26189fb7b3a523956e4f18d6a883019528dc7380`;
+  the other fixture hashes and NVCC warnings are recorded above. This does not
+  complete the separate measured-memory gate, resident Bridge, H100, authored
+  setup, replay/live or real-game conformance work.
 - [x] P1-02-05: Restore only selected overlays on full match reset; preserve
   placed blocks across goals by default and test the explicit alternate rule.
   Evidence: the CPU/T4 validation below covers both policies and selective reset.

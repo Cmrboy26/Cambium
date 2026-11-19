@@ -38,6 +38,62 @@ class CUDAObservationChecks(unittest.TestCase):
         output = environment.observe_cuda_async()
         np.testing.assert_allclose(output.cpu().numpy(), expected, rtol=0, atol=1e-6)
 
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_bridge_building_device_observations_follow_edits_and_resets(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["blocks"].append({"from": [0, 2, 1], "to": [0, 2, 1], "block": "minecraft:stone"})
+        scene["players"][1]["position"][0] = -2.5
+        for player in scene["players"]:
+            player["velocity"][1] = -0.0784000015258789
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air", "minecraft:air"],
+                                 "selected": 1, "arrows": 0, "offhand": "minecraft:air"}
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "arena.ray_world_0"}],
+                    "actions": [{"name": "weapon", "values": [0, 1, 2]},
+                                {"name": "use_item", "values": [False, True]},
+                                {"name": "attack", "values": [False, True]}]}
+        kit = {"slots": ["sword", "blocks", "pickaxe"], "blocks": 4, "golden_apples": 0}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "kits": [kit, kit], "task_rewards": {"score": 2, "win": 5, "loss": -3},
+                  "building": {"zones": [{"min": [-3, 0, -3], "max": [4, 4, 4]}],
+                               "block_range": 4.5, "entity_range": 3.0,
+                               "hardness": 1.0, "mining_speed": 15.0, "correct_tool": True}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-building.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            with Environment(2, device="cuda", environment=path, contract=contract, max_ticks=100,
+                             bridge=bridge, library=os.environ.get("MCSIM_TEST_CUDA_LIBRARY")) as environment:
+                def check(expected):
+                    np.testing.assert_allclose(environment.observe()[:, 0, 0], expected, rtol=0, atol=1e-6)
+                    np.testing.assert_allclose(environment.observe_base_cuda().cpu().numpy()[:, 0, 10],
+                                               expected, rtol=0, atol=1e-6)
+                    self.compare_configured(environment)
+
+                check([0.05, 0.05])
+                actions = np.zeros((2, 2, 3), dtype=np.int32)
+                actions[0, 0] = [1, 1, 0]
+                environment.step(actions)
+                self.assertTrue(environment.bridge_state()[0]["placed"][0])
+                check([0.03, 0.05])
+                environment.reset(np.array([False, True]))
+                check([0.03, 0.05])
+                actions[0, 0] = [2, 0, 1]
+                for _ in range(3):
+                    environment.step(actions)
+                self.assertTrue(environment.bridge_state()[0]["broke"][0])
+                check([0.05, 0.05])
+                actions[0, 0] = [1, 1, 0]
+                environment.step(actions)
+                self.assertTrue(environment.bridge_state()[0]["placed"][0])
+                check([0.03, 0.05])
+                environment.reset(np.array([True, False]))
+                check([0.05, 0.05])
+
     def test_cpu_environment_rejects_cuda_observations(self):
         with Environment(1, library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
             with self.assertRaisesRegex(ValueError, "require a CUDA environment"):

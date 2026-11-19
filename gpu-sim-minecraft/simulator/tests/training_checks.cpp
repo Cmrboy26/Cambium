@@ -249,11 +249,20 @@ void checkBridgeBuilding(const char* environment, int cuda) {
         output << definition;
     }
     const auto descriptor = policy.dump();
+    auto movement_policy = policy;
+    movement_policy["observations"] = {{{"feature", "relative.x"}}};
+    const auto movement_descriptor = movement_policy.dump();
+    auto combat_policy = policy;
+    combat_policy["observations"] = {{{"feature", "self.health_fraction"}}};
+    const auto combat_descriptor = combat_policy.dump();
     Handle batch(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    Handle movement(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), movement_descriptor.c_str()), mcsim_destroy);
+    Handle combat(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), combat_descriptor.c_str()), mcsim_destroy);
     Handle persistent(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     Handle clearing(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     std::filesystem::remove(path);
-    require(batch != nullptr && persistent != nullptr && clearing != nullptr, "create Bridge building training batches");
+    require(batch != nullptr && movement != nullptr && combat != nullptr && persistent != nullptr && clearing != nullptr,
+        "create Bridge building training batches");
     const json kit{{"slots", {"sword", "blocks", "pickaxe"}}, {"blocks", 4}, {"golden_apples", 0}};
     json config{{"mode", {{"name", "bridge"}, {"version", 1}}},
         {"goals", {{{"min", {0.0, 1.0, 2.4}}, {"max", {1.0, 3.0, 2.9}}},
@@ -297,6 +306,121 @@ void checkBridgeBuilding(const char* environment, int cuda) {
     };
     check_goal_reset(persistent, true);
     check_goal_reset(clearing, false);
+    require(mcsim_configure_bridge(movement.get(), config.dump().c_str()) == 0, "configure Bridge collision test");
+    auto moving_players = scenario(movement.get(), 0)["players"];
+    moving_players[1]["position"] = {-0.8, 1.0, 0.5};
+    moving_players[1]["velocity"] = {0.8, -0.0784000015258789, 0.0};
+    const auto moving_definitions = json::array({moving_players, moving_players}).dump();
+    std::array<float, 4> moving_observations{}, moving_rewards{};
+    std::array<uint8_t, 2> moving_terminated{}, moving_truncated{};
+    require(mcsim_reset_players(movement.get(), nullptr, moving_definitions.c_str(), moving_observations.data()) == 0,
+        "initialize matching Bridge collision worlds");
+    const std::array<int32_t, 12> moving_actions{1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    require(mcsim_step(movement.get(), moving_actions.data(), moving_observations.data(), moving_rewards.data(),
+        moving_terminated.data(), moving_truncated.data()) == 0, "step same-tick Bridge placement and movement");
+    const auto* moving_raw = mcsim_bridge_state(movement.get());
+    require(moving_raw != nullptr, "read Bridge collision events");
+    const auto moving_events = json::parse(moving_raw);
+    require(moving_events[0]["placed"][0] == true && moving_events[1]["placed"][0] == false
+        && std::abs(moving_observations[0] - (-0.08F)) < 1E-6F
+        && std::abs(moving_observations[2] - (-0.05F)) < 1E-6F,
+        "placed terrain clips same-tick movement only in its world");
+    require(mcsim_configure_bridge(combat.get(), config.dump().c_str()) == 0, "configure Bridge melee test");
+    auto combat_players = scenario(combat.get(), 0)["players"];
+    combat_players[1]["position"] = {1.31, 1.0, 1.5};
+    combat_players[1]["yaw"] = 165.0;
+    combat_players[1]["loadout"]["selected"] = 0;
+    const auto combat_definitions = json::array({combat_players, combat_players}).dump();
+    std::array<float, 4> combat_observations{}, combat_rewards{};
+    std::array<uint8_t, 2> combat_terminated{}, combat_truncated{};
+    require(mcsim_reset_players(combat.get(), nullptr, combat_definitions.c_str(), combat_observations.data()) == 0,
+        "initialize matching Bridge melee worlds");
+    const std::array<int32_t, 12> combat_actions{1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1};
+    require(mcsim_step(combat.get(), combat_actions.data(), combat_observations.data(), combat_rewards.data(),
+        combat_terminated.data(), combat_truncated.data()) == 0, "step same-tick Bridge placement and melee");
+    const auto* combat_raw = mcsim_bridge_state(combat.get());
+    require(combat_raw != nullptr, "read Bridge melee events");
+    const auto combat_events = json::parse(combat_raw);
+    if (!(combat_events[0]["placed"][0] == true && combat_events[1]["placed"][0] == false
+        && combat_observations[0] == 1.0F && std::abs(combat_observations[2] - 0.65F) < 1E-6F)) {
+        throw std::runtime_error("Bridge melee placement/health: " + combat_events.dump() + " / "
+            + std::to_string(combat_observations[0]) + ", " + std::to_string(combat_observations[2]));
+    }
+    auto bow_definition = definition;
+    for (auto& player : bow_definition["players"]) {
+        player["loadout"] = {{"weapons", {"minecraft:diamond_sword", "minecraft:bow", "minecraft:air", "minecraft:air"}},
+                             {"selected", 2}, {"arrows", 2}, {"offhand", "minecraft:air"}};
+    }
+    bow_definition["players"][1]["position"] = {1.31, 1.0, 1.5};
+    bow_definition["players"][1]["yaw"] = 165.0;
+    bow_definition["players"][1]["loadout"]["selected"] = 1;
+    const std::string bow_path = cuda ? "training-bridge-terrain-bow-cuda.json" : "training-bridge-terrain-bow-cpu.json";
+    {
+        std::ofstream output(bow_path);
+        require(static_cast<bool>(output), "open Bridge projectile test scene");
+        output << bow_definition;
+    }
+    auto bow_policy = combat_policy;
+    bow_policy["requires"] = {"bow"};
+    bow_policy["actions"][0]["values"] = {0, 1, 2, 3};
+    const auto bow_descriptor = bow_policy.dump();
+    Handle bow(mcsim_create_contract(2, cuda, bow_path.c_str(), 100, 91, weights.data(), bow_descriptor.c_str()), mcsim_destroy);
+    std::filesystem::remove(bow_path);
+    require(bow != nullptr, "create Bridge projectile training batch");
+    auto bow_config = config;
+    const json bow_kit{{"slots", {"sword", "bow", "blocks", "pickaxe"}}, {"blocks", 4}, {"golden_apples", 0}};
+    bow_config["kits"] = {bow_kit, bow_kit};
+    require(mcsim_configure_bridge(bow.get(), bow_config.dump().c_str()) == 0, "configure Bridge projectile test");
+    std::array<float, 4> bow_observations{}, bow_rewards{};
+    std::array<uint8_t, 2> bow_terminated{}, bow_truncated{};
+    std::array<int32_t, 12> bow_actions{2, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0};
+    for (int tick = 0; tick < 20; ++tick) {
+        require(mcsim_step(bow.get(), bow_actions.data(), bow_observations.data(), bow_rewards.data(),
+            bow_terminated.data(), bow_truncated.data()) == 0, "place Bridge block and draw bows");
+        if (tick == 0) {
+            const auto* raw = mcsim_bridge_state(bow.get());
+            require(raw != nullptr && json::parse(raw)[0]["placed"][0] == true,
+                "place projectile-blocking terrain in only one world");
+            bow_actions[0] = 0;
+            bow_actions[1] = 0;
+        }
+    }
+    bow_actions[4] = 0;
+    bow_actions[10] = 0;
+    for (int tick = 0; tick < 4; ++tick) {
+        require(mcsim_step(bow.get(), bow_actions.data(), bow_observations.data(), bow_rewards.data(),
+            bow_terminated.data(), bow_truncated.data()) == 0, "release and advance Bridge arrows");
+    }
+    const auto* bow_kits_raw = mcsim_bridge_kits(bow.get(), 1);
+    require(bow_kits_raw != nullptr, "read Bridge shooter ammunition");
+    const auto bow_kits = json::parse(bow_kits_raw);
+    if (!(bow_kits[0]["arrows"] == 1 && bow_kits[1]["arrows"] == 1
+        && bow_observations[0] == 1.0F && bow_observations[2] < 1.0F)) {
+        throw std::runtime_error("Bridge projectile ammunition/health: " + bow_kits.dump() + " / "
+            + std::to_string(bow_observations[0]) + ", " + std::to_string(bow_observations[2]));
+    }
+    bow_actions[0] = 3;
+    bow_actions[2] = 1;
+    for (int tick = 0; tick < 3; ++tick) {
+        require(mcsim_step(bow.get(), bow_actions.data(), bow_observations.data(), bow_rewards.data(),
+            bow_terminated.data(), bow_truncated.data()) == 0, "break projectile-blocking terrain");
+    }
+    const auto* break_raw = mcsim_bridge_state(bow.get());
+    require(break_raw != nullptr && json::parse(break_raw)[0]["broke"][0] == true,
+        "break the previously placed projectile-blocking terrain");
+    bow_actions[0] = 0;
+    bow_actions[2] = 0;
+    bow_actions[4] = 1;
+    for (int tick = 0; tick < 20; ++tick) {
+        require(mcsim_step(bow.get(), bow_actions.data(), bow_observations.data(), bow_rewards.data(),
+            bow_terminated.data(), bow_truncated.data()) == 0, "draw bow after Bridge block break");
+    }
+    bow_actions[4] = 0;
+    for (int tick = 0; tick < 4; ++tick) {
+        require(mcsim_step(bow.get(), bow_actions.data(), bow_observations.data(), bow_rewards.data(),
+            bow_terminated.data(), bow_truncated.data()) == 0, "release arrow after Bridge block break");
+    }
+    require(bow_observations[0] < 1.0F, "arrow reaches the player after the placed block is broken");
     auto invalid = config;
     invalid["building"]["zones"][0]["min"][0] = -4;
     require(mcsim_configure_bridge(batch.get(), invalid.dump().c_str()) != 0,

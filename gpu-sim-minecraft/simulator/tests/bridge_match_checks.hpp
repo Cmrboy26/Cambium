@@ -386,6 +386,41 @@ MCSIM_HD inline bool kitsAndRefill(minecraft_sim::MathView math) {
     return state.kits[0].blocks == 64 && state.kits[0].golden_apples == 2 && state.kits[0].arrows == 1;
 }
 
+MCSIM_HD inline bool buildingConsumers(minecraft_sim::BlockWorldView blocks, minecraft_sim::MathView math, bool blocked) {
+    using namespace minecraft_sim;
+    const Vec3 origin{-1.5, 2.5, -0.5}, delta{4.0, 0.0, 0.0};
+    const Aabb cell{{0.1, 2.1, -0.9}, {0.9, 2.9, -0.1}};
+    const auto target = targetFullCube(blocks, origin, delta);
+    if (target.hit != blocked || (blocked && (target.x != 0 || target.y != 2 || target.z != -1
+        || target.face != BlockFace::west))
+        || blockRayFraction(blocks, origin, delta) != (blocked ? 0.375 : 1.0)
+        || noBlockCollision(blocks, cell) == blocked) return false;
+
+    PlayerState players[2]{};
+    players[0].position = {-0.5, 1.0, -0.5};
+    players[0].yaw = -90.0F;
+    players[0].velocity.x = 0.6;
+    players[1].position = {1.5, 1.0, -0.5};
+    Controls queued[2]{}, held[2]{};
+    queued[0].attack = true;
+    WorldState world_state;
+    WorldView world(players, queued, held, &world_state, 2, blocks, math);
+    ArrowState arrow;
+    arrow.position = {-0.5, 2.5, -0.5};
+    arrow.velocity = {1.0, 0.0, 0.0};
+    arrow.owner = 0;
+    arrow.active = true;
+    ProjectileWorldState projectiles;
+    projectiles.arrows = &arrow;
+    projectiles.arrow_capacity = 1;
+    if (world.pickAttackTarget(0) != (blocked ? -1 : 1)) return false;
+    processWorldTick(world, projectiles);
+    return players[0].last_attack.target == (blocked ? -1 : 1)
+        && players[0].last_attack.hit_block == blocked
+        && (blocked ? players[0].position.x < -0.29 : players[0].position.x > 0.0)
+        && arrow.in_ground == blocked;
+}
+
 MCSIM_HD inline bool building(minecraft_sim::MathView math) {
     using namespace minecraft_sim;
     Block cells[7 * 4 * 7]{};
@@ -442,6 +477,13 @@ MCSIM_HD inline bool building(minecraft_sim::MathView math) {
     TerrainEdit rejected;
     if (placeBridgeBlock(world, target, restricted, 0, available, rejected) || available != 2) return false;
 
+    const Vec3 ray_origin{0.5, 2.5, -1.5}, ray_delta{0.0, 0.0, 4.0};
+    const Aabb placed_cell{{0.1, 2.1, 0.1}, {0.9, 2.9, 0.9}};
+    const auto initial_target = targetFullCube(blocks, ray_origin, ray_delta);
+    if (!initial_target.hit || initial_target.z != 1 || initial_target.face != BlockFace::north
+        || blockRayFraction(blocks, ray_origin, ray_delta) != 0.625
+        || !noBlockCollision(blocks, placed_cell) || !buildingConsumers(blocks, math, false)) return false;
+
     Controls controls;
     controls.select_weapon = true;
     controls.selected_slot = 0;
@@ -450,6 +492,10 @@ MCSIM_HD inline bool building(minecraft_sim::MathView math) {
     world.player(0).setInputs(controls);
     auto events = processBridgeWorldTick(world, projectiles, initial, rules, state);
     if (!events.placed[0] || state.kits[0].blocks != 1 || overlay[blocks.cellIndex(0, 2, 0)] != PlacedBlock::team0) return false;
+    const auto placed_target = targetFullCube(blocks, ray_origin, ray_delta);
+    if (!placed_target.hit || placed_target.z != 0 || placed_target.face != BlockFace::north
+        || blockRayFraction(blocks, ray_origin, ray_delta) != 0.375
+        || noBlockCollision(blocks, placed_cell)) return false;
     for (int tick = 0; tick < 3; ++tick) {
         world.player(0).setInputs(controls);
         events = processBridgeWorldTick(world, projectiles, initial, rules, state);
@@ -457,7 +503,8 @@ MCSIM_HD inline bool building(minecraft_sim::MathView math) {
     }
     world.player(0).setInputs(controls);
     events = processBridgeWorldTick(world, projectiles, initial, rules, state);
-    if (!events.placed[0] || state.kits[0].blocks != 0 || !blocks.solid(0, 2, -1)) return false;
+    if (!events.placed[0] || state.kits[0].blocks != 0 || !blocks.solid(0, 2, -1)
+        || !buildingConsumers(blocks, math, true)) return false;
     state.kits[0].blocks = 1;
     for (int tick = 0; tick < 4; ++tick) {
         world.player(0).setInputs(controls);
@@ -494,7 +541,8 @@ MCSIM_HD inline bool building(minecraft_sim::MathView math) {
     players[0].on_ground = true;
     world.player(0).setInputs(controls);
     events = processBridgeWorldTick(world, projectiles, initial, rules, state);
-    if (!events.broke[0] || blocks.solid(0, 2, -1) || state.kits[0].building.break_delay != 5) return false;
+    if (!events.broke[0] || blocks.solid(0, 2, -1) || state.kits[0].building.break_delay != 5
+        || !buildingConsumers(blocks, math, false)) return false;
     if (!blocks.setPlacedBlock(0, 2, 0, PlacedBlock::empty)) return false;
     state.kits[0].building.break_delay = 0;
     world.player(0).setInputs(controls);
