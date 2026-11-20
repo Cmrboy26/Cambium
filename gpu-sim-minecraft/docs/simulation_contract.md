@@ -45,9 +45,11 @@ The experimental [static Bridge environment](../simulator/setups/environments/br
 adds a `bridge` configuration to environment version 2. Its resolved scenario
 keeps Bridge rules outside the native concrete scene. Host-staged research
 supports one fixed arena, fixed spawns and loadouts, scalar observations and
-stationary-target opponents, with explicit score/win/loss task rewards. Sampling,
-task overrides, evaluation, replay, resident collection and live serving are
-not supported for this subset. See the [Bridge training reference](../simulator/training/AGENTS.md#experimental-bridge-batches).
+an optional local voxel/match-state model, stationary or fixed-lane scripted
+opponents and self-play, with explicit score/win/loss task rewards. Fixed-scenario
+evaluation and website replay are supported. Sampling, task overrides, resident
+collection, Fabric replay and live serving are not supported. See the
+[Bridge training reference](../simulator/training/AGENTS.md#experimental-bridge-batches).
 
 In the [example environment](../simulator/setups/environments/example/sword-duel.json),
 `players.shared` holds constant initialization and `players.overrides` contains

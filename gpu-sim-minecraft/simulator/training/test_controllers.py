@@ -3,9 +3,12 @@
 from copy import deepcopy
 import hashlib
 import io
+import json
+import os
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 from types import ModuleType
 import unittest
 from unittest import mock
@@ -14,13 +17,14 @@ from uuid import uuid4
 import numpy as np
 import torch
 
-from backend.fast_rl_model import ActorCritic
-from simulator.training.contract import FEATURES, fingerprint, from_legacy, project_observations, validate_contract
+from backend.fast_rl_model import ActorCritic, BridgeActorCritic
+from simulator.training.contract import (FEATURES, bridge_observation_descriptor, fingerprint, from_legacy,
+                                         project_observations, validate_contract)
 from simulator.training.controllers import (
     BasicMeleeController, CheckpointController, Controller, CONTROLLER_REGISTRY, FrozenSelfPlayController,
     SelfPlayController, StationaryTargetController, checkpoint_sha256, create_controller, register_controller,
 )
-from simulator.training.environment import SCHEMA, SCHEMA_V2
+from simulator.training.environment import Environment, ROOT, SCHEMA, SCHEMA_V2
 
 
 def policy(observations=None, actions=None):
@@ -89,6 +93,161 @@ def decoded(contract, actions, name):
 
 
 class ScriptedChecks(unittest.TestCase):
+    def test_bridge_fixed_lane_seats_sub_batches_and_restore(self):
+        contract = policy(observations=[
+            {"feature": "self.on_ground", "encoding": "one_hot", "categories": [1, 0]},
+            {"feature": "self.yaw_fraction", "scale": -2},
+        ], actions=[
+            {"name": "yaw", "values": [10, 0, -10, 20, -20, 2, -2]},
+            {"name": "attack", "values": [True, False]},
+            {"name": "movement", "values": ["forward", "neutral"]},
+            {"name": "jump", "values": [True, False]},
+        ])
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane"}
+        controller = create_controller(definition, contract, 3, seed=17)
+        clone = create_controller(definition, contract, 3, seed=17)
+        initial = observations(contract, 3, **{"self.yaw_fraction": [0, 1, 0]})
+        batched = controller.act(initial)
+        self.assertEqual(decoded(contract, batched, "movement").tolist(), ["forward"] * 3)
+        self.assertFalse(decoded(contract, batched, "attack").any())
+        self.assertFalse(decoded(contract, batched, "jump").any())
+        for actor in (2, 0, 1):
+            np.testing.assert_array_equal(batched[actor], clone.act(initial[actor:actor + 1], [actor])[0])
+        turned = observations(contract, 3, **{"self.yaw_fraction": [0.25, -0.75, -0.25]})
+        saved = controller.state_dict()
+        clone.load_state_dict(saved)
+        actions = controller.act(turned)
+        np.testing.assert_array_equal(actions, clone.act(turned))
+        self.assertEqual(decoded(contract, actions, "yaw").tolist(), [-20, -20, 20])
+        self.assertEqual(decoded(contract, actions, "movement").tolist(), ["neutral"] * 3)
+        near_heading = observations(contract, 3, **{"self.yaw_fraction": [0.5 / 180, 179.5 / 180, -0.5 / 180]})
+        self.assertEqual(decoded(contract, controller.act(near_heading), "movement").tolist(), ["forward"] * 3)
+        self.assertEqual(controller.act(observations(contract, 0)).shape, (0, len(contract["actions"])))
+        controller.reset(np.array([False, True, False]))
+        self.assertEqual(controller.state_dict()["directions"], [0, -1, 0])
+        controller.act(initial[0:1], [1])
+        self.assertEqual(controller.state_dict()["directions"], [0, 0, 0])
+        controller.load_state_dict(saved)
+        invalid = deepcopy(saved)
+        invalid["directions"][1] = 3
+        with self.assertRaises(ValueError):
+            controller.load_state_dict(invalid)
+        self.assertEqual(controller.state_dict(), saved)
+
+    def test_bridge_fixed_lane_rejects_missing_contract_and_ambiguous_spawn(self):
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane"}
+        with self.assertRaisesRegex(ValueError, "self.yaw_fraction"):
+            create_controller(definition, policy(), 1)
+        zero_scale = policy(observations=[{"feature": "self.yaw_fraction", "scale": 0}])
+        with self.assertRaisesRegex(ValueError, "self.yaw_fraction"):
+            create_controller(definition, zero_scale, 1)
+        for movements in (["neutral"], ["forward"]):
+            contract = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+                {"name": "movement", "values": movements},
+                {"name": "yaw", "values": [-2, 0, 2]},
+            ])
+            with self.subTest(movements=movements), self.assertRaises(ValueError):
+                create_controller(definition, contract, 1)
+        for yaw in ([0, 2], [-2, 2], [-10, 0, 10]):
+            contract = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+                {"name": "movement", "values": ["neutral", "forward"]},
+                {"name": "yaw", "values": yaw},
+            ])
+            with self.assertRaises(ValueError):
+                create_controller(definition, contract, 1)
+        clipped = policy(observations=[{"feature": "self.yaw_fraction", "clip": [-0.5, 0.5]}], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "yaw", "values": [-2, 0, 2]},
+        ])
+        with self.assertRaisesRegex(ValueError, "unclipped"):
+            create_controller(definition, clipped, 1)
+        contract = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "yaw", "values": [-2, 0, 2]},
+        ])
+        controller = create_controller(definition, contract, 1)
+        with self.assertRaises(ValueError):
+            create_controller({**definition, "options": {"unknown": True}}, contract, 1)
+        with self.assertRaisesRegex(ValueError, "spawn-facing"):
+            controller.act(observations(contract, 1, **{"self.yaw_fraction": [0.5]}))
+        self.assertEqual(controller.state_dict()["directions"], [-1])
+        for head in ({"name": "pitch", "values": [-2, 2]}, {"name": "attack", "values": [True]},
+                 {"name": "weapon", "values": [1]}):
+            unsupported = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+                {"name": "movement", "values": ["neutral", "forward"]},
+                {"name": "yaw", "values": [-2, 0, 2]}, head,
+            ])
+            with self.subTest(head=head["name"]), self.assertRaises(ValueError):
+                create_controller(definition, unsupported, 1)
+
+    @unittest.skipUnless(os.environ.get("MCSIM_TEST_CPU_LIBRARY"), "MCSIM_TEST_CPU_LIBRARY not set")
+    def test_bridge_fixed_lane_native_scores_both_seats(self):
+        contract = policy(observations=[{"feature": name} for name in (
+            "self.health_fraction", "self.yaw_fraction", "self.pitch_fraction",
+            "self.velocity.x", "self.velocity.y", "self.velocity.z", "self.on_ground",
+            "opponent.alive", "opponent.health_fraction", "relative.x", "relative.y", "relative.z",
+            *(f"arena.ray_world_{angle}" for angle in range(0, 360, 45)),
+            "target.distance_fraction", "target.aim_dot", "target.yaw_error", "target.pitch_error",
+        )], actions=[
+            {"name": "movement", "values": ["neutral", "forward", "forward_right", "right", "backward_right",
+                                           "backward", "backward_left", "left", "forward_left"]},
+            {"name": "jump", "values": [False, True]},
+            {"name": "sprint", "values": [False, True]},
+            {"name": "attack", "values": [False, True]},
+            {"name": "yaw", "values": [-20, -10, -5, -2, 0, 2, 5, 10, 20]},
+            {"name": "pitch", "values": [-5, -2, 0, 2, 5]},
+        ])
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["bounds"] = {"min": [-5, -4, -12], "size": [11, 10, 24]}
+        scene["blocks"] = [
+            {"from": [-3, 0, -11], "to": [3, 0, -6], "block": "minecraft:stone"},
+            {"from": [-1, 0, -5], "to": [1, 0, 5], "block": "minecraft:stone"},
+            {"from": [-3, 0, 6], "to": [3, 0, 11], "block": "minecraft:stone"},
+        ]
+        bridge = {
+            "mode": {"name": "bridge", "version": 1},
+            "goals": [{"min": [-2, 1, -11], "max": [2, 3, -10]},
+                      {"min": [-2, 1, 10], "max": [2, 3, 11]}],
+            "void_y": -3, "match": {"goals_to_win": 3, "max_ticks": 1200, "cage_ticks": 40,
+                                      "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+            "task_rewards": {"score": 1, "win": 5, "loss": -5},
+        }
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane"}
+        relative_column = next(index for index, descriptor in enumerate(contract["observations"])
+                       if descriptor["feature"] == "relative.z")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lane.json"
+            for seat in (0, 1):
+                with self.subTest(seat=seat):
+                    scene["players"][0].update(position=[0, 1, -8], yaw=0)
+                    scene["players"][1].update(position=[0, 1, 8], yaw=180)
+                    for player in scene["players"]:
+                        player["loadout"] = {"weapons": ["minecraft:diamond_sword"], "selected": 0,
+                                             "offhand": "minecraft:air", "arrows": 0}
+                    scene["players"][1 - seat]["position"][0] = 2.5
+                    path.write_text(json.dumps(scene), encoding="utf-8")
+                    controller = create_controller(definition, contract, 1, seed=42)
+                    target = StationaryTargetController(contract, 1)
+                    with Environment(1, "cpu", path, os.environ["MCSIM_TEST_CPU_LIBRARY"],
+                                     max_ticks=1500, seed=42, contract=contract, bridge=bridge) as environment:
+                        current = environment.observe()
+                        initial_relative = current[0, seat, relative_column]
+                        for tick in range(1200):
+                            actions = np.empty((1, 2, len(contract["actions"])), dtype=np.int64)
+                            actions[:, seat] = controller.act(current[:, seat])
+                            actions[:, 1 - seat] = target.act(current[:, 1 - seat])
+                            current, _, terminated, truncated = environment.step(actions)
+                            if tick == 59:
+                                relative = current[0, seat, relative_column]
+                                self.assertGreater((initial_relative - relative) * (1 if seat == 0 else -1), 0.1)
+                            if terminated[0] or truncated[0]:
+                                break
+                        state = environment.bridge_state()[0]
+                        self.assertTrue(terminated[0])
+                        self.assertFalse(truncated[0])
+                        self.assertEqual(state["outcome"], f"team{seat}")
+                        self.assertEqual(state["scores"], [3, 0] if seat == 0 else [0, 3])
+
     def test_encoded_features_preserve_scripted_actions_and_offsets(self):
         scalar = from_legacy(SCHEMA_V2)
         encoded = deepcopy(scalar)
@@ -209,6 +368,64 @@ class ScriptedChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_controller({"type": "scripted", "controller": "random_walk",
                                "options": {"sneak": "yes"}}, contract, 1)
+
+    def test_structured_self_play_sub_batches_rng_and_frozen_snapshots(self):
+        contract = policy()
+        model = BridgeActorCritic(contract["observation_dim"], bridge_observation_descriptor(), 8,
+                                  dict(zip(contract["action_names"], contract["action_sizes"])))
+        inputs = {"scalar": np.arange(9, dtype=np.float32).reshape(3, 3),
+                  "match": np.arange(30, dtype=np.float32).reshape(3, 10) / 30,
+                  "voxels": np.zeros((3, 5, 9, 9), dtype=np.uint8)}
+        inputs["voxels"][0, 0, 1, 2] = 2
+        inputs["voxels"][1, 2, 3, 4] = 3
+        inputs["voxels"][2, 4, 5, 6] = 4
+        first = create_controller({"type": "self_play"}, contract, 3, seed=7, learner=model)
+        second = create_controller({"type": "self_play"}, contract, 3, seed=7, learner=model)
+        batched = first.act(inputs)
+        reordered = np.empty_like(batched)
+        for actor in (2, 0, 1):
+            batch = {name: value[actor:actor + 1] for name, value in inputs.items()}
+            reordered[actor] = second.act(batch, [actor])[0]
+        np.testing.assert_array_equal(batched, reordered)
+        saved = first.state_dict()
+        restored = create_controller({"type": "self_play"}, contract, 3, seed=7, learner=model)
+        restored.load_state_dict(saved)
+        first.reset(np.array([True, False, True]))
+        np.testing.assert_array_equal(first.act(inputs), restored.act(inputs))
+        with self.assertRaisesRegex(ValueError, "structured Bridge observations"):
+            first.act({**inputs, "voxels": inputs["voxels"].astype(np.float32)})
+
+        definition = {"type": "frozen_self_play", "every_updates": 1}
+        frozen = create_controller(definition, contract, 3, seed=9, learner=model)
+        frozen.capture(model, 1, {"fixed": {"attack": False}})
+        frozen.reset(np.array([True, False, True]))
+        self.assertEqual(frozen.snapshot_updates.tolist(), [1, 0, 1])
+        seen = {}
+        handles = []
+        for update, (snapshot, _) in frozen.snapshots.items():
+            def capture(module, arguments, output, update=update):
+                seen[update] = {name: value.detach().cpu().numpy().copy()
+                                for name, value in arguments[0].items()}
+            handles.append(snapshot.register_forward_hook(capture))
+        try:
+            order = np.array([2, 1, 0])
+            frozen.act({name: value[order] for name, value in inputs.items()}, order)
+        finally:
+            for handle in handles:
+                handle.remove()
+        for name in inputs:
+            np.testing.assert_array_equal(seen[0][name], inputs[name][[1]])
+            np.testing.assert_array_equal(seen[1][name], inputs[name][[2, 0]])
+        saved = frozen.state_dict()
+        restored = create_controller(definition, contract, 3, seed=9, learner=model)
+        restored.load_state_dict(saved)
+        np.testing.assert_array_equal(frozen.act(inputs), restored.act(inputs))
+        frozen.reset(np.array([False, True, False]))
+        self.assertEqual(set(frozen.snapshots), {1})
+        bad_model = deepcopy(model)
+        bad_model.descriptor["version"] = 2
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            frozen.capture(bad_model, 2, {"fixed": {}}, force=True)
 
     def test_frozen_self_play_replacement_episode_pinning_and_resume(self):
         contract = policy()

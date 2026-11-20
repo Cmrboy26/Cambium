@@ -1,23 +1,78 @@
 # Phase 1 Bridge: Implementation Checklist
 
 **Status:** In progress; complete Bridge mode is not implemented. An experimental
-fixed-arena host-staged Bridge match and PPO path run on CPU/CUDA. This is the shared implementation
-tracker for the seven Phase 1 milestones; existing duel features are foundations,
-not completed Bridge features.
+fixed-arena host-staged Bridge match, local-voxel PPO and website replay run on
+CPU/CUDA. This is the shared implementation tracker for the seven Phase 1
+milestones; existing duel features are foundations, not completed Bridge features.
 
 ## Next Action
 
 **Owner:** GitHub Copilot for the current Bridge slice.
-**Blocked by:** Full authored capabilities, resident collection and replay/live
-adapters are not implemented; in-game conformance remains open.
+**Blocked by:** Full authored capabilities, resident collection, Fabric replay
+and live adapters are not implemented; in-game conformance remains open.
 **First task:** P1-01-05, alongside the remaining P1-04 item/building work.
 
-1. Finish source citations and the supported building/item subsets; extend the
-  fixed authored setup only when each capability and adapter is ready.
-2. Complete structured observations, the model interface and resident Bridge
-  integration; the current PPO path is host-staged and stationary-opponent only.
-3. Complete the remaining replay/live, in-game and H100 validation gates before
-  claiming full Bridge support.
+1. Finish source citations and the remaining building/item validation and live
+  adapters; the current authored subset is host-staged and experimental.
+2. Complete the broader structured observation/model contract and resident
+  Bridge integration; the current voxel/self-play path is host-staged only.
+3. Complete Fabric replay, live, in-game and H100 validation before claiming
+  full Bridge support.
+
+## Website MVP Evidence
+
+These are narrow website and host-staged milestones, not substitutes for the
+broader Phase 1 gates below.
+
+- [x] MVP-01: Record a complete fixed-arena Bridge match with scores, cage,
+  respawns, outcome and ordered terrain events in the version-4 replay format.
+  Export runs a separate sampled match, not a capture of an in-progress training
+  world. Native and Python fixtures check both scoring sides, ordered edits,
+  goal persistence/clearing, final observations and truncation.
+- [x] MVP-02: Play version-4 Bridge replays in the website with score, cage,
+  outcome, equipment and deterministic terrain reconstruction on seek/restart.
+  Playwright checked a native scoring fixture and an actual policy replay on
+  desktop and mobile, nonblank WebGL pixels, playback, forward/backward seeking,
+  and a legacy duel recording. The actual policy recording contains nine placed
+  blocks; seeking backward restores the previous rendered image. Fabric replay
+  remains unsupported, so P1-07-02 remains open.
+- [x] MVP-03: Provide a seeded moving fixed-lane opponent. Native fixtures show
+  three-goal wins from both seats with the other actor moved aside. It follows
+  its initial heading and does not navigate around obstacles.
+- [x] MVP-04: Train, save/resume and evaluate against a fixed moving opponent on
+  held-out seeds. The run below did **not** demonstrate improved play.
+- [x] MVP-05: Expose the experimental full-cube placement/breaking, kit, bow
+  refill and golden-apple subsets in a fixed authored host-staged setup, with
+  CPU/T4 fixtures and ordered website replay edits. General Minecraft items,
+  source conformance and real-game validation remain open under P1-04.
+- [x] MVP-06: Train and resume a host-staged model using the actor-relative
+  `[5, 9, 9]` local voxel grid, own match/kit features, and current/frozen
+  self-play. Tests cover both perspectives and final observations. Global lane
+  grids, the general model registry and live/resident adapters remain open.
+
+**MVP validation, 2026-11-19:** CPU native CTest passed 6/6. On Tesla T4,
+`training_api_cuda_checks` and `observation_cuda_checks` passed 2/2, including
+device voxel categories and native replay terrain fixtures. CPU research,
+setup, controller, training, dashboard, metrics and mocked submission suites
+ran 338 tests with five skips. The complete Rosie suite separately had two
+reproducible, unrelated setup-fixture failures (a missing mocked Python version
+and a setup subprocess timeout); its focused replay submission checks passed.
+NVCC emitted host/device `constexpr` warnings. CPU and CUDA libraries reported
+native source hash `6a36b2721b1e7ccd9df0f06029cda8d6bf33f2a85a8f28e5aabb6376a0be8580`,
+revision `6504c9f74943` plus worktree changes. T4 Slurm job 302402 on `dh-node8`
+used one GPU for 15 minutes 42 seconds including build, checks and idle time.
+
+The [voxel/self-play plan](../simulator/setups/curricula/bridge/building-voxel-selfplay.json)
+ran 40 host-staged T4 updates with 32 worlds and 128 ticks per rollout: 163840
+learner samples and 132 completed training matches. The learner recorded zero
+training wins; the 132 matches included 22 losses and 110 draws. A held-out
+seed-1729 evaluation used 32 matches per checkpoint, balanced 16 per seat,
+against the fixed-lane runner. The initial checkpoint had 0 wins, 29 losses,
+3 draws and 0 goals; the final checkpoint had 0 wins, 31 losses, 1 draw and
+0 goals. Neither had external truncations. These short results establish the
+workflow, not learning or competitive performance. Local artifacts and exact
+checkpoint hashes are in the ignored run's
+[evaluation record](../simulator/training/runs/bridge-voxel-t4-Qa50nmTs/bridge-evaluation.jsonl).
 
 Starting points: [`BlockWorldView`](../simulator/include/minecraft_sim/geometry.hpp),
 the native [scene loader](../simulator/apps/scene.hpp), [CUDA batch](../simulator/src/cuda_backend.cu),
@@ -163,8 +218,8 @@ conditions and distinguish compatible legacy duels from Bridge.
   reject invalid goals, overlapping/unsafe spawns, kits, zones, limits,
   unsupported capabilities and inconsistent versions. Confirm old duel
   setups/checkpoints still load or reject explicitly as designed. **In progress:**
-  a fixed static arena and stationary-opponent plan validate and train; kits,
-  build zones, sampling and the full declared Bridge capability gate remain open.
+  fixed arena, kit and build-zone subsets validate and train; sampling and the
+  full declared Bridge capability gate remain open.
 
 ## 2. Per-World Mutable Terrain
 
@@ -418,9 +473,8 @@ before building; the complete milestone also requires P1-02 persistence.
   [Python environment](../simulator/training/environment.py) expose explicit
   static-arena Bridge configuration, score/outcome rewards, match events and
   CPU/CUDA host-staged ticking. Focused native and Python fixtures passed; see
-  P1-02-05/06 above. Mutable host-staged terrain was added later; the
-  fixed authored and research slice is recorded below; resident,
-  replay and live controllers remain unsupported.
+  P1-02-05/06 above. Mutable host-staged terrain and website replay were added
+  later; see the MVP evidence above. Resident and live controllers remain unsupported.
 - [x] P1-03-05: Connect match outcomes and minimal score/win/loss task events
   to the training API and metrics. Preserve final observations and the specified
   termination/truncation semantics; a death or nonwinning goal is not a match
@@ -428,8 +482,8 @@ before building; the complete milestone also requires P1-02 persistence.
 - **P1-03-02/05 authored training evidence, 2026-11-19:** The [static-lane
   plan](../simulator/setups/curricula/bridge/static-lane.json) uses one fixed
   arena, fixed spawns/loadouts, scalar observations and a stationary opponent.
-  Validation rejects unsupported sampling, task overrides, evaluation, replay,
-  resident collection and live serving. Research collector fixtures exercise
+  At that validation point, evaluation and replay were still rejected; the
+  newer supported subset is recorded in the MVP evidence above. Research collector fixtures exercise
   scoring and outcomes from the learner's perspective, task rewards, selective
   resets, final observations, terminal versus truncated bootstrapping, and
   checkpoint reset-counter continuity. The driven scoring fixture records a

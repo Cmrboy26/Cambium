@@ -454,6 +454,24 @@ assert.equal(document.getElementById('world-view').hidden,false);
 assert.equal(context.resizeCount,1);
 assert.equal(vm.runInContext('playing',context),false);
 assert.equal(vm.runInContext('tick',context),42);
+context.replaySample=(frames,tick)=>({index:Math.floor(tick),actors:frames[Math.floor(tick)].actors,projectiles:[]});
+context.replayPlayers=(scene,actors)=>actors;
+context.data={header:{version:4,environment:{},ticks_per_second:20,bridge:{match:{max_ticks:100}}},frames:[
+    {tick:0,actors:[],bridge:{scores:[0,0],ticks:0,cage_remaining:4,outcome:'ongoing',terminated:false,truncated:false}},
+    {tick:1,actors:[],bridge:{scores:[1,0],ticks:1,cage_remaining:0,outcome:'ongoing',terminated:false,truncated:false}},
+    {tick:2,actors:[],bridge:{scores:[2,0],ticks:2,cage_remaining:0,outcome:'team0',terminated:true,truncated:false}}]};
+context.overlays=[];
+vm.runInContext(`viewer={setPlayers(){},setProjectiles(){},setOverlay(blocks){overlays.push(blocks)}};
+    renderEquipment=()=>{}; replay=data; terrainAt=index=>[index]; equipmentTick=-1; showTick(0);`,context);
+assert.equal(document.getElementById('bridge-score').textContent,'Player 1 0 : 0 Player 2');
+assert.equal(document.getElementById('bridge-phase').textContent,'Cage: 4 ticks');
+vm.runInContext('showTick(1); showTick(2);',context);
+assert.equal(document.getElementById('bridge-score').textContent,'Player 1 2 : 0 Player 2');
+assert.equal(document.getElementById('bridge-phase').textContent,'Player 1 wins');
+assert.equal(document.getElementById('replay-status').textContent,'Player 1 wins');
+vm.runInContext('showTick(1);',context);
+assert.equal(document.getElementById('bridge-phase').textContent,'Cage open');
+assert.deepEqual(context.overlays.map(value=>value[0]),[0,1,2,1]);
 """, str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -499,6 +517,24 @@ for (const weapon of ['minecraft:iron_sword', 'minecraft:netherite_axe']) {
         assert.ok(localPoint(tip).distanceTo(resting) < 1e-9, 'Weapon must return to rest');
     }
 }
+const viewer = Object.create(context.Viewer.prototype);
+viewer.overlay = new THREE.Group(); viewer.goals = new THREE.Group(); viewer.draw = () => {};
+const blocks = [{position:[1,2,3],player:0},{position:[-1,2,3],player:1}];
+viewer.setOverlay(blocks);
+assert.equal(viewer.overlay.children.length,2);
+const matrix = new THREE.Matrix4();
+viewer.overlay.children[0].getMatrixAt(0,matrix);
+assert.deepEqual(new THREE.Vector3().setFromMatrixPosition(matrix).toArray(),[1.5,2.5,3.5]);
+const oldMesh = viewer.overlay.children[0];
+viewer.setOverlay(blocks);
+assert.equal(viewer.overlay.children[0],oldMesh,'Unchanged terrain must not rebuild meshes');
+viewer.setOverlay([]);
+assert.equal(viewer.overlay.children.length,0);
+viewer.setGoals([{min:[0,1,2],max:[2,3,4]},{min:[3,1,2],max:[4,3,4]}]);
+assert.equal(viewer.goals.children.length,2);
+assert.deepEqual(viewer.goals.children[0].position.toArray(),[1,2,3]);
+viewer.setGoals();
+assert.equal(viewer.goals.children.length,0);
 """, str(directory)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -508,7 +544,7 @@ for (const weapon of ['minecraft:iron_sword', 'minecraft:netherite_axe']) {
         result = subprocess.run(["node", "--input-type=module", "-e", r"""
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-const { replaySample, replayPlayers } = await import('data:text/javascript;base64,' +
+const { replaySample, replayPlayers, bridgeTerrain } = await import('data:text/javascript;base64,' +
     Buffer.from(fs.readFileSync(process.argv[1], 'utf8')).toString('base64'));
 const actor = (position, yaw, health) => ({position, yaw, health, pitch:0});
 const frames = [{tick:0,actors:[actor([0,1,0],179,20),actor([4,1,0],0,20)]},
@@ -539,6 +575,37 @@ assert.equal(player.loadout.selected, 1);
 assert.equal(player.loadout.offhand, 'minecraft:air');
 assert.equal(player.loadout.armor.helmet, 'minecraft:diamond_helmet');
 assert.equal(replayPlayers(scenario,[frames[0].actors[0]])[0].loadout.selected,0);
+const kitScene = {players:[{loadout:{weapons:['minecraft:iron_sword','minecraft:bow','minecraft:air','minecraft:air','minecraft:air'],selected:0}}]};
+const kits = {kits:[{slots:['sword','bow','pickaxe','blocks','golden_apple']}]};
+for (const [slot, item] of [[2,'minecraft:pickaxe'],[3,'minecraft:blocks'],[4,'minecraft:golden_apple']]) {
+    const [actor] = replayPlayers(kitScene,[{...frames[0].actors[0],weapon:'minecraft:air',weapon_slot:slot}],kits);
+    assert.equal(actor.loadout.selected,slot);
+    assert.equal(actor.loadout.weapons[slot],item);
+}
+frames[1].bridge = {respawn:[true,false],round_reset:false};
+assert.deepEqual(replaySample(frames,1).actors[0].position,[0,1,0]);
+assert.deepEqual(replaySample(frames,1).actors[1].position,[3,1,0]);
+frames[0].projectiles[0].in_ground = false;
+frames[0].projectiles[0].owner = 0;
+frames[1].projectiles[0].owner = 0;
+assert.deepEqual(replaySample(frames,1).projectiles[0].position,[0,2,0]);
+frames[1].bridge.round_reset = true;
+assert.deepEqual(replaySample(frames,1).actors[1].position,[4,1,0]);
+const bridge = (terrain_edits, clear_overlay=false) => ({terrain_edits, clear_overlay});
+const place = (player, position) => ({player, position, action:'place'});
+const remove = (player, position) => ({player, position, action:'remove'});
+const terrain = bridgeTerrain([{bridge:bridge([])},
+    {bridge:bridge([place(0,[1,1,1]),remove(1,[1,1,1])])},
+    {bridge:bridge([place(1,[2,1,1])])},
+    {bridge:bridge([place(0,[3,1,1])],true)},
+    {bridge:bridge([place(0,[1,1,1])])}]);
+assert.deepEqual(terrain(1),[]);
+assert.deepEqual(terrain(2),[{position:[2,1,1],player:1}]);
+assert.deepEqual(terrain(3),[]);
+assert.deepEqual(terrain(4),[{position:[1,1,1],player:0}]);
+assert.deepEqual(terrain(2),[{position:[2,1,1],player:1}]);
+assert.deepEqual(terrain(0),[]);
+assert.deepEqual(terrain(4),[{position:[1,1,1],player:0}]);
 """, str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1384,6 +1451,10 @@ assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[1].data.map(p
         data = self.store.read_replay(identity, replays[0]["id"])
         self.assertEqual([frame["tick"] for frame in data["frames"]], [0, 1, 2])
         self.assertEqual([actor["id"] for actor in data["frames"][0]["actors"]], [0, 1])
+        original_v3 = path.read_bytes()
+        path.write_bytes(original_v3.replace(b'"version": 3', b'"version": 2'))
+        self.assertEqual(self.store.read_replay(identity, replays[0]["id"])["header"]["version"], 2)
+        path.write_bytes(original_v3)
         with self.assertRaises(FileNotFoundError):
             self.store.read_replay(identity, "../latest.pt")
         with self.assertRaises(FileNotFoundError):
@@ -1402,6 +1473,83 @@ assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[1].data.map(p
             self.assertEqual(self.store.list_replays(identity), [])
             with self.assertRaises(ValueError):
                 self.store.read_replay(identity, replays[0]["id"])
+
+    def test_bridge_replay_validation(self):
+        path = self.write_replay()
+        identity = self.store.list_runs()[0]["id"]
+        replay_id = self.store.list_replays(identity)[0]["id"]
+        header, *frames = [json.loads(line) for line in path.read_text().splitlines()]
+        header.update(version=4, environment={"bounds": {"min": [0, 0, 0], "size": [4, 4, 4]}, "blocks": [],
+                             "players": [{"position": [0, 1, 0]}, {"position": [3, 1, 3]}]},
+                      bridge={"mode": {"name": "bridge", "version": 1},
+                              "goals": [{"min": [0, 0, 0], "max": [1, 1, 1]},
+                                        {"min": [3, 0, 3], "max": [4, 1, 4]}],
+                              "match": {"goals_to_win": 5, "max_ticks": 100, "cage_ticks": 0}})
+        for frame in frames:
+            frame["bridge"] = {"scores": [0, 0], "ticks": frame["tick"], "cage_remaining": 0,
+                               "outcome": "ongoing", "terminated": False, "truncated": False,
+                               **{name: [False, False] for name in ("scored", "died", "placed", "broke", "respawn")},
+                               "round_reset": False, "terrain_edits": [], "clear_overlay": False}
+        path.write_text("".join(json.dumps(value) + "\n" for value in [header, *frames]))
+        self.assertEqual(self.store.read_replay(identity, replay_id)["header"]["version"], 4)
+        def verify(candidate_header, candidate_frames, valid=False):
+            path.write_text("".join(json.dumps(value) + "\n" for value in [candidate_header, *candidate_frames]))
+            if valid:
+                self.store.read_replay(identity, replay_id)
+            else:
+                with self.assertRaises((ValueError, TypeError)):
+                    self.store.read_replay(identity, replay_id)
+
+        original = json.loads(json.dumps([header, *frames]))
+        modifications = [
+            lambda data: data[0].update(version=5),
+            lambda data: data[0]["bridge"]["mode"].update(version=True),
+            lambda data: data[0]["environment"]["bounds"].update(size=[1000, 1000, 1000]),
+            lambda data: data[0]["bridge"]["goals"][0].update(max=[float("nan"), 1, 1]),
+            lambda data: data[1]["bridge"].update(clear_overlay=True),
+            lambda data: data[2].update(tick=3),
+            lambda data: data[2]["bridge"].update(scores=[True, 0]),
+            lambda data: data[2]["bridge"].update(respawn=[False, 1]),
+            lambda data: data[2]["bridge"].update(outcome="unknown"),
+            lambda data: data[2]["bridge"].update(terminated=True, outcome="team0"),
+            lambda data: data[2]["bridge"].update(terrain_edits=[{"player": 0, "action": "place", "position": [4, 1, 1]}]),
+            lambda data: data[2]["bridge"].update(terrain_edits=[{"player": 0, "action": "place", "position": [1.5, 1, 1]}]),
+            lambda data: data[2]["bridge"].update(terrain_edits=[{"player": 0, "action": "remove", "position": [1, 1, 1]}]),
+            lambda data: data[2]["bridge"].update(terrain_edits=[{"player": 0, "action": "break", "position": [1, 1, 1]}]),
+            lambda data: data[2].update(projectiles=[{"id": 0, "owner": 0, "age": 1,
+                                                       "in_ground": False, "position": [0, 1, 0], "velocity": [0, float("inf"), 0]}]),
+            lambda data: data[2]["actors"][0].update(weapon={}),
+            lambda data: data[2]["actors"][0].update(yaw=10**400),
+            lambda data: data[0]["environment"].update(players=[]),
+        ]
+        for change in modifications:
+            candidate = json.loads(json.dumps(original))
+            change(candidate)
+            with self.subTest(candidate=candidate):
+                verify(candidate[0], candidate[1:])
+        candidate = json.loads(json.dumps(original))
+        candidate[2]["bridge"].update(placed=[True, False], broke=[False, True], terrain_edits=[
+            {"player": 0, "action": "place", "position": [1, 1, 1]},
+            {"player": 1, "action": "remove", "position": [1, 1, 1]}])
+        candidate[3]["bridge"].update(placed=[True, False], terrain_edits=[
+            {"player": 0, "action": "place", "position": [2, 1, 1]}], round_reset=True, clear_overlay=True)
+        verify(candidate[0], candidate[1:], valid=True)
+        candidate[2]["bridge"]["terrain_edits"].reverse()
+        verify(candidate[0], candidate[1:])
+        candidate = json.loads(json.dumps(original))
+        candidate[0]["environment"]["blocks"] = [{"from": [1, 1, 1], "to": [1, 1, 1], "block": "minecraft:stone"}]
+        candidate[2]["bridge"].update(placed=[True, False], terrain_edits=[
+            {"player": 0, "action": "place", "position": [1, 1, 1]}])
+        verify(candidate[0], candidate[1:])
+        candidate[0]["environment"]["blocks"] = []
+        candidate[2]["bridge"].update(placed=[False, False], broke=[True, False], terrain_edits=[
+            {"player": 0, "action": "remove", "position": [1, 1, 1]}])
+        verify(candidate[0], candidate[1:])
+        candidate = json.loads(json.dumps(original))
+        candidate[-1]["bridge"].update(terminated=True, outcome="draw")
+        verify(candidate[0], candidate[1:], valid=True)
+        candidate[-1]["bridge"].update(terminated=False, truncated=True, outcome="ongoing")
+        verify(candidate[0], candidate[1:], valid=True)
 
     def test_configured_replay_directory(self):
         path = self.write_replay(self.root / "exports")

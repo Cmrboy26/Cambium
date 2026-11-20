@@ -1,6 +1,6 @@
 import * as THREE from "./three.module.min.js";
 import { OrbitControls } from "./OrbitControls.js";
-import { buildVoxels, itemLabel, playerLoadout, replaySample, replayPlayers } from "./arena-data.js";
+import { bridgeTerrain, buildVoxels, itemLabel, playerLoadout, replaySample, replayPlayers } from "./arena-data.js";
 
 const host = document.getElementById("arena");
 const message = document.getElementById("arena-message");
@@ -88,7 +88,9 @@ class ArenaViewer {
         this.scene.add(this.content);
         this.players = new THREE.Group();
         this.projectiles = new THREE.Group();
-        this.content.add(this.players, this.projectiles);
+        this.overlay = new THREE.Group();
+        this.goals = new THREE.Group();
+        this.content.add(this.players, this.projectiles, this.overlay, this.goals);
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(host);
         this.renderer.domElement.addEventListener("webglcontextlost", (event) => {
@@ -131,8 +133,11 @@ class ArenaViewer {
         this.content.clear();
         this.players.clear();
         this.projectiles.clear();
-        this.content.add(this.players, this.projectiles);
+        this.overlay.clear();
+        this.goals.clear();
+        this.content.add(this.players, this.projectiles, this.overlay, this.goals);
         this.playerSignature = null;
+        this.overlaySignature = null;
     }
 
     load(scenario) {
@@ -163,6 +168,46 @@ class ArenaViewer {
         this.setWalls(document.getElementById("arena-solid-walls").checked);
         this.fitPending = true;
         this.reset();
+    }
+
+    setOverlay(blocks) {
+        if (blocks === this.overlaySignature) return;
+        this.overlaySignature = blocks;
+        this.overlay.traverse((object) => {
+            object.geometry?.dispose();
+            object.material?.dispose();
+            if (object.isInstancedMesh) object.dispose();
+        });
+        this.overlay.clear();
+        for (const player of [0, 1]) {
+            const positions = blocks.filter((block) => block.player === player);
+            if (!positions.length) continue;
+            const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.985, 0.985, 0.985),
+                new THREE.MeshStandardMaterial({ color: playerColors[player], roughness: 1 }), positions.length);
+            const matrix = new THREE.Matrix4();
+            positions.forEach((block, index) => {
+                matrix.makeTranslation(...block.position.map((value) => value + 0.5));
+                mesh.setMatrixAt(index, matrix);
+            });
+            mesh.instanceMatrix.needsUpdate = true;
+            this.overlay.add(mesh);
+        }
+        this.draw();
+    }
+
+    setGoals(goals = []) {
+        this.goals.traverse((object) => { object.geometry?.dispose(); object.material?.dispose(); });
+        this.goals.clear();
+        goals.forEach((goal, player) => {
+            const size = goal.max.map((value, axis) => value - goal.min[axis]);
+            const box = new THREE.BoxGeometry(...size);
+            const edges = new THREE.EdgesGeometry(box);
+            box.dispose();
+            const outline = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: playerColors[player] }));
+            outline.position.set(...goal.min.map((value, axis) => value + size[axis] / 2));
+            this.goals.add(outline);
+        });
+        this.draw();
     }
 
     addPlayer(player, index, profile) {
@@ -212,6 +257,13 @@ class ArenaViewer {
                 weaponPart([0.055, 0.24, 0.055], [-0.37, height, 0.26 + offset], 0x816346);
             }
             weaponPart([0.018, 0.64, 0.018], [-0.37, 1.02, 0.18], 0xd7dce0);
+        } else if (weapon === "minecraft:blocks") {
+            weaponPart([0.3, 0.3, 0.3], [-0.37, 1.04, 0.26], playerColors[index]);
+        } else if (weapon === "minecraft:golden_apple") {
+            weaponPart([0.2, 0.2, 0.2], [-0.37, 1.04, 0.26], 0xe7bd37);
+        } else if (weapon === "minecraft:pickaxe") {
+            weaponPart([0.055, 0.43, 0.055], [-0.37, 0.94, 0.26], 0x816346);
+            weaponPart([0.3, 0.075, 0.075], [-0.37, 1.2, 0.26], 0xc9d0d4);
         } else if (weapon && weapon !== "minecraft:air") {
             weaponPart([0.055, 0.43, 0.055], [-0.37, 0.94, 0.26], 0x816346);
             if (weapon.endsWith("_axe")) weaponPart([0.28, 0.24, 0.08], [-0.3, 1.2, 0.26], equipmentColor(weapon, 0xc9d0d4));
@@ -382,6 +434,7 @@ const arenaState = document.getElementById("arena-state");
 let runId = "";
 let spawnScenario = {};
 let replay = null;
+let terrainAt = null;
 let replayRequestTicket = 0;
 let loadedReplayRequest = "";
 let tick = 0;
@@ -418,18 +471,27 @@ function showTick(value) {
     const frames = replay.frames;
     tick = Math.max(frames[0].tick, Math.min(frames.at(-1).tick, value));
     const sample = replaySample(frames, tick);
-    const players = replayPlayers(replay.header.environment, sample.actors);
+    const players = replayPlayers(replay.header.environment, sample.actors, replay.header.bridge);
     viewer?.setPlayers(players, replay.header.environment.profile);
     viewer?.setProjectiles(sample.projectiles);
     if (equipmentTick !== sample.index) {
         renderEquipment({ ...replay.header.environment, players }, true);
+        if (terrainAt) viewer?.setOverlay(terrainAt(sample.index));
         equipmentTick = sample.index;
     }
     timeline.value = String(Math.floor(tick));
     const rate = replay.header.ticks_per_second ?? 20;
     document.getElementById("replay-position").textContent = `Tick ${Math.floor(tick)} / ${frames.at(-1).tick} / ${((tick - frames[0].tick) / rate).toFixed(1)}s`;
     const frame = frames[sample.index];
-    replayStatus.textContent = frame.truncated ? "Timeout" : frame.terminated ? "Duel ended" : "Recorded duel";
+    if (frame.bridge) {
+        const state = frame.bridge;
+        document.getElementById("bridge-score").textContent = `Player 1 ${state.scores[0]} : ${state.scores[1]} Player 2`;
+        document.getElementById("bridge-clock").textContent = `Tick ${state.ticks} / ${replay.header.bridge.match.max_ticks}`;
+        const outcome = { ongoing: "In progress", team0: "Player 1 wins", team1: "Player 2 wins", draw: "Draw" };
+        document.getElementById("bridge-phase").textContent = state.truncated ? "Training cutoff" : state.terminated ? outcome[state.outcome]
+            : state.cage_remaining ? `Cage: ${state.cage_remaining} ticks` : "Cage open";
+        replayStatus.textContent = state.truncated ? "Bridge truncated" : state.terminated ? outcome[state.outcome] : "Recorded Bridge match";
+    } else replayStatus.textContent = frame.truncated ? "Timeout" : frame.terminated ? "Duel ended" : "Recorded duel";
 }
 
 function animateReplay(time) {
@@ -460,6 +522,8 @@ function restoreSpawn(preserveCamera = true) {
     setPlaying(false);
     loadRequest?.abort();
     replay = null;
+    terrainAt = null;
+    document.getElementById("bridge-scoreboard").hidden = true;
     equipmentTick = -1;
     enableReplay(false);
     timeline.value = "0";
@@ -467,6 +531,9 @@ function restoreSpawn(preserveCamera = true) {
     arenaState.textContent = "Spawn state";
     renderReplayTraining(null);
     renderArena(spawnScenario, preserveCamera);
+    viewer?.setOverlay([]);
+    viewer?.setGoals();
+    viewer?.setProjectiles([]);
     renderEquipment(spawnScenario);
     if (viewer && spawnScenario.bounds) viewer.setPlayers(spawnScenario.players ?? [], spawnScenario.profile);
 }
@@ -509,9 +576,9 @@ async function refreshReplayRequest() {
         replayRequestButton.disabled = request?.status === "pending";
         if (!request) {
             loadedReplayRequest = "";
-            replayRequestStatus.textContent = "A replay will be captured after the next completed duel.";
+            replayRequestStatus.textContent = "A replay will be captured after the next completed episode.";
         } else if (request.status === "pending") {
-            replayRequestStatus.textContent = "Replay requested; waiting for a duel to finish.";
+            replayRequestStatus.textContent = "Replay requested; waiting for an episode to finish.";
         } else if (request.status === "completed") {
             replayRequestStatus.textContent = `Replay saved after round ${request.completed_rounds}.`;
             if (loadedReplayRequest !== request.request_id) {
@@ -563,6 +630,10 @@ async function selectReplay() {
         if (controller.signal.aborted) return;
         replay = data;
         renderArena(data.header.environment, true);
+        terrainAt = data.header.version === 4 ? bridgeTerrain(data.frames) : null;
+        document.getElementById("bridge-scoreboard").hidden = !terrainAt;
+        viewer?.setOverlay([]);
+        viewer?.setGoals(terrainAt ? data.header.bridge.goals : []);
         const training = data.header.training;
         arenaState.textContent = training ? `Replay / Update ${training.policy_update} / Round ${training.completed_rounds}` : "Replay";
         renderReplayTraining(training);

@@ -4,6 +4,7 @@
 #include "rewards.hpp"
 #include "minecraft_sim/cuda_backend.hpp"
 #include "minecraft_sim/terrain.hpp"
+#include "minecraft_sim/bridge_observation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -987,6 +988,24 @@ struct TrainingBatch {
     }
 };
 
+nlohmann::json bridgeStateDescription(const TrainingBatch& batch, std::size_t index) {
+    const auto& state = batch.bridge_states[index];
+    const auto& events = batch.bridge_events[index];
+    const char* outcome = state.outcome == BridgeOutcome::team0 ? "team0"
+        : state.outcome == BridgeOutcome::team1 ? "team1"
+        : state.outcome == BridgeOutcome::draw ? "draw" : "ongoing";
+    return {{"scores", {state.scores[0], state.scores[1]}}, {"ticks", state.ticks},
+        {"cage_remaining", state.cage_remaining}, {"outcome", outcome},
+        {"terminated", events.terminated},
+        {"truncated", !events.terminated && batch.finished[index] != 0},
+        {"scored", {events.scored[0], events.scored[1]}},
+        {"died", {events.died[0], events.died[1]}},
+        {"placed", {events.placed[0], events.placed[1]}},
+        {"broke", {events.broke[0], events.broke[1]}},
+        {"respawn", {events.respawn[0] && !batch.finished[index], events.respawn[1] && !batch.finished[index]}},
+        {"round_reset", events.round_reset && !batch.finished[index]}};
+}
+
 template <class Function>
 int protect(Function function) {
     try {
@@ -1016,6 +1035,7 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"cuda_resident_step_version", 1},
         {"cuda_resident_episode_version", 1},
         {"bridge_host_batch_version", 3},
+        {"bridge_local_voxels_version", 1},
         {"behavior_events_version", 1},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
@@ -1206,21 +1226,7 @@ MCSIM_EXPORT const char* mcsim_bridge_state(void* handle) {
         if (!batch.bridge_enabled) throw std::invalid_argument("Bridge is not configured");
         auto worlds = nlohmann::json::array();
         for (std::size_t index = 0; index < batch.worlds.size(); ++index) {
-            const auto& state = batch.bridge_states[index];
-            const auto& events = batch.bridge_events[index];
-            const char* outcome = state.outcome == BridgeOutcome::team0 ? "team0"
-                : state.outcome == BridgeOutcome::team1 ? "team1"
-                : state.outcome == BridgeOutcome::draw ? "draw" : "ongoing";
-            worlds.push_back({{"scores", {state.scores[0], state.scores[1]}}, {"ticks", state.ticks},
-                {"cage_remaining", state.cage_remaining}, {"outcome", outcome},
-                {"terminated", events.terminated},
-                {"truncated", !events.terminated && batch.finished[index] != 0},
-                {"scored", {events.scored[0], events.scored[1]}},
-                {"died", {events.died[0], events.died[1]}},
-                {"placed", {events.placed[0], events.placed[1]}},
-                {"broke", {events.broke[0], events.broke[1]}},
-                {"respawn", {events.respawn[0] && !batch.finished[index], events.respawn[1] && !batch.finished[index]}},
-                {"round_reset", events.round_reset && !batch.finished[index]}});
+            worlds.push_back(bridgeStateDescription(batch, index));
         }
         description = worlds.dump();
     });
@@ -1252,6 +1258,28 @@ MCSIM_EXPORT int mcsim_observe(void* handle, float* observations) {
         const auto start = batch.profileStart();
         batch.observe(observations, batch.currentArrowSummaries());
         batch.profileEnd(Observe, start);
+    });
+}
+MCSIM_EXPORT int mcsim_bridge_local_voxels(void* handle, std::uint8_t* output, std::size_t count) {
+    return protect([&] {
+        if (!handle || !output) throw std::invalid_argument("Null Bridge local voxel argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        if (!batch.bridge_enabled) throw std::invalid_argument("Bridge is not configured");
+        const auto expected = batch.players.size() * std::size_t(bridge_local_voxel_count);
+        if (count != expected) throw std::invalid_argument("Invalid Bridge local voxel buffer size");
+        std::vector<std::uint8_t> voxels(expected);
+        for (std::size_t world = 0; world < batch.worlds.size(); ++world) {
+            for (int player = 0; player < 2; ++player) {
+                const auto index = world * 2 + player;
+                const auto& actor = batch.players[index];
+                if (!bridgeLocalVoxels(batch.blocks[world], actor.position, actor.yaw, player,
+                                       voxels.data() + index * bridge_local_voxel_count)) {
+                    throw std::runtime_error("Invalid Bridge local voxel snapshot");
+                }
+            }
+        }
+        std::copy(voxels.begin(), voxels.end(), output);
     });
 }
 MCSIM_EXPORT int mcsim_observe_base_cuda_sync(void* handle, float* observations, std::size_t count, void* stream) {
@@ -1587,17 +1615,30 @@ MCSIM_EXPORT const char* mcsim_replay_frame(void* handle, int environment) {
         if (!handle) { throw std::invalid_argument("Null replay handle"); }
         auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.requireHostState();
-        if (batch.bridge_enabled) throw std::invalid_argument("Bridge replay serialization is not implemented");
         if (environment < 0 || environment >= static_cast<int>(batch.worlds.size())) {
             throw std::invalid_argument("Replay environment index outside batch");
         }
     #if defined(MCSIM_HAS_CUDA)
         if (batch.gpu) batch.gpu->download(batch.view());
     #endif
-        frame = minecraft_sim::app::replayFrame(batch.worlds[environment].tick,
+        auto recorded = minecraft_sim::app::replayFrame(batch.worlds[environment].tick,
             batch.players.data() + environment * 2, batch.held.data() + environment * 2, true,
             batch.selected_slots.data() + environment * 2,
-            &batch.projectile_states[environment]).dump();
+            &batch.projectile_states[environment]);
+        if (batch.bridge_enabled) {
+            auto bridge = bridgeStateDescription(batch, environment);
+            bridge["terrain_edits"] = nlohmann::json::array();
+            for (int player = 0; player < 2; ++player) {
+                const auto& edit = batch.bridge_events[environment].terrain_edits[player];
+                if (edit.action == TerrainEditAction::none) continue;
+                bridge["terrain_edits"].push_back({{"player", player},
+                    {"action", edit.action == TerrainEditAction::place ? "place" : "remove"},
+                    {"position", {edit.x, edit.y, edit.z}}});
+            }
+            bridge["clear_overlay"] = bridge["round_reset"].get<bool>() && !batch.bridge_rules.persist_blocks_on_goal;
+            recorded["bridge"] = std::move(bridge);
+        }
+        frame = recorded.dump();
     });
     return result == 0 ? frame.c_str() : nullptr;
 }

@@ -180,8 +180,12 @@ def advance_rule(rule, evaluations):
             advance_rule(child, evaluations)
     elif key == "evaluation":
         fields(value, ("suite", "metric", "at_least"), "evaluation advancement")
-        rate_metrics = ("win_rate", "self_launch_rate", "mace_smash_rate", "launch_smash_rate")
-        if (value.get("suite") not in evaluations or value.get("metric") not in (*rate_metrics, "reward_mean")
+        suite = evaluations.get(value.get("suite"))
+        bridge = suite is not None and suite.get("scenario", {}).get("bridge") is not None
+        rate_metrics = (("win_rate", "loss_rate", "draw_rate", "truncation_rate") if bridge else
+                        ("win_rate", "self_launch_rate", "mace_smash_rate", "launch_smash_rate"))
+        other_metrics = ("reward_mean", "goals_for_mean", "goals_against_mean") if bridge else ("reward_mean",)
+        if (suite is None or value.get("metric") not in (*rate_metrics, *other_metrics)
                 or "at_least" not in value):
             raise ValueError("Evaluation advancement needs an existing suite, metric and threshold")
         finite(value["at_least"], "evaluation threshold")

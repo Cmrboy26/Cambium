@@ -195,6 +195,8 @@ def _resolved_stage(plan, record):
         raise ValueError("Checkpoint fixed controls differ from the resolved stage")
     if "scenario" not in stage or not isinstance(stage.get("rewards"), dict):
         raise ValueError("Resolved checkpoint stage is missing scenario or reward conditions")
+    if stage["scenario"].get("bridge") is not None:
+        raise ValueError("Bridge checkpoints require the Bridge-aware research evaluator")
     condition = {
         "policy_sha256": policy_sha256,
         "stage": record["stage_name"],
@@ -529,6 +531,8 @@ def _summarize(episodes):
 
 
 def _evaluate_pairing(model, contract, stage, opponent, options, episodes, seed):
+    if stage.get("scenario", {}).get("bridge") is not None:
+        raise ValueError("Bridge checkpoints require the Bridge-aware research evaluator")
     device = torch.device(options.device)
     cuda_devices = [torch.cuda.current_device()] if device.type == "cuda" else []
     world_count = min(options.worlds, episodes)

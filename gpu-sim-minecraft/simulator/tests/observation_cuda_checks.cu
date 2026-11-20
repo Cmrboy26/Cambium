@@ -2,6 +2,7 @@
 #include "../apps/actions.hpp"
 #include "../apps/rewards.hpp"
 #include "minecraft_sim/cuda_backend.hpp"
+#include "minecraft_sim/bridge_observation.hpp"
 #include "minecraft_sim/terrain.hpp"
 #include "bridge_match_checks.hpp"
 #include "golden_apple_checks.hpp"
@@ -37,6 +38,12 @@ __global__ void orderedTerrainScenario(minecraft_sim::BatchView batch, int* resu
         && terrain_checks::blockTargeting()
         && terrain_checks::orderedEditsAndResets(blocks)
         && blocks.setPlacedBlock(0, 1, 0, PlacedBlock::team1);
+    std::uint8_t voxels[bridge_local_voxel_count];
+    const int center = (2 * 9 + 4) * 9 + 4;
+    result = result && bridgeLocalVoxels(blocks, {0.5, 1.0, 0.5}, 0.0F, 0, voxels)
+        && voxels[center] == 3 && voxels[center - 81] == 1 && voxels[center + 1] == 4
+        && bridgeLocalVoxels(blocks, {0.5, 1.0, 0.5}, 0.0F, 1, voxels)
+        && voxels[center] == 2;
     blocks.resetPlacedBlocks(TerrainReset::player_respawn, false);
     result = result && blocks.solid(0, 1, 0);
     if (environment % 3 == 0) blocks.resetPlacedBlocks(TerrainReset::round, false);

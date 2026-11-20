@@ -338,7 +338,7 @@ prompt EPOCHS 'PPO epochs' "$EPOCHS_DEFAULT" '^[1-9][0-9]{0,3}$' true
 prompt MINIBATCH 'Minibatch size' "$MINIBATCH_DEFAULT" '^[1-9][0-9]{0,7}$' true
 prompt LR 'Learning rate' "$LR_DEFAULT" '^([0-9]*\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(\.[0-9]+)?)([eE][+-]?[0-9]+)?$' true
 prompt THREADS 'Trainer CPU threads (auto allowed)' auto '^(auto|[1-9][0-9]{0,2})$' true
-prompt REPLAY 'Replay interval in completed duels (0 disables)' "$REPLAY_DEFAULT" '^(0|[1-9][0-9]{0,8})$' true
+prompt REPLAY 'Replay interval in completed episodes (0 disables)' "$REPLAY_DEFAULT" '^(0|[1-9][0-9]{0,8})$' true
 else
 prompt TIME 'Wall-time limit (days-HH:MM:SS or HH:MM:SS)' "$TIME_DEFAULT" '^([0-9]+-)?[0-9]+:[0-5][0-9]:[0-5][0-9]$' true
 prompt ENVS 'Parallel worlds' "$ENVS_DEFAULT" '^[1-9][0-9]{0,5}$' true
@@ -366,23 +366,12 @@ if [[ "$SWEEP_VARIABLE" == CPUS ]]; then
     done
 fi
 prompt THREADS 'Trainer CPU threads' "$(( THREAD_LIMIT < 4 ? THREAD_LIMIT : 4 ))" '^[1-9][0-9]{0,2}$' true "$THREAD_LIMIT"
-prompt REPLAY 'Replay interval in completed duels (0 disables)' "$REPLAY_DEFAULT" '^(0|[1-9][0-9]{0,8})$' true
+prompt REPLAY 'Replay interval in completed episodes (0 disables)' "$REPLAY_DEFAULT" '^(0|[1-9][0-9]{0,8})$' true
 printf '\nCUDA build directory: simulator/build-rosie-cuda-%s\n' "$ARCH"
 printf 'Builds use a shared lock; each job trains from a private library copy.\n'
 printf 'For jobs submitted with the older launcher, enter their IDs to avoid overlapping an unlocked build.\n'
 prompt DEPENDENCY 'Wait for job IDs (colon-separated), or none' none '^(none|[1-9][0-9]*(:[1-9][0-9]*)*)$'
 fi
-fi
-
-if [[ "$REPLAY_DEFAULT" == 0 ]]; then
-    REPLAY_VALUES=("$REPLAY")
-    if [[ "$SWEEP_VARIABLE" == REPLAY ]]; then REPLAY_VALUES=("${SWEEP_VALUES[@]}"); fi
-    for replay_value in "${REPLAY_VALUES[@]}"; do
-        if [[ "$replay_value" != 0 ]]; then
-            printf 'Bridge research replay is not supported; set the replay interval to 0. Nothing submitted.\n' >&2
-            exit 1
-        fi
-    done
 fi
 
 if "$SHARED_GPU"; then

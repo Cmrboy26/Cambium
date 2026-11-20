@@ -614,6 +614,12 @@ class TrainingChecks(unittest.TestCase):
                 duel.bridge_reset_episodes()
             with self.assertRaisesRegex(RuntimeError, "Bridge is not configured"):
                 duel.restore_bridge_reset_episodes([1])
+            with self.assertRaisesRegex(RuntimeError, "Bridge is not configured"):
+                duel.bridge_local_voxels()
+            duel._cuda_resident_ready = True
+            with self.assertRaisesRegex(RuntimeError, "resident mode"):
+                duel.bridge_local_voxels()
+            duel._cuda_resident_ready = False
 
     def test_bridge_reset_episode_seed_continuation(self):
         scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
@@ -687,6 +693,10 @@ class TrainingChecks(unittest.TestCase):
                 _, rewards, terminated, truncated = environment.step(actions)
                 states = environment.bridge_state()
                 self.assertEqual(states[1]["scores"], [0, 0])
+                recorded = environment.replay_frame(0)["bridge"]
+                self.assertEqual(recorded.pop("terrain_edits"), [])
+                self.assertFalse(recorded.pop("clear_overlay"))
+                self.assertEqual(recorded, states[0])
                 if states[0]["scored"][0]:
                     goal_rewards.append(rewards[0].tolist())
                 if terminated[0]:
@@ -699,8 +709,7 @@ class TrainingChecks(unittest.TestCase):
             environment.reset(np.array([True, False]))
             self.assertEqual(environment.bridge_state()[0]["scores"], [0, 0])
             self.assertEqual(environment.bridge_state()[1]["ticks"], other_ticks)
-            with self.assertRaisesRegex(RuntimeError, "Bridge replay"):
-                environment.replay_frame()
+            self.assertEqual(environment.replay_frame(0)["bridge"]["scores"], [0, 0])
             with self.assertRaisesRegex(RuntimeError, "Duel reward"):
                 environment.step_reward_totals()
             with self.assertRaisesRegex(RuntimeError, "task rewards"):
@@ -785,6 +794,14 @@ class TrainingChecks(unittest.TestCase):
                   "building": {"zones": [{"min": [-3, 0, -3], "max": [4, 4, 4]}],
                                "block_range": 4.5, "entity_range": 3.0,
                                "hardness": 1.0, "mining_speed": 15.0, "correct_tool": True}}
+        def check_frame(environment, world, edits, clear=False):
+            recorded = environment.replay_frame(world)["bridge"]
+            self.assertEqual(recorded.pop("terrain_edits"), edits)
+            self.assertEqual(recorded.pop("clear_overlay"), clear)
+            self.assertEqual(recorded, environment.bridge_state()[world])
+
+        place0 = {"player": 0, "action": "place", "position": [0, 2, 0]}
+        remove0 = {**place0, "action": "remove"}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bridge-building.json"
             path.write_text(json.dumps(scene), encoding="utf-8")
@@ -793,6 +810,8 @@ class TrainingChecks(unittest.TestCase):
                 actions[0, 0] = [1, 1, 0]
                 observations, _, _, _ = environment.step(actions)
                 self.assertTrue(environment.bridge_state()[0]["placed"][0])
+                check_frame(environment, 0, [place0])
+                check_frame(environment, 1, [])
                 self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
                 self.assertAlmostEqual(float(observations[1, 0, 0]), 0.05, places=6)
                 snapshot = environment.bridge_reset_episodes()
@@ -801,13 +820,125 @@ class TrainingChecks(unittest.TestCase):
                 np.testing.assert_array_equal(environment.bridge_reset_episodes(), snapshot + 1)
                 observations, _, _, _ = environment.step(actions)
                 self.assertTrue(environment.bridge_state()[0]["placed"][0])
+                check_frame(environment, 0, [place0])
                 observations = environment.reset(np.array([False, True]))
+                check_frame(environment, 0, [place0])
+                check_frame(environment, 1, [])
                 self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
                 actions[0, 0] = [2, 0, 1]
-                for _ in range(3):
+                for tick in range(3):
                     observations, _, _, _ = environment.step(actions)
+                    check_frame(environment, 0, [remove0] if tick == 2 else [])
+                    check_frame(environment, 1, [])
                 self.assertTrue(environment.bridge_state()[0]["broke"][0])
                 self.assertAlmostEqual(float(observations[0, 0, 0]), 0.05, places=6)
+
+            paired = json.loads(json.dumps(scene))
+            paired["blocks"].append({"from": [-3, 2, -1], "to": [-3, 2, -1], "block": "minecraft:stone"})
+            paired_path = Path(directory) / "bridge-paired.json"
+            paired_path.write_text(json.dumps(paired), encoding="utf-8")
+            place1 = {"player": 1, "action": "place", "position": [-3, 2, 0]}
+            remove1 = {**place1, "action": "remove"}
+            with Environment(2, environment=paired_path, contract=contract, max_ticks=100, bridge=bridge) as environment:
+                initial = environment.bridge_local_voxels()
+                self.assertEqual((initial.shape, initial.dtype), ((2, 2, 5, 9, 9), np.dtype(np.uint8)))
+                self.assertEqual(initial[0, 0, 1, 4, 4], 1)
+                self.assertEqual(initial[0, 0, 2, 0, 4], 4)
+                self.assertEqual(initial[0, 0, 3, 4, 6], 0)
+                with mock.patch.dict(environment.build_info, {"bridge_local_voxels_version": 0}):
+                    with self.assertRaisesRegex(RuntimeError, "Rebuild"):
+                        environment.bridge_local_voxels()
+                with mock.patch.object(environment.native, "mcsim_bridge_local_voxels", None):
+                    with self.assertRaisesRegex(RuntimeError, "Rebuild"):
+                        environment.bridge_local_voxels()
+                with mock.patch.object(environment.native, "mcsim_bridge_local_voxels", mock.Mock(return_value=-1)):
+                    with mock.patch.object(environment.native, "mcsim_last_error", return_value=b"voxel failure"):
+                        with self.assertRaisesRegex(RuntimeError, "voxel failure"):
+                            environment.bridge_local_voxels()
+                players = environment.episode_scenario(0)["players"]
+                turned = json.loads(json.dumps(players))
+                turned[0]["yaw"] = 90
+                environment.reset_players([turned, None], [True, False])
+                turned_voxels = environment.bridge_local_voxels()
+                self.assertFalse(np.array_equal(turned_voxels[0, 0], initial[0, 0]))
+                np.testing.assert_array_equal(turned_voxels[0, 1], initial[0, 1])
+                np.testing.assert_array_equal(turned_voxels[1], initial[1])
+                environment.reset_players([players, None], [True, False])
+                actions = np.zeros((2, 2, 3), dtype=np.int32)
+                actions[0, :, :] = [1, 1, 0]
+                actions[1, 0] = [1, 1, 0]
+                observations, _, _, _ = environment.step(actions)
+                self.assertEqual(environment.bridge_state()[0]["placed"], [True, True])
+                voxels = environment.bridge_local_voxels()
+                self.assertEqual((voxels[0, 0, 3, 4, 6], voxels[0, 1, 3, 1, 5]), (2, 3))
+                self.assertEqual((voxels[0, 0, 3, 1, 6], voxels[0, 1, 3, 4, 5]), (3, 2))
+                self.assertEqual((voxels[1, 0, 3, 4, 6], voxels[1, 1, 3, 4, 5]), (2, 0))
+                self.assertEqual(initial[0, 0, 3, 4, 6], 0)
+                self.assertEqual([environment.bridge_kits(player)[0]["blocks"] for player in (0, 1)], [3, 3])
+                check_frame(environment, 0, [place0, place1])
+                check_frame(environment, 1, [place0])
+                self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
+                observations = environment.reset(np.array([False, True]))
+                reset_voxels = environment.bridge_local_voxels()
+                np.testing.assert_array_equal(reset_voxels[0], voxels[0])
+                np.testing.assert_array_equal(reset_voxels[1], initial[1])
+                check_frame(environment, 0, [place0, place1])
+                check_frame(environment, 1, [])
+                self.assertAlmostEqual(float(observations[0, 0, 0]), 0.03, places=6)
+                self.assertAlmostEqual(float(observations[1, 0, 0]), 0.05, places=6)
+                actions.fill(0)
+                actions[0, :, :] = [2, 0, 1]
+                for tick in range(3):
+                    observations, _, _, _ = environment.step(actions)
+                    self.assertEqual(environment.bridge_state()[0]["broke"], [tick == 2, tick == 2])
+                    check_frame(environment, 0, [remove0, remove1] if tick == 2 else [])
+                    check_frame(environment, 1, [])
+                self.assertAlmostEqual(float(observations[0, 0, 0]), 0.05, places=6)
+                np.testing.assert_array_equal(environment.bridge_local_voxels(), initial)
+
+            mixed_config = {**bridge, "building": {**bridge["building"], "mining_speed": 30.0}}
+            with Environment(2, environment=paired_path, contract=contract, max_ticks=100,
+                             bridge=mixed_config) as environment:
+                players = environment.episode_scenario(0)["players"]
+                players[1]["position"] = [2.5, 1.0, 0.5]
+                players[1]["yaw"] = 90.0
+                environment.reset_players([players, None], np.array([True, False]))
+                actions = np.zeros((2, 2, 3), dtype=np.int32)
+                actions[0, 0] = [1, 1, 0]
+                actions[0, 1] = [2, 0, 1]
+                observations, _, _, _ = environment.step(actions)
+                state = environment.bridge_state()[0]
+                self.assertEqual(state["placed"], [True, False])
+                self.assertEqual(state["broke"], [False, True])
+                check_frame(environment, 0, [place0, {**remove0, "player": 1}])
+                check_frame(environment, 1, [])
+                self.assertAlmostEqual(float(observations[0, 0, 0]), 0.05, places=6)
+
+            for persist, cutoff, goals in ((True, 100, 2), (False, 100, 2), (False, 1, 2), (False, 100, 1)):
+                with self.subTest(persist=persist, cutoff=cutoff, goals=goals):
+                    config = {**bridge, "match": {**bridge["match"], "persist_blocks_on_goal": persist,
+                                                 "goals_to_win": goals}}
+                    with Environment(2, environment=path, contract=contract, max_ticks=cutoff,
+                                     bridge=config) as environment:
+                        players = environment.episode_scenario(0)["players"]
+                        players[0]["velocity"][2] = 0.2
+                        environment.reset_players([players, None], np.array([True, False]))
+                        actions = np.zeros((2, 2, 3), dtype=np.int32)
+                        actions[0, 0] = [1, 1, 0]
+                        observations, _, terminated, truncated = environment.step(actions)
+                        state = environment.bridge_state()[0]
+                        self.assertTrue(state["placed"][0] and state["scored"][0])
+                        self.assertEqual(bool(terminated[0]), goals == 1)
+                        self.assertEqual(bool(truncated[0]), cutoff == 1)
+                        self.assertEqual(state["round_reset"], cutoff != 1 and goals != 1)
+                        check_frame(environment, 0, [place0], clear=not persist and cutoff != 1 and goals != 1)
+                        check_frame(environment, 1, [])
+                        expected = 0.026 if cutoff == 1 or goals == 1 else (0.03 if persist else 0.05)
+                        self.assertAlmostEqual(float(observations[0, 0, 0]), expected, places=6)
+                        self.assertEqual(environment.bridge_local_voxels()[0, 0, 3, 4, 6],
+                                         2 if persist or cutoff == 1 or goals == 1 else 0)
+                        environment.reset([True, False])
+                        self.assertEqual(environment.bridge_local_voxels()[0, 0, 3, 4, 6], 0)
 
     def test_native_capture_records_selected_pre_step_state(self):
         with tempfile.TemporaryDirectory() as directory:

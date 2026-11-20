@@ -1,4 +1,5 @@
 #include "minecraft_sim/core.hpp"
+#include "minecraft_sim/bridge_observation.hpp"
 #include "minecraft_sim/comparison.hpp"
 #include "minecraft_sim/constants_mace.hpp"
 #include "minecraft_sim/terrain.hpp"
@@ -45,6 +46,114 @@ void near(double actual, double expected, double tolerance, const char* message)
                << ", expected=" << expected << ", tolerance=" << tolerance;
         throw std::runtime_error(detail.str());
     }
+}
+
+void checkBridgeLocalVoxels() {
+    using namespace minecraft_sim;
+    std::array<Block, 75> base{};
+    base[37] = Block::solid;
+    base[0] = Block::solid;
+    TerrainOverlays terrain({base.data(), 5, 3, 5, -2, -1, -2}, 1);
+    const auto world = terrain.view(0);
+    require(world.setPlacedBlock(1, 0, 2, PlacedBlock::team0)
+        && world.setPlacedBlock(-1, 1, -2, PlacedBlock::team1), "voxel fixture placements");
+    std::array<std::uint8_t, bridge_local_voxel_count> output{}, expected{};
+    const auto index = [](int up, int right, int forward) { return (up * 9 + right) * 9 + forward; };
+    for (int up = 0; up < 5; ++up) {
+        for (int right = 0; right < 9; ++right) {
+            for (int forward = 0; forward < 9; ++forward) {
+                expected[index(up, right, forward)] = up >= 1 && up <= 3
+                    && right >= 2 && right <= 6 && forward >= 2 && forward <= 6 ? 0 : 4;
+            }
+        }
+    }
+    expected[index(2, 4, 4)] = 1;
+    expected[index(1, 2, 2)] = 1;
+    expected[index(2, 5, 6)] = 2;
+    expected[index(3, 3, 2)] = 3;
+    for (float yaw : {0.0F, -45.0F, 360.0F, -360.0F,
+                      std::nextafter(45.0F, 0.0F), std::nextafter(-45.0F, 0.0F),
+                      (std::numeric_limits<float>::max)(), -(std::numeric_limits<float>::max)()}) {
+        require(bridgeLocalVoxels(world, {0.5, 0.5, 0.5}, yaw, 0, output.data())
+            && output == expected, "voxel zero-turn grid and yaw tie");
+    }
+    expected[index(2, 5, 6)] = 3;
+    expected[index(3, 3, 2)] = 2;
+    require(bridgeLocalVoxels(world, {0.5, 0.5, 0.5}, 0.0F, 1, output.data())
+        && output == expected, "voxel team-relative ownership");
+    expected[index(2, 5, 6)] = 0;
+    expected[index(3, 3, 2)] = 0;
+    expected[index(1, 2, 2)] = 0;
+    expected[index(1, 2, 6)] = 1;
+    expected[index(2, 6, 3)] = 2;
+    expected[index(3, 2, 5)] = 3;
+    for (float yaw : {45.0F, 90.0F, 450.0F, -315.0F, 0x1p102F,
+                      std::nextafter(45.0F, (std::numeric_limits<float>::infinity)())}) {
+        require(bridgeLocalVoxels(world, {0.5, 0.5, 0.5}, yaw, 0, output.data())
+            && output == expected, "voxel quarter-turn grid and yaw tie");
+    }
+    require(bridgeLocalVoxels(world, {-0.01, -0.01, -0.01}, 0.0F, 0, output.data())
+        && output[index(3, 5, 5)] == 1 && output[index(2, 3, 3)] == 1
+        && output[index(3, 6, 7)] == 2 && output[index(4, 4, 3)] == 3
+        && output[index(2, 2, 4)] == 4 && output[index(2, 3, 4)] == 0,
+        "voxel negative floor and boundary");
+    for (float yaw : {-0x1p102F, -90.0F,
+                      std::nextafter(-45.0F, -(std::numeric_limits<float>::infinity)())}) {
+        require(bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, yaw, 0, output.data())
+            && output[index(2, 2, 5)] == 2 && output[index(3, 6, 3)] == 3,
+            "voxel negative yaw uses nonnegative modulo");
+    }
+    require(bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, 0x1p105F, 0, output.data())
+        && output[index(2, 3, 2)] == 2 && output[index(3, 5, 6)] == 3,
+        "voxel huge yaw half-turn");
+    for (double coordinate : {(std::numeric_limits<double>::max)(), -(std::numeric_limits<double>::max)()}) {
+        for (Vec3 feet : {Vec3{coordinate, 0.0, 0.0}, Vec3{0.0, coordinate, 0.0}, Vec3{0.0, 0.0, coordinate}}) {
+            require(bridgeLocalVoxels(world, feet, (std::numeric_limits<float>::max)(), 0, output.data()),
+                "voxel extreme finite input accepted");
+            for (auto value : output) require(value == 4, "voxel extreme coordinates remain outside");
+        }
+    }
+    const Block edge_cells[2]{Block::solid, Block::air};
+    const BlockWorldView upper{edge_cells, 2, 1, 1, (std::numeric_limits<int>::max)() - 1, 0, 0};
+    require(bridgeLocalVoxels(upper, {double((std::numeric_limits<int>::max)()), 0.0, 0.0}, 0.0F, 0, output.data())
+        && output[index(2, 3, 4)] == 1 && output[index(2, 4, 4)] == 0 && output[index(2, 5, 4)] == 4,
+        "voxel upper integer edge");
+    require(bridgeLocalVoxels(upper, {double((std::numeric_limits<int>::max)()) + 4.0, 0.0, 0.0},
+                              0.0F, 0, output.data())
+        && output[index(2, 0, 4)] == 0 && output[index(2, 1, 4)] == 4,
+        "voxel window reaches upper integer edge from outside");
+    const BlockWorldView lower{edge_cells, 2, 1, 1, (std::numeric_limits<int>::min)(), 0, 0};
+    require(bridgeLocalVoxels(lower, {double((std::numeric_limits<int>::min)()) - 0.5, 0.0, 0.0}, 0.0F, 0, output.data())
+        && output[index(2, 4, 4)] == 4 && output[index(2, 5, 4)] == 1 && output[index(2, 6, 4)] == 0,
+        "voxel lower integer edge and negative floor");
+    require(bridgeLocalVoxels(lower, {double((std::numeric_limits<int>::min)()) - 4.0, 0.0, 0.0},
+                              0.0F, 0, output.data())
+        && output[index(2, 7, 4)] == 4 && output[index(2, 8, 4)] == 1,
+        "voxel window reaches lower integer edge from outside");
+    require(!bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, (std::numeric_limits<float>::infinity)(), 0, output.data())
+        && !bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, (std::numeric_limits<float>::quiet_NaN)(), 0, output.data())
+        && !bridgeLocalVoxels(world, {0.0, -(std::numeric_limits<double>::infinity)(), 0.0}, 0.0F, 0, output.data())
+        && !bridgeLocalVoxels(world, {(std::numeric_limits<double>::quiet_NaN)(), 0.0, 0.0}, 0.0F, 0, output.data())
+        && !bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, 0.0F, 2, output.data())
+        && !bridgeLocalVoxels({}, {0.0, 0.0, 0.0}, 0.0F, 0, output.data())
+        && !bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, 0.0F, 0, nullptr), "voxel invalid input rejected");
+    const int maximum = (std::numeric_limits<int>::max)();
+    const int minimum = (std::numeric_limits<int>::min)();
+    require(!bridgeLocalVoxels({edge_cells, 2, 1, 1, maximum, 0, 0}, {0.0, 0.0, 0.0}, 0.0F, 0, output.data())
+        && !bridgeLocalVoxels({edge_cells, maximum, maximum, maximum, minimum, minimum, minimum},
+                              {0.0, 0.0, 0.0}, 0.0F, 0, output.data()),
+        "voxel unrepresentable terrain bounds or index rejected");
+    world.overlay[37] = PlacedBlock::team0;
+    require(!bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, 0.0F, 0, output.data()),
+        "voxel invalid protected overlay rejected");
+    world.overlay[37] = PlacedBlock::empty;
+    world.overlay[38] = static_cast<PlacedBlock>(3);
+    require(!bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, 0.0F, 0, output.data()),
+        "voxel unknown ownership rejected");
+    world.overlay[38] = PlacedBlock::empty;
+    base[38] = static_cast<Block>(2);
+    require(!bridgeLocalVoxels(world, {0.0, 0.0, 0.0}, 0.0F, 0, output.data()),
+        "voxel unknown base state rejected");
 }
 
 void checkGoldenAppleBoundary() {
@@ -2220,6 +2329,7 @@ int main(int argc, char** argv) {
         if (apple_check != 0) throw std::runtime_error("Golden apple shared check " + std::to_string(apple_check));
         require(terrain_checks::blockTargeting(), "full-cube block target faces and boundaries");
         checkMutableTerrain();
+        checkBridgeLocalVoxels();
         checkCompositeWorldConsumers();
         checkPolicyFixtures();
         checkEquipmentObservation();

@@ -27,6 +27,35 @@ _ARMOR_ITEMS = {slot: frozenset({"minecraft:air", *(f"minecraft:{material}_{slot
     for slot in _ARMOR_SLOTS}
 
 
+def bridge_observation_descriptor():
+    return {"format": "minecraft_sim_bridge_observation", "version": 1,
+            "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1},
+            "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
+            "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
+                               "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress",
+                               "refill_enabled", "own_selected_slot"],
+            "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)",
+                             "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8"],
+            "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_host_state",
+            "model": "bridge_voxel_actor_critic_v1"}
+
+
+def validate_bridge_observation_descriptor(value):
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError("Unsupported Bridge observation/model descriptor") from None
+    expected = json.dumps(bridge_observation_descriptor(), sort_keys=True, separators=(",", ":"))
+    if encoded != expected:
+        raise ValueError("Unsupported Bridge observation/model descriptor")
+    return deepcopy(value)
+
+
+def reject_structured_bridge_checkpoint(metadata):
+    if isinstance(metadata, dict) and "bridge_observation" in metadata:
+        raise ValueError("Structured Bridge checkpoints are not supported by scalar policy consumers")
+
+
 def categorical_values(feature):
     if feature in ("self.weapon_slot", "opponent.weapon_slot"):
         return tuple(range(LIMITS["weapon_slots"]))
@@ -62,6 +91,8 @@ def validate_contract(value):
             or contract.get("version") != 1 or contract.get("minecraft") != "26.3"
             or contract.get("ticks_per_action") != 1):
         raise ValueError("Unsupported policy contract format/version/build/tick rate")
+    if "bridge_observation" in contract:
+        raise ValueError("Structured Bridge observations are not supported by scalar policy consumers")
     observations = contract.get("observations")
     actions = contract.get("actions")
     if not isinstance(observations, list) or not 1 <= len(observations) <= LIMITS["observations"]:
@@ -141,6 +172,8 @@ def validate_contract(value):
 
 
 def from_legacy(schema):
+    if isinstance(schema, dict) and "bridge_observation" in schema:
+        raise ValueError("Structured Bridge observations are not supported by scalar policy consumers")
     actions = []
     for name, size in zip(schema["action_names"], schema["action_sizes"]):
         if name == "movement":

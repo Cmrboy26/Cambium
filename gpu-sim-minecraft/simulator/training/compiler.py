@@ -13,7 +13,8 @@ from pathlib import Path
 import re
 
 from simulator.training.bridge import _intersects, _player_bounds
-from simulator.training.contract import CAPABILITIES, RULES, resolve_scenario, validate_contract
+from simulator.training.contract import (CAPABILITIES, RULES, resolve_scenario, validate_contract,
+                                         validate_bridge_observation_descriptor)
 from simulator.training.environment import REWARD_NAMES, MAX_MAX_TICKS
 from simulator.training.plans import (
     EpisodeSampler, _opponent_mix, _scenario, advance_rule, fields, finite, positive,
@@ -237,7 +238,8 @@ def _snapshots(value, names):
         if ("at_updates" in rule) == ("on_completion" in rule):
             raise ValueError("Snapshot needs exactly one of at_updates or on_completion")
         if "at_updates" in rule:
-            positive(rule["at_updates"], "snapshot at_updates")
+            if type(rule["at_updates"]) is not int or rule["at_updates"] < 0:
+                raise ValueError("snapshot at_updates must be a nonnegative integer")
         elif rule["on_completion"] is not True:
             raise ValueError("Snapshot on_completion must be true")
 
@@ -278,6 +280,60 @@ def _opponents(value, base_dir):
     return result
 
 
+def _structured_opponents(value):
+    if not isinstance(value, dict) or not value or any(
+            not isinstance(opponent, dict) or (
+                opponent.get("type") not in ("self_play", "frozen_self_play") and
+                (opponent.get("type") != "scripted"
+                 or opponent.get("controller") not in ("stationary_target", "bridge_fixed_lane")
+                 or opponent.get("options", {}))) for opponent in value.values()):
+        raise ValueError("Structured Bridge supports self-play and scripted stationary_target or bridge_fixed_lane opponents only")
+
+
+def _validate_bridge_opponents(policy, scenario, opponents):
+    if policy["ticks_per_action"] != 1:
+        raise ValueError("Bridge research requires ticks_per_action 1")
+    kits = scenario["bridge"].get("kits", [])
+    reserved = {index for kit in kits for index, item in enumerate(kit["slots"])
+                if item in ("pickaxe", "blocks", "golden_apple")}
+    if reserved:
+        forbidden = {"self.attack_charge", "self.weapon_damage_fraction", "opponent.weapon_damage_fraction",
+                     "self.weapon_speed_fraction", "opponent.weapon_speed_fraction"}
+        for observation in policy["observations"]:
+            feature = observation["feature"]
+            if feature in forbidden or any(feature.startswith(f"self.weapon_slot_{slot}.") for slot in reserved):
+                raise ValueError("Bridge reserved kit items cannot use weapon charge or slot attribute observations")
+    for action in policy["actions"]:
+        name, choices = action["name"], action["values"]
+        neutral = "neutral" if name == "movement" else 0 if name in ("yaw", "pitch", "weapon") else False
+        if neutral not in choices:
+            raise ValueError(f"Bridge stationary opponent requires a neutral {name} choice")
+    players = scenario["arenas"][0]["environment"]["players"]
+    if "weapon" in policy["action_names"] and any(player["loadout"].get("selected", 0) != 0 for player in players):
+        raise ValueError("Bridge stationary opponent requires initial weapon slot 0")
+    for opponent in opponents.values():
+        if opponent.get("type") in ("self_play", "frozen_self_play"):
+            continue
+        if (opponent.get("type") != "scripted"
+                or opponent.get("controller") not in ("stationary_target", "bridge_fixed_lane")
+                or opponent.get("options", {})):
+            raise ValueError("Bridge requires self-play or stationary_target or bridge_fixed_lane opponents without options")
+        if opponent["controller"] == "bridge_fixed_lane":
+            from simulator.training.controllers import BridgeFixedLaneController
+
+            BridgeFixedLaneController(policy, count=1, seed=0, options=opponent.get("options", {}))
+            goals = scenario["bridge"]["goals"]
+            for player, spawn in enumerate(players):
+                yaw = (spawn.get("yaw", 0) + 180) % 360 - 180
+                goal = goals[1 - player]
+                position = spawn["position"]
+                if (yaw not in (0, -180) or not goal["min"][0] <= position[0] <= goal["max"][0]
+                        or any(spawn.get("velocity", [0, 0, 0])[axis] != 0 for axis in (0, 2))
+                        or (yaw == 0 and goal["min"][2] <= position[2])
+                        or (yaw == -180 and goal["max"][2] >= position[2])):
+                    raise ValueError("bridge_fixed_lane requires north/south spawns facing aligned opposing goals")
+
+
 def _resolved_condition(value, policy, opponents):
     result = deepcopy(value)
     scenario = fields(result.get("scenario"), ("arenas", "spawns", "equipment", "bridge"), "resolved scenario")
@@ -298,19 +354,7 @@ def _resolved_condition(value, policy, opponents):
     if "bridge" in result["scenario"]:
         if any(result["rewards"]["weights"].values()):
             raise ValueError("Bridge requires zero duel reward weights")
-        for action in policy["actions"]:
-            name, choices = action["name"], action["values"]
-            neutral = "neutral" if name == "movement" else 0 if name in ("yaw", "pitch", "weapon") else False
-            if neutral not in choices:
-                raise ValueError(f"Bridge stationary opponent requires a neutral {name} choice")
-        if "weapon" in policy["action_names"] and any(
-                player["loadout"]["selected"] != 0
-                for player in result["scenario"]["arenas"][0]["environment"]["players"]):
-            raise ValueError("Bridge stationary opponent requires initial weapon slot 0")
-        for opponent in opponents.values():
-            if (opponent.get("type") != "scripted" or opponent.get("controller") != "stationary_target"
-                    or opponent.get("options", {})):
-                raise ValueError("Bridge requires stationary_target opponents without options")
+        _validate_bridge_opponents(policy, result["scenario"], opponents)
     for arena in result["scenario"]["arenas"]:
         if arena["environment"]["reward_weights"] != result["rewards"]["weights"]:
             raise ValueError("Resolved environment and stage rewards disagree")
@@ -342,13 +386,16 @@ def _resolved_evaluations(value, policy, opponents):
 
 def _resolved(value, base_dir):
     fields(value, ("format", "version", "name", "seed", "policy", "learner", "opponents",
-                   "stages", "evaluations", "scenario", "snapshots"), "resolved experiment")
+                   "stages", "evaluations", "scenario", "snapshots", "bridge_observation"), "resolved experiment")
     _version(value, "minecraft_sim_experiment", 1, "resolved experiment")
     result = deepcopy(value)
     result["name"] = _name(result.get("name"), "Experiment name")
     result["seed"] = _seed(result.get("seed"), "Experiment seed")
     result["policy"] = _policy(result.get("policy"))
     result["learner"] = _learner(result.get("learner", {}))
+    if "bridge_observation" in result:
+        result["bridge_observation"] = validate_bridge_observation_descriptor(result["bridge_observation"])
+        _structured_opponents(result.get("opponents"))
     result["opponents"] = _opponents(result.get("opponents"), base_dir)
     evaluations = _resolved_evaluations(result.get("evaluations", {}), result["policy"], result["opponents"])
     result["evaluations"] = evaluations
@@ -378,9 +425,9 @@ def _resolved(value, base_dir):
         raise ValueError("Experiment default scenario must equal its first stage")
     conditions = [*stages, *evaluations.values(),
                   *(suite for stage in stages for suite in stage.get("evaluations", {}).values())]
+    if "bridge_observation" in result and any("bridge" not in condition["scenario"] for condition in conditions):
+        raise ValueError("Structured Bridge requires Bridge stages and evaluations only")
     if any("bridge" in condition["scenario"] for condition in conditions):
-        if evaluations or any(stage.get("evaluations") for stage in stages):
-            raise ValueError("Bridge evaluation is not supported")
         if any(condition["scenario"] != stages[0]["scenario"] for condition in conditions):
             raise ValueError("Bridge conditions must use the same fixed scenario in every stage and evaluation")
     result["scenario"] = deepcopy(stages[0]["scenario"])
@@ -531,8 +578,11 @@ def resolve_experiment(value, base_dir):
     if value.get("format") == "minecraft_sim_experiment":
         return _resolved(value, base_dir)
     fields(value, ("format", "version", "name", "seed", "policy", "environment", "learner",
-                   "opponents", "mixtures", "stages", "evaluations", "snapshots"), "training plan")
+                   "opponents", "mixtures", "stages", "evaluations", "snapshots", "bridge_observation"), "training plan")
     _version(value, "minecraft_sim_training_plan", 2, "training plan")
+    if "bridge_observation" in value:
+        validate_bridge_observation_descriptor(value["bridge_observation"])
+        _structured_opponents(value.get("opponents"))
     authoring = _Authoring(base_dir)
     policy, _ = authoring.read(value.get("policy"), base_dir)
     policy = _policy(policy)
@@ -555,6 +605,8 @@ def resolve_experiment(value, base_dir):
     }
     if "snapshots" in value:
         result["snapshots"] = deepcopy(value["snapshots"])
+    if "bridge_observation" in value:
+        result["bridge_observation"] = deepcopy(value["bridge_observation"])
     named_stages = {}
     for stage in stages:
         fields(stage, (*CONDITION_FIELDS, "name", "advance", "evaluations", "snapshots"), "stage")

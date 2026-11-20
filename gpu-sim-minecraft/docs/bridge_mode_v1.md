@@ -137,9 +137,77 @@ The proposed observation contract may expose each team's score, remaining
 match/cage time, own inventory and refill state, visible player equipment,
 and explicitly defined local terrain. It must not expose hidden opponent
 inventory. The following structured observations are provisional design
-choices, not implemented primitives or accepted policy descriptors. Their
-geometry, dimensions and omniscient visibility are assumptions to agree on
-before implementation, not claims about Hypixel or the current catalogue.
+choices, not accepted policy descriptors. Their geometry and omniscient
+visibility are not claims about Hypixel or the current catalogue.
+
+#### Experimental Host Observation Foundation
+
+The experimental host trainer accepts the following exact descriptor in the
+top-level `bridge_observation` field of an authored version-2 plan or a
+resolved experiment. Omit it for the unchanged scalar model and fingerprints.
+This is separate from the scalar policy contract, which still rejects that
+field. Unknown fields, versions and altered values are rejected.
+
+```json
+{
+   "format": "minecraft_sim_bridge_observation",
+   "version": 1,
+   "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1},
+   "voxel_shape": [5, 9, 9],
+   "voxel_dtype": "uint8",
+   "voxel_categories": 5,
+   "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
+      "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress",
+      "refill_enabled", "own_selected_slot"],
+   "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)",
+      "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8"],
+   "voxel_perspective": "actor_feet_yaw_v1",
+   "sampling": "current_host_state",
+   "model": "bridge_voxel_actor_critic_v1"
+}
+```
+
+All stages and evaluations must use fixed Bridge scenarios, with host collection
+and mixtures of `stationary_target`, `bridge_fixed_lane`, current-policy and
+frozen self-play opponents. Checkpoint opponents, mixed Bridge/duel plans,
+resident execution and live inference remain unsupported. The model's
+descriptor is saved in checkpoint and snapshot metadata and v4 replay provenance.
+Resume restores the model, optimizer, RNG and sampler/pool/reset counters, then
+starts fresh episodes rather than restoring in-flight matches. Initialization and
+resume reject scalar/structured mismatches; scalar consumers and live serving
+reject structured checkpoints. Catalogue identity remains part of the separate
+scalar policy contract.
+
+Host self-play controllers receive the three structured inputs for the opponent's
+own seat. Structured sampling uses checkpointed per-world RNG streams, and
+frozen snapshots stay pinned until that world resets. Evaluation uses the latest
+compatible snapshot supplied by the source pool and records its update, content
+SHA-256, fixed actions and controller seed; a missing or incompatible snapshot
+is an error. Replay verifies and records the assigned snapshot update, content
+hash, fixed actions, controller seed and actor slot, and starts a fresh opponent
+stream from that actor's seed. Replay
+does not recreate the in-flight match or the advanced training RNG state.
+Scalar self-play retains its existing sampling behavior.
+
+The standalone host sampler takes the configured scalar observation
+`float32[world,2,observation_dim]`, and returns copies of those scalars,
+`uint8[world,2,5,9,9]` local voxels as specified below, and
+`float32[world,2,10]` match features. Select one player's row from each tensor
+before presenting inputs to an actor. The sampler reads current host state;
+call it before reset to retain a final terminal or truncated observation.
+It requires native Bridge host batch version 2 or later and local voxel version
+1. The model one-hot encodes the five voxel categories, applies a 3D convolution
+and global average pooling, and concatenates the result with the scalar and
+match features. No global lane tensor is included.
+
+The ten match features, in order, are own score and opponent score divided by
+`goals_to_win`; remaining match ticks divided by `max_ticks` (remaining ticks
+floored at zero); remaining cage ticks divided by `max(1,cage_ticks)`; own
+blocks, golden apples and arrows each divided by 64; own arrow refill elapsed
+ticks divided by `max(1,arrow_refill_ticks)`; 1 if arrow refill is enabled,
+otherwise 0; and own selected slot divided by 8. Values are not clipped. Only
+the actor's own inventory and refill progress are included. The scalar catalogue
+continues to govern separately configured visible opponent features.
 
 ### Proposed Structured Terrain Observations
 
@@ -319,8 +387,39 @@ checkpoints and replays must retain that identity. Unsupported versions,
 capabilities, invalid regions/spawns/kits and incompatible model or policy
 descriptors must be rejected, never silently relabeled or defaulted to duel
 behavior. Existing supported duel setups and checkpoints keep their current
-interpretation. The current [compiler](../simulator/training/compiler.py),
-[plans](../simulator/training/plans.py), [scenario contract](simulation_contract.md)
-and [native scene loader](../simulator/apps/scene.hpp) do not accept these
-proposed Bridge fields. Implementation and positive setup validation belong to
-later checklist tasks.
+interpretation. The current [compiler](../simulator/training/compiler.py) and
+[plans](../simulator/training/plans.py) accept a fixed host-staged subset; the
+ordinary [native scene loader](../simulator/apps/scene.hpp) deliberately rejects
+Bridge configuration, which is supplied through the dedicated API. Full
+capability validation remains a later checklist gate.
+
+## Bridge Replay Contract
+
+The host-staged website replay uses JSON Lines with `format` set to
+`minecraft_sim_replay` and `version` set to 4. The first line is a header with
+two players, tick rate, the initial ordinary scene in `environment`, and the
+resolved Bridge configuration in `bridge`. Policy and training provenance are
+included for policy samples; scripted recordings identify themselves as such.
+Versions 2 and 3 retain their existing duel meaning. Unsupported replay
+versions and Bridge consumers must be rejected explicitly.
+
+Each following line is a single-tick, post-step frame with the existing actor
+and projectile fields and a `bridge` object. An initial tick-zero frame is
+recorded before controls are applied. The Bridge object contains `scores`,
+`ticks`, `cage_remaining`, `outcome`, `terminated`, `truncated`, `scored`,
+`died`, `placed`, `broke`, `respawn` and `round_reset` as in the native Bridge
+state API. Its `terrain_edits` array contains the successful edits for that
+tick in player order, each with `player` (0 or 1), `action` (`place` or
+`remove`) and integer `position` `[x, y, z]`. `clear_overlay` indicates a
+completed goal reset that clears placed blocks. Apply the edits in order, then
+clear the overlay when this flag is true. The initial frame has no edits and
+no clear operation. Simultaneous goals are valid. A terminal or truncated
+frame preserves the final pre-full-reset state; playback ends there.
+
+Frame ticks increase by one; recorders must not discard intermediate events
+when a policy holds an action across multiple ticks. A viewer reconstructs
+the selected frame from the initial base terrain and ordered changes, including
+after backward seeks and restart. Respawn and round reset are discontinuities,
+not movement to interpolate through. Files retain the dashboard's 64 MiB and
+100001-frame limits. This contract does not by itself imply Fabric replay,
+resident collection or live Bridge support.

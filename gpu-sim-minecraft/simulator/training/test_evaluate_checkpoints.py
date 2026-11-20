@@ -26,6 +26,17 @@ from simulator.training.evaluate_checkpoints import (
 
 
 class CheckpointSelectionChecks(unittest.TestCase):
+    def test_bridge_conditions_are_rejected_by_duel_evaluator(self):
+        policy = from_legacy(SCHEMA)
+        stage = {"name": "bridge", "controls": {"fixed": {}}, "scenario": {"bridge": {}}, "rewards": {}}
+        plan = {"policy": policy, "stages": [stage]}
+        record = {"stage_index": 0, "stage_name": "bridge", "stage_updates": 1,
+                  "policy_sha256": fingerprint(policy), "controls": {"fixed": {}}, "max_ticks": 100}
+        with self.assertRaisesRegex(ValueError, "Bridge-aware"):
+            _resolved_stage(plan, record)
+        with self.assertRaisesRegex(ValueError, "Bridge-aware"):
+            _evaluate_pairing(None, policy, stage, {}, None, 2, 1)
+
     def test_training_opponent_weights_do_not_change_evaluation_conditions(self):
         policy = from_legacy(SCHEMA)
         stage = {"name": "combat", "controls": {"fixed": {}}, "scenario": {},

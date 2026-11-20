@@ -63,3 +63,29 @@ class ActorCritic(nn.Module):
         logits = {name: getattr(self, f"{name}_head")(features) for name in self.action_names}
         value = self.value_head(features).squeeze(-1)
         return logits, value
+
+
+class BridgeActorCritic(nn.Module):
+    """Experimental standalone model; not admitted by the scalar training contract."""
+
+    def __init__(self, observation_dim: int, descriptor: dict, hidden_dim: int = 256,
+                 action_sizes: dict[str, int] | None = None):
+        super().__init__()
+        from simulator.training.contract import validate_bridge_observation_descriptor
+        self.descriptor = validate_bridge_observation_descriptor(descriptor)
+        self.observation_dim = observation_dim
+        self.voxel_encoder = nn.Sequential(nn.Conv3d(5, 8, 3, padding=1), nn.ReLU(),
+                                           nn.AdaptiveAvgPool3d(1), nn.Flatten())
+        self.policy = ActorCritic(observation_dim + 10 + 8, hidden_dim, action_sizes=action_sizes)
+        self.action_names = self.policy.action_names
+
+    def forward(self, inputs):
+        scalar, match, voxels = inputs["scalar"], inputs["match"], inputs["voxels"]
+        if (scalar.ndim != 2 or scalar.shape[1] != self.observation_dim
+                or match.shape != (scalar.shape[0], 10)
+                or voxels.shape != (scalar.shape[0], 5, 9, 9)
+                or scalar.dtype != torch.float32 or match.dtype != torch.float32 or voxels.dtype != torch.uint8):
+            raise ValueError("Invalid Bridge observation tensors")
+        encoded = torch.nn.functional.one_hot(voxels.to(torch.long), num_classes=5).movedim(-1, 1)
+        terrain = self.voxel_encoder(encoded.to(dtype=scalar.dtype))
+        return self.policy(torch.cat((scalar, match, terrain), dim=1))

@@ -13,6 +13,8 @@ stationary_melee retains aim/attacks/equipment without locomotion options.
 random_walk accepts change_interval (20 ticks), wall_margin (1.25 blocks) and
 sneak (False), using yaw/world rays and independent checkpointed RNG streams
 per actor.
+bridge_fixed_lane accepts no options and follows the initial north/south spawn
+heading without using private state or claiming position-aware navigation.
 tactical_melee accepts basic_melee options plus style: evasive, aggressive or
 patient. These vary retreat/pressure/charge-based movement, not just timing.
 Checkpoint files are trusted standalone PPO archives, loaded with weights_only.
@@ -30,7 +32,8 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 import numpy as np
 
-from simulator.training.contract import fingerprint, from_legacy, observation_width, validate_contract
+from simulator.training.contract import (fingerprint, from_legacy, observation_width,
+                                         reject_structured_bridge_checkpoint, validate_contract)
 
 if TYPE_CHECKING:
     import torch
@@ -214,6 +217,60 @@ class StationaryTargetController(_BatchedController):
     def act(self, observations, indices=None):
         observations, _ = self._batch(observations, indices)
         return np.tile(self._neutral, (len(observations), 1))
+
+
+class BridgeFixedLaneController(StationaryTargetController):
+    def __init__(self, contract, count, seed=1, options=None):
+        super().__init__(contract, count, seed, options)
+        self._description.update(controller="bridge_fixed_lane")
+        self._require_feature("self.yaw_fraction")
+        yaw_descriptor = self._features["self.yaw_fraction"][1]
+        if "clip" in yaw_descriptor and (yaw_descriptor["clip"][0] > -1 or yaw_descriptor["clip"][1] < 1):
+            raise ValueError("bridge_fixed_lane requires unclipped self.yaw_fraction")
+        for choice in ("neutral", "forward"):
+            self._require_choice("movement", choice)
+        self._require_choice("yaw", 0)
+        yaw_choices = self._heads["yaw"][1]
+        if not any(-2 <= choice < 0 for choice in yaw_choices) or not any(0 < choice <= 2 for choice in yaw_choices):
+            raise ValueError("bridge_fixed_lane requires positive and negative yaw choices of at most 2 degrees")
+        for name in ("pitch", "weapon"):
+            if name in self._heads:
+                self._require_choice(name, 0)
+        for name in ("attack", "jump", "sprint", "sneak", "shield", "use_item"):
+            if name in self._heads:
+                self._require_choice(name, False)
+        self._directions = np.full(self.count, -1, dtype=np.int64)
+
+    def act(self, observations, indices=None):
+        observations, indices = self._batch(observations, indices)
+        actions = np.tile(self._neutral, (len(observations), 1))
+        yaw = ((self._feature(observations, "self.yaw_fraction") * 180 + 180) % 360) - 180
+        directions = self._directions[indices].copy()
+        uninitialized = directions == -1
+        distance_from_spawn_heading = np.minimum(np.abs(yaw), 180 - np.abs(yaw))
+        if np.any(uninitialized & (distance_from_spawn_heading >= 45)):
+            raise ValueError("bridge_fixed_lane requires a north/south spawn-facing yaw")
+        directions[uninitialized] = (np.abs(yaw[uninitialized]) > 90).astype(np.int64)
+        self._directions[indices] = directions
+        error = ((directions * 180 - yaw + 180) % 360) - 180
+        column, choices = self._heads["yaw"]
+        actions[:, column] = np.abs(error[:, None] - np.asarray(choices)).argmin(axis=1)
+        self._set(actions, "movement", np.where(np.abs(error) <= 1, "forward", "neutral"))
+        return actions
+
+    def reset(self, mask):
+        self._directions[self._mask(mask)] = -1
+
+    def state_dict(self):
+        return {**super().state_dict(), "directions": self._directions.tolist()}
+
+    def load_state_dict(self, state):
+        self._state(state, ("directions",))
+        directions = state["directions"]
+        if (not isinstance(directions, list) or len(directions) != self.count
+                or any(type(direction) is not int or direction not in (-1, 0, 1) for direction in directions)):
+            raise ValueError("Invalid per-actor bridge_fixed_lane directions")
+        self._directions[:] = directions
 
 
 class BasicMeleeController(StationaryTargetController):
@@ -564,40 +621,82 @@ class _PolicyController(_BatchedController):
     _fixed: dict[str, int]
     _generator: "torch.Generator"
 
+    def _policy_batch(self, observations, indices):
+        from backend.fast_rl_model import BridgeActorCritic
+        from simulator.training.contract import validate_bridge_observation_descriptor
+
+        if not isinstance(self.model, BridgeActorCritic):
+            return self._batch(observations, indices)
+        if validate_bridge_observation_descriptor(self.model.descriptor) != self._description.get("bridge_observation"):
+            raise ValueError("Structured Bridge self-play model descriptor differs")
+        if not isinstance(observations, dict) or set(observations) != {"scalar", "match", "voxels"}:
+            raise ValueError("Structured Bridge policy requires scalar, match and voxel observations")
+        scalar, indices = self._batch(observations["scalar"], indices)
+        match, voxels = observations["match"], observations["voxels"]
+        if (scalar.dtype != np.float32 or not isinstance(match, np.ndarray)
+                or match.dtype != np.float32 or match.shape != (len(scalar), 10)
+                or not np.isfinite(match).all() or not isinstance(voxels, np.ndarray)
+                or voxels.dtype != np.uint8 or voxels.shape != (len(scalar), 5, 9, 9)
+                or (voxels >= 5).any()):
+            raise ValueError("Invalid structured Bridge observations")
+        return observations, indices
+
     def act(self, observations, indices=None):
         import torch
 
-        observations, _ = self._batch(observations, indices)
-        if not len(observations):
+        observations, indices = self._policy_batch(observations, indices)
+        if not len(indices):
             return np.empty((0, len(self.contract["actions"])), dtype=np.int64)
         with torch.inference_mode():
-            inputs = torch.as_tensor(np.array(observations, dtype=np.float32, copy=True), device=self.device)
-            if not torch.isfinite(inputs).all():
+            inputs = ({name: torch.as_tensor(value.copy(), device=self.device)
+                       for name, value in observations.items()} if isinstance(observations, dict)
+                      else torch.as_tensor(np.array(observations, dtype=np.float32, copy=True), device=self.device))
+            if not all(torch.isfinite(value).all() for value in (inputs.values() if isinstance(inputs, dict) else (inputs,))):
                 raise ValueError("Observations are not finite at model precision")
             logits, _ = self.model(inputs)
             if not all(torch.isfinite(value).all() for value in logits.values()):
                 raise ValueError("Policy inference produced non-finite logits")
-            actions = [
-                torch.full((len(observations),), self._fixed[name], dtype=torch.long, device=self.device)
-                if name in self._fixed else
-                logits[name].argmax(-1) if self.deterministic else
-                torch.multinomial(logits[name].softmax(-1), 1, generator=self._generator).squeeze(-1)
-                for name in self.contract["action_names"]
-            ]
+            actions = []
+            for name in self.contract["action_names"]:
+                if name in self._fixed:
+                    action = torch.full((len(indices),), self._fixed[name], dtype=torch.long, device=self.device)
+                elif self.deterministic:
+                    action = logits[name].argmax(-1)
+                elif isinstance(inputs, dict):
+                    probabilities = logits[name].softmax(-1)
+                    action = torch.stack([torch.multinomial(probabilities[row], 1,
+                                          generator=self._actor_generators[int(actor)])[0]
+                                          for row, actor in enumerate(indices)])
+                else:
+                    action = torch.multinomial(logits[name].softmax(-1), 1, generator=self._generator).squeeze(-1)
+                actions.append(action)
             return torch.stack(actions, dim=-1).cpu().numpy()
 
+    def _rng_keys(self):
+        return ("rng_state", "actor_rng_states") if hasattr(self, "_actor_generators") else ("rng_state",)
+
     def state_dict(self):
-        return {**super().state_dict(), "rng_state": self._generator.get_state().clone()}
+        state = {**super().state_dict(), "rng_state": self._generator.get_state().clone()}
+        if hasattr(self, "_actor_generators"):
+            state["actor_rng_states"] = [generator.get_state().clone() for generator in self._actor_generators]
+        return state
 
     def load_state_dict(self, state):
         import torch
 
-        self._state(state, ("rng_state",))
+        self._state(state, self._rng_keys())
         value = state["rng_state"]
         if not isinstance(value, torch.Tensor) or value.dtype != torch.uint8 or value.ndim != 1:
             raise ValueError("Invalid controller RNG state")
+        actor_states = state.get("actor_rng_states", [])
+        if (hasattr(self, "_actor_generators") and (not isinstance(actor_states, list)
+                or len(actor_states) != self.count or any(not isinstance(item, torch.Tensor)
+                or item.dtype != torch.uint8 or item.ndim != 1 for item in actor_states))):
+            raise ValueError("Invalid per-actor controller RNG states")
         try:
             self._generator.set_state(value.cpu())
+            for generator, actor_state in zip(getattr(self, "_actor_generators", ()), actor_states, strict=True):
+                generator.set_state(actor_state.cpu())
         except RuntimeError as error:
             raise ValueError("Invalid controller RNG state") from error
 
@@ -605,12 +704,22 @@ class _PolicyController(_BatchedController):
 class SelfPlayController(_PolicyController):
     def __init__(self, learner, contract, count, device="cpu", seed=1, deterministic=False):
         import torch
+        from backend.fast_rl_model import BridgeActorCritic
+        from simulator.training.contract import validate_bridge_observation_descriptor
 
         super().__init__(contract, count, seed)
         if learner is None:
             raise ValueError("Self-play requires the learner policy model")
         if type(deterministic) is not bool:
             raise ValueError("deterministic must be boolean")
+        if isinstance(learner, BridgeActorCritic):
+            descriptor = validate_bridge_observation_descriptor(learner.descriptor)
+            if (learner.observation_dim != self.contract["observation_dim"]
+                    or learner.action_names != tuple(self.contract["action_names"])
+                    or [getattr(learner.policy, f"{name}_head").out_features for name in learner.action_names]
+                    != self.contract["action_sizes"]):
+                raise ValueError("Structured Bridge self-play model differs from its policy contract")
+            self._description["bridge_observation"] = descriptor
         self.model = learner
         self.device = next(learner.parameters()).device
         requested = torch.device(device)
@@ -620,6 +729,10 @@ class SelfPlayController(_PolicyController):
         self.deterministic = deterministic
         self._fixed = {}
         self._generator = torch.Generator(device=self.device).manual_seed(self.seed)
+        if "bridge_observation" in self._description:
+            seeds = np.random.SeedSequence(self.seed).spawn(self.count)
+            self._actor_generators = [torch.Generator(device=self.device).manual_seed(
+                int(stream.generate_state(1, dtype=np.uint64)[0]) % 2**63) for stream in seeds]
         self._description.update(type="self_play", device=str(self.device), deterministic=deterministic)
 
     def set_controls(self, controls):
@@ -645,6 +758,8 @@ class FrozenSelfPlayController(SelfPlayController):
         _integer(update, "snapshot update", 0)
         if not force and (update <= self.latest_update or update % self.every_updates):
             return
+        if getattr(learner, "descriptor", None) != self._description.get("bridge_observation"):
+            raise ValueError("Frozen self-play model descriptor differs")
         fixed = fixed_indices(self.contract, controls)
         self.snapshots[update] = (deepcopy(learner).eval().requires_grad_(False), fixed)
         self.latest_update = update
@@ -660,15 +775,21 @@ class FrozenSelfPlayController(SelfPlayController):
         self._prune()
 
     def act(self, observations, indices=None):
-        observations, indices = self._batch(observations, indices)
-        actions = np.empty((len(observations), len(self.contract["actions"])), dtype=np.int64)
+        observations, indices = self._policy_batch(observations, indices)
+        actions = np.empty((len(indices), len(self.contract["actions"])), dtype=np.int64)
         for update in np.unique(self.snapshot_updates[indices]):
             selected = self.snapshot_updates[indices] == update
             self.model, self._fixed = self.snapshots[int(update)]
-            actions[selected] = super().act(observations[selected], indices[selected])
+            selected_observations = ({name: value[selected] for name, value in observations.items()}
+                                     if isinstance(observations, dict) else observations[selected])
+            actions[selected] = super().act(selected_observations, indices[selected])
         return actions
 
     def copy_snapshot(self, source, update=None):
+        if (not isinstance(source, FrozenSelfPlayController)
+            or source.contract_hash != self.contract_hash
+            or source._description.get("bridge_observation") != self._description.get("bridge_observation")):
+            raise ValueError("Frozen self-play snapshot is incompatible")
         update = source.latest_update if update is None else update
         model, fixed = source.snapshots[update]
         self.model = deepcopy(model).to(self.device).eval().requires_grad_(False)
@@ -685,7 +806,7 @@ class FrozenSelfPlayController(SelfPlayController):
     def load_state_dict(self, state):
         import torch
 
-        self._state(state, ("rng_state", "latest_update", "snapshot_updates", "snapshots"))
+        self._state(state, (*self._rng_keys(), "latest_update", "snapshot_updates", "snapshots"))
         latest = _integer(state["latest_update"], "latest snapshot update", 0)
         assignments = state["snapshot_updates"]
         snapshots = state["snapshots"]
@@ -707,7 +828,7 @@ class FrozenSelfPlayController(SelfPlayController):
                            for name, index in fixed.items())):
                 raise ValueError("Invalid frozen self-play policy")
             restored[update] = (model.eval().requires_grad_(False), fixed.copy())
-        super().load_state_dict({key: state[key] for key in ("version", "provenance", "rng_state")})
+        super().load_state_dict({key: state[key] for key in ("version", "provenance", *self._rng_keys())})
         self.latest_update, self.snapshots = latest, restored
         self.snapshot_updates[:] = assignments
         self.model = self.snapshots[latest][0]
@@ -742,6 +863,7 @@ class CheckpointController(_PolicyController):
                 or type(saved.get("version")) is not int or saved["version"] != 1):
             raise ValueError("Checkpoint is not a compatible standalone PPO policy")
         metadata = saved.get("metadata")
+        reject_structured_bridge_checkpoint(metadata)
         if (not isinstance(metadata, dict) or metadata.get("players_per_environment") != 2
                 or metadata.get("learner") not in ("both_shared_policy", "opponent_pool")):
             raise ValueError("Checkpoint is not a compatible standalone PPO policy")
@@ -828,6 +950,7 @@ def create_controller(definition, contract, count, device="cpu", seed=1, *, lear
 
 
 register_controller("stationary_target", StationaryTargetController)
+register_controller("bridge_fixed_lane", BridgeFixedLaneController)
 register_controller("basic_melee", BasicMeleeController)
 register_controller("stationary_melee", StationaryMeleeController)
 register_controller("tactical_melee", TacticalMeleeController)

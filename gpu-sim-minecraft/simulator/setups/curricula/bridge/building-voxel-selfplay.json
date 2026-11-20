@@ -1,0 +1,49 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "bridge-building-voxel-selfplay",
+  "seed": 42,
+  "policy": "../../policies/bridge/building-items.json",
+  "environment": "../../environments/bridge/building-items.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
+  "bridge_observation": {
+    "format": "minecraft_sim_bridge_observation",
+    "version": 1,
+    "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1},
+    "voxel_shape": [5, 9, 9],
+    "voxel_dtype": "uint8",
+    "voxel_categories": 5,
+    "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
+      "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress",
+      "refill_enabled", "own_selected_slot"],
+    "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)",
+      "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8"],
+    "voxel_perspective": "actor_feet_yaw_v1",
+    "sampling": "current_host_state",
+    "model": "bridge_voxel_actor_critic_v1"
+  },
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "runner": {"type": "scripted", "controller": "bridge_fixed_lane"},
+    "current": {"type": "self_play"},
+    "past": {"type": "frozen_self_play", "every_updates": 20}
+  },
+  "mixtures": {
+    "training": [{"id": "target", "weight": 1}, {"id": "runner", "weight": 1},
+                 {"id": "current", "weight": 1}, {"id": "past", "weight": 1}],
+    "fixed-runner": [{"id": "runner", "weight": 1}]
+  },
+  "snapshots": [{"name": "initial", "at_updates": 0}],
+  "stages": [
+    {
+      "name": "building-voxel-selfplay",
+      "opponents": "training",
+      "controls": {"fixed": {}},
+      "evaluations": {
+        "fixed-runner": {"overrides": {"opponents": "fixed-runner"}, "every_updates": 1000,
+                         "worlds": 4, "episodes": 32, "seed": 1729}
+      },
+      "advance": {"updates": 1000}
+    }
+  ]
+}

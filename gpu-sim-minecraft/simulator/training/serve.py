@@ -16,7 +16,8 @@ import torch
 
 from backend.fast_rl_model import ActorCritic
 from simulator.training.environment import SCHEMA, SCHEMAS
-from simulator.training.contract import CATALOGUE_HASH, fingerprint, from_legacy, resolve_scenario, validate_contract
+from simulator.training.contract import (CATALOGUE_HASH, fingerprint, from_legacy, reject_structured_bridge_checkpoint,
+                                         resolve_scenario, validate_contract)
 from simulator.training.policies import fixed_indices
 from simulator.training.controllers import create_controller
 
@@ -54,6 +55,7 @@ class Policy:
             raise ValueError("CUDA inference requested but unavailable")
         saved = torch.load(self.path, map_location=self.device, weights_only=True)
         manifest = saved.get("metadata", {})
+        reject_structured_bridge_checkpoint(manifest)
         reject_bridge_checkpoint(manifest)
         schema = next((candidate for candidate in SCHEMAS.values() if manifest.get("schema") == candidate), None)
         if schema is None:

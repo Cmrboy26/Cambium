@@ -43,7 +43,10 @@ def _solid(scene, cell):
 
 
 def validate_bridge(configuration, scene):
-    bridge = _object(configuration, ("mode", "goals", "void_y", "match", "task_rewards"), "configuration")
+    required = {"mode", "goals", "void_y", "match", "task_rewards"}
+    if not isinstance(configuration, dict) or not required <= set(configuration) or set(configuration) - required - {"kits", "building"}:
+        raise ValueError("Invalid Bridge configuration fields")
+    bridge = configuration
     mode = _object(bridge["mode"], ("name", "version"), "mode")
     if mode["name"] != "bridge" or type(mode["version"]) is not int or mode["version"] != 1:
         raise ValueError("Unsupported Bridge mode")
@@ -98,3 +101,59 @@ def validate_bridge(configuration, scene):
             raise ValueError("Bridge spawns must be outside both goals")
         if match["arrow_refill_ticks"] and "minecraft:bow" not in player["loadout"]["weapons"]:
             raise ValueError("Bridge arrow refill requires a bow for both players")
+    if "kits" in bridge:
+        kits = bridge["kits"]
+        if not isinstance(kits, list) or len(kits) != 2:
+            raise ValueError("Bridge requires two kits")
+        swords = {f"minecraft:{material}_sword" for material in
+                  ("wooden", "stone", "iron", "golden", "diamond", "netherite")}
+        allowed = {"empty", "sword", "bow", "pickaxe", "blocks", "golden_apple"}
+        for kit, player in zip(kits, scene["players"]):
+            _object(kit, ("slots", "blocks", "golden_apples"), "kit")
+            slots = kit["slots"]
+            weapons = player["loadout"]["weapons"]
+            if not isinstance(slots, list) or not 1 <= len(slots) <= 9 or len(slots) != len(weapons):
+                raise ValueError("Bridge kit slots must match the scene loadout size")
+            seen = set()
+            for item, weapon in zip(slots, weapons):
+                if not isinstance(item, str) or item not in allowed or (item != "empty" and item in seen):
+                    raise ValueError("Bridge kit items must be supported and occupy distinct slots")
+                seen.add(item)
+                if not (weapon in swords if item == "sword" else
+                        weapon == "minecraft:bow" if item == "bow" else weapon == "minecraft:air"):
+                    raise ValueError("Bridge kit slot disagrees with the scene weapon loadout")
+            for count, item in (("blocks", "blocks"), ("golden_apples", "golden_apple")):
+                if type(kit[count]) is not int or not 0 <= kit[count] <= 64 or (kit[count] and item not in seen):
+                    raise ValueError("Bridge item counts require corresponding slots and must be in 0..64")
+    if "building" in bridge:
+        if "kits" not in bridge:
+            raise ValueError("Bridge building requires explicit kits")
+        building = _object(bridge["building"], ("zones", "block_range", "entity_range", "hardness",
+                                                "mining_speed", "correct_tool"), "building")
+        for key in ("block_range", "entity_range"):
+            value = _number(building[key], key)
+            if value > 64 or (value <= 0 if key == "block_range" else value < 0):
+                raise ValueError(f"Bridge {key} is outside native range")
+        for key in ("hardness", "mining_speed"):
+            value = _number(building[key], key)
+            try:
+                converted = struct.unpack("f", struct.pack("f", value))[0]
+            except (OverflowError, struct.error):
+                converted = float("inf")
+            if not 0 < converted <= FLOAT_MAX:
+                raise ValueError(f"Bridge {key} must be a positive finite float32")
+        if type(building["correct_tool"]) is not bool:
+            raise ValueError("Bridge correct_tool must be boolean")
+        zones = building["zones"]
+        if not isinstance(zones, list) or not 1 <= len(zones) <= 8:
+            raise ValueError("Bridge requires one to eight build zones")
+        for zone in zones:
+            _object(zone, ("min", "max"), "build zone")
+            for key in ("min", "max"):
+                if not isinstance(zone[key], list) or len(zone[key]) != 3:
+                    raise ValueError("Bridge build zone coordinates require three values")
+                for coordinate in zone[key]:
+                    _number(coordinate, "build zone coordinate")
+            if any(lower >= upper or lower < start or upper > start + extent
+                   for lower, upper, start, extent in zip(zone["min"], zone["max"], origin, size)):
+                raise ValueError("Bridge build zone must be nonempty and inside arena bounds")

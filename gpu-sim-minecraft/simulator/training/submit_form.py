@@ -91,9 +91,6 @@ def parse_values(values):
 
 def normalize(values, shared_gpu=False, max_parallel=0, local=False, bridge=False):
     settings, sweep = parse_values(values)
-    replay_values = sweep["values"] if sweep.get("variable") == "REPLAY" else [settings["REPLAY"]]
-    if bridge and any(int(value) != 0 for value in replay_values):
-        raise ValueError("Bridge research replay is not supported; set the replay interval to 0")
     if settings["RESUME"] and settings["INITIALIZE"]:
         raise ValueError("Choose resume or initialize from a checkpoint, not both")
     if settings["RESUME"] and settings["START_STAGE"]:

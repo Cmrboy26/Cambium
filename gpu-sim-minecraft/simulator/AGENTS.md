@@ -89,7 +89,8 @@ capacity or throughput claim is made. Host downloads and native captures do not
 serialize overlays. The experimental host-staged Bridge batch maintains its
 own host overlay from ordered per-tick device edit events, and clears selected
 worlds on applicable resets; it does not download the full overlay each tick.
-Authored setup JSON, replay and live integration do not expose mutable terrain;
+The host-staged authored subset and version-4 website replay expose ordered
+mutable-terrain edits. Fabric replay and live integration remain unsupported;
 these experimental paths are not a validated playable Bridge mode.
 
 ## Experimental Bridge Lifecycle
@@ -108,10 +109,10 @@ The opt-in [building subset](include/minecraft_sim/bridge_building.hpp) supplies
 full-cube targeting, placement and configurable mining for per-world overlays.
 Golden apples have experimental held-use, absorption and regeneration behavior;
 pickaxe entity combat, general effects, fluids, special block shapes and item
-durability are unsupported. Setup/compiler
-validation, resident collection and replay/live integration remain unimplemented.
+durability are unsupported. Fixed authored setups and website replay support the
+experimental subset; resident collection, Fabric replay and live integration
+remain unimplemented.
 See the [training guide](training/AGENTS.md#experimental-bridge-batches).
-These internal functions do not make authored Bridge setups available.
 
 ## CUDA Stream Execution
 

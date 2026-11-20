@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -15,15 +16,16 @@ import numpy as np
 
 from simulator.training._test_plans import TEST_SETUPS, example_plan
 from simulator.training.compiler import LEARNER_DEFAULTS, _concrete, _geometry, _learner, _opponents, _policy, _snapshots
-from simulator.training.contract import FEATURES, categorical_values, fingerprint, from_legacy, project_observations, validate_contract
-from simulator.training.environment import REWARD_NAMES, ROOT, SCHEMA, SCHEMA_V2
+from simulator.training.contract import (FEATURES, bridge_observation_descriptor, categorical_values, fingerprint,
+                                         from_legacy, project_observations, validate_contract)
+from simulator.training.environment import Environment, REWARD_NAMES, ROOT, SCHEMA, SCHEMA_V2
 from simulator.training.plans import EpisodeSampler, load_plan, plan_hash, resolve_plan, scene_key
 from simulator.training.validate_plans import main as validate_plans
 
 
 class ObservationEncodingChecks(unittest.TestCase):
-    def test_existing_policy_files_keep_legacy_values_dimensions_and_fingerprints(self):
-        paths = sorted((ROOT / "simulator/setups/policies").rglob("*.json"))
+    def test_fixture_policy_keeps_legacy_values_dimensions_and_fingerprint(self):
+        paths = [TEST_SETUPS / "policy.json"]
         self.assertTrue(paths)
         fixture = json.loads((ROOT / "contracts/policy_fixtures.json").read_text())
         from simulator.training.contract import FEATURES
@@ -217,12 +219,13 @@ class SnapshotRuleChecks(unittest.TestCase):
         names = set()
         _snapshots([{"name": "stage-100", "at_updates": 100}], names)
         _snapshots([{"name": "final", "on_completion": True}], names)
-        self.assertEqual(names, {"stage-100", "final"})
+        _snapshots([{"name": "initial", "at_updates": 0}], names)
+        self.assertEqual(names, {"stage-100", "final", "initial"})
         definition = {"past": {"type": "frozen_self_play", "every_updates": 100}}
         self.assertEqual(_opponents(definition, Path.cwd()), definition)
         invalid = [None, {}, [{"name": "../outside", "at_updates": 1}],
                    [{"name": "stage-100", "at_updates": 1}],
-                   [{"name": "zero", "at_updates": 0}],
+                   [{"name": "negative", "at_updates": -1}],
                    [{"name": "boolean", "at_updates": True}],
                    [{"name": "no", "on_completion": False}],
                    [{"name": "both", "at_updates": 1, "on_completion": True}],
@@ -301,6 +304,47 @@ class ExperimentChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "without spawn or equipment sampling"):
             self.resolve()
 
+    def test_structured_bridge_plan_roundtrip_and_rejections(self):
+        self.bridge_setup()
+        scalar = self.resolve()
+        self.assertNotIn("bridge_observation", scalar)
+        self.assertEqual(plan_hash(scalar), plan_hash(resolve_plan(scalar)))
+        descriptor = bridge_observation_descriptor()
+        self.raw["bridge_observation"] = descriptor
+        resolved = self.resolve()
+        self.assertEqual(resolved["bridge_observation"], descriptor)
+        self.assertEqual(resolve_plan(resolved), resolved)
+        self.assertNotEqual(plan_hash(resolved), plan_hash(scalar))
+        mixed = deepcopy(resolved)
+        mixed["stages"].append(deepcopy(mixed["stages"][0]))
+        mixed["stages"][1]["name"] = "duel"
+        mixed["stages"][1]["scenario"].pop("bridge")
+        with self.assertRaisesRegex(ValueError, "Bridge stages and evaluations only"):
+            resolve_plan(mixed)
+        for invalid in (None, {}, {**descriptor, "version": True}, {**descriptor, "version": 2},
+                        {**descriptor, "extra": 1}, {**descriptor, "voxel_shape": [5, 9, 8]},
+                        {**descriptor, "native_capabilities": {**descriptor["native_capabilities"], "extra": 1}}):
+            for source in (self.raw, resolved):
+                with self.subTest(invalid=invalid, format=source["format"]), self.assertRaisesRegex(ValueError, "descriptor"):
+                    resolve_plan({**source, "bridge_observation": invalid}, base_dir=self.plan_path.parent)
+        for opponent in ({"type": "self_play"}, {"type": "frozen_self_play", "every_updates": 1}):
+            candidate = deepcopy(self.raw)
+            candidate["opponents"]["other"] = opponent
+            self.assertEqual(resolve_plan(candidate, base_dir=self.plan_path.parent)["opponents"]["other"], opponent)
+        candidate = deepcopy(self.raw)
+        candidate["opponents"].update(current={"type": "self_play"},
+                                      past={"type": "frozen_self_play", "every_updates": 1})
+        candidate["mixtures"]["target"].extend([{"id": "current", "weight": 1}, {"id": "past", "weight": 1}])
+        mixed = resolve_plan(candidate, base_dir=self.plan_path.parent)
+        self.assertEqual({entry["id"] for entry in mixed["stages"][0]["opponents"]},
+                         {"stationary", "current", "past"})
+        self.assertEqual(resolve_plan(mixed), mixed)
+        for opponent in ({"type": "checkpoint", "path": "missing.pt"},
+                         {"type": "scripted", "controller": "basic_melee"},
+                         {"type": "scripted", "controller": "stationary_target", "options": {"x": 1}}):
+            with self.subTest(opponent=opponent), self.assertRaisesRegex(ValueError, "supports self-play"):
+                resolve_plan({**self.raw, "opponents": {"stationary": opponent}}, base_dir=self.plan_path.parent)
+
     def test_bridge_rejects_invalid_configuration_and_spawns(self):
         bridge = self.bridge_setup()
         resolved = self.resolve()
@@ -358,6 +402,157 @@ class ExperimentChecks(unittest.TestCase):
         self.write()
         with self.assertRaisesRegex(ValueError, "bow for both players"):
             self.resolve()
+
+    def test_bridge_explicit_kits_match_loadouts_and_observations(self):
+        bridge = self.bridge_setup()
+        self.environment["players"]["shared"]["loadout"].update(
+            weapons=["minecraft:iron_sword", "minecraft:bow"], arrows=1)
+        bridge["match"]["arrow_refill_ticks"] = 80
+        kit = {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", *(["empty"] * 4)],
+               "blocks": 64, "golden_apples": 2}
+        bridge["kits"] = [deepcopy(kit), deepcopy(kit)]
+        self.policy["observations"] = [{"feature": "self.health_fraction"}]
+        self.write()
+        resolved = self.resolve()
+        self.assertEqual(resolved["scenario"]["bridge"], bridge)
+        self.assertEqual(resolve_plan(resolved), resolved)
+        for change in (
+            lambda value: value["kits"].pop(),
+            lambda value: value["kits"][0]["slots"].pop(),
+            lambda value: value["kits"][0]["slots"].__setitem__(2, "axe"),
+            lambda value: value["kits"][0]["slots"].__setitem__(2, "sword"),
+            lambda value: value["kits"][0]["slots"].__setitem__(0, "empty"),
+            lambda value: value["kits"][0]["slots"].__setitem__(1, "sword"),
+            lambda value: value["kits"][0].update(blocks=True),
+            lambda value: value["kits"][0].update(golden_apples=65),
+            lambda value: value["kits"][0]["slots"].__setitem__(3, "empty"),
+        ):
+            changed = deepcopy(resolved)
+            changed.pop("scenario")
+            change(changed["stages"][0]["scenario"]["bridge"])
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                resolve_plan(changed)
+            self.environment["bridge"] = deepcopy(bridge)
+            change(self.environment["bridge"])
+            self.write()
+            with self.subTest(authored_change=change), self.assertRaises(ValueError):
+                self.resolve()
+        self.environment["bridge"] = bridge
+        self.write()
+        for feature in ("self.attack_charge", "opponent.weapon_speed_fraction", "self.weapon_slot_2.present"):
+            changed = deepcopy(resolved)
+            changed["policy"]["observations"][0]["feature"] = feature
+            with self.subTest(feature=feature), self.assertRaisesRegex(ValueError, "reserved kit"):
+                resolve_plan(changed)
+
+    def test_bridge_building_parameters_and_zones(self):
+        bridge = self.bridge_setup()
+        self.environment["players"]["shared"]["loadout"].update(weapons=["minecraft:iron_sword"])
+        kit = {"slots": ["sword", "pickaxe", "blocks", "golden_apple", *(["empty"] * 5)],
+               "blocks": 64, "golden_apples": 2}
+        bridge["kits"] = [deepcopy(kit), deepcopy(kit)]
+        bridge["building"] = {"zones": [{"min": [-7, 0, -7], "max": [8, 4, 8]}],
+                              "block_range": 64, "entity_range": 0, "hardness": 0.8,
+                              "mining_speed": 1, "correct_tool": True}
+        self.policy["observations"] = [{"feature": "self.health_fraction"}]
+        self.write()
+        resolved = self.resolve()
+        self.assertEqual(resolved["scenario"]["bridge"], bridge)
+        self.assertEqual(resolve_plan(resolved), resolved)
+        changes = (
+            lambda value: value.pop("kits"),
+            lambda value: value["building"].update(zones=[]),
+            lambda value: value["building"].update(zones=value["building"]["zones"] * 9),
+            lambda value: value["building"]["zones"][0].update(min=[-7.01, 0, -7]),
+            lambda value: value["building"]["zones"][0].update(max=[8, 4.01, 8]),
+            lambda value: value["building"]["zones"][0].update(max=[-7, 4, 8]),
+            lambda value: value["building"]["zones"][0].update(min=[0, float("nan"), 0]),
+            lambda value: value["building"].update(block_range=0),
+            lambda value: value["building"].update(block_range=64.01),
+            lambda value: value["building"].update(entity_range=-1),
+            lambda value: value["building"].update(entity_range=True),
+            lambda value: value["building"].update(hardness=1e-50),
+            lambda value: value["building"].update(mining_speed=1e39),
+            lambda value: value["building"].update(correct_tool=1),
+            lambda value: value["building"].update(extra=1),
+        )
+        for change in changes:
+            changed = deepcopy(resolved)
+            changed.pop("scenario")
+            change(changed["stages"][0]["scenario"]["bridge"])
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                resolve_plan(changed)
+            self.environment["bridge"] = deepcopy(bridge)
+            change(self.environment["bridge"])
+            self.write()
+            with self.subTest(authored_change=change), self.assertRaises(ValueError):
+                self.resolve()
+        self.environment["bridge"] = bridge
+        bridge["building"]["zones"] = [{"min": [-6.5, 0.25, -6.5], "max": [6.5, 3.75, 6.5]}] * 8
+        self.write()
+        self.assertEqual(self.resolve()["scenario"]["bridge"], bridge)
+
+    @unittest.skipUnless(os.environ.get("MCSIM_TEST_CPU_LIBRARY"), "No explicit CPU library selected")
+    def test_bridge_authored_kit_controls_reach_native_cpu(self):
+        bridge = self.bridge_setup()
+        self.environment["players"]["shared"]["loadout"].update(
+            weapons=["minecraft:iron_sword", "minecraft:bow"], arrows=0, offhand="minecraft:air")
+        bridge["match"]["arrow_refill_ticks"] = 3
+        kit = {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", *(["empty"] * 4)],
+               "blocks": 64, "golden_apples": 1}
+        bridge["kits"] = [deepcopy(kit), deepcopy(kit)]
+        bridge["building"] = {"zones": [{"min": [-6, 1, -6], "max": [7, 4, 7]}],
+                              "block_range": 4.5, "entity_range": 3,
+                              "hardness": 1, "mining_speed": 30, "correct_tool": True}
+        self.arena["blocks"].append({"from": [0, 2, 0], "to": [0, 2, 0], "block": "minecraft:stone"})
+        self.policy["observations"] = [{"feature": "self.health_fraction"}]
+        next(action for action in self.policy["actions"] if action["name"] == "shield")["name"] = "use_item"
+        self.raw["stages"][0]["controls"] = {"fixed": {"use_item": True}}
+        self.write()
+        resolved = self.resolve()
+        self.assertEqual(resolved["stages"][0]["controls"]["fixed"]["use_item"], True)
+        invalid = deepcopy(resolved)
+        invalid["stages"][0]["controls"]["fixed"]["use_item"] = 1
+        with self.assertRaisesRegex(ValueError, "no semantic choice"):
+            resolve_plan(invalid)
+        scene = resolved["scenario"]["arenas"][0]["environment"]
+        scene_path = self.directory / "scene.json"
+        scene_path.write_text(json.dumps(scene))
+        policy = resolved["policy"]
+        with Environment(environments=1, device="cpu", environment=scene_path,
+                         library=os.environ["MCSIM_TEST_CPU_LIBRARY"], contract=policy, bridge=bridge) as environment:
+            actions = np.zeros((1, 2, len(policy["actions"])), dtype=np.int32)
+            for index, head in enumerate(policy["actions"]):
+                value = ("neutral" if head["name"] == "movement" else
+                         0 if head["name"] in ("yaw", "pitch") else False)
+                if head["name"] == "weapon":
+                    value = 0
+                actions[:, :, index] = head["values"].index(value)
+            heads = {head["name"]: (index, head["values"]) for index, head in enumerate(policy["actions"])}
+            weapon, weapon_values = heads["weapon"]
+            use, use_values = heads["use_item"]
+            attack, attack_values = heads["attack"]
+            actions[0, 0, weapon] = weapon_values.index(3)
+            actions[0, 0, use] = use_values.index(True)
+            environment.step(actions)
+            self.assertEqual(environment.bridge_state()[0]["placed"], [True, False])
+            self.assertEqual(environment.bridge_kits(0)[0]["blocks"], 63)
+            actions[0, 0, weapon] = weapon_values.index(2)
+            actions[0, 0, use] = use_values.index(False)
+            actions[0, 0, attack] = attack_values.index(True)
+            environment.step(actions)
+            self.assertEqual(environment.bridge_state()[0]["broke"], [True, False])
+            actions[:, :, weapon] = weapon_values.index(4)
+            actions[:, :, use] = use_values.index(True)
+            actions[:, :, attack] = attack_values.index(False)
+            for _ in range(40):
+                environment.step(actions)
+            for player in range(2):
+                state = environment.bridge_kits(player)[0]
+                self.assertEqual(state["selected_slot"], 4)
+                self.assertEqual(state["golden_apples"], 0)
+                self.assertEqual(state["arrows"], 1)
+                self.assertEqual(state["blocks"], 63 if player == 0 else 64)
 
     def test_bridge_rejects_native_spawn_overlap_boundaries(self):
         self.bridge_setup()
@@ -447,8 +642,6 @@ class ExperimentChecks(unittest.TestCase):
         checkpoint.write_bytes(b"checkpoint")
         for opponent in ({"type": "scripted", "controller": "custom_controller"},
                          {"type": "scripted", "controller": "stationary_target", "options": {"custom": True}},
-                         {"type": "self_play"},
-                         {"type": "frozen_self_play", "every_updates": 1},
                          {"type": "checkpoint", "path": str(checkpoint)}):
             self.raw["opponents"]["unused"] = opponent
             with self.subTest(opponent=opponent), self.assertRaisesRegex(ValueError, "stationary_target"):
@@ -456,6 +649,79 @@ class ExperimentChecks(unittest.TestCase):
             changed = deepcopy(resolved)
             changed["opponents"]["unused"] = opponent
             with self.subTest(resolved_opponent=opponent), self.assertRaisesRegex(ValueError, "stationary_target"):
+                resolve_plan(changed)
+
+        for opponent in ({"type": "self_play"}, {"type": "frozen_self_play", "every_updates": 1}):
+            self.raw["opponents"]["unused"] = opponent
+            with self.subTest(opponent=opponent):
+                self.assertEqual(resolve_plan(self.resolve())["opponents"]["unused"], opponent)
+
+    def test_bridge_self_play_admission_keeps_policy_guards(self):
+        self.bridge_setup()
+        self.raw["mixtures"]["self"] = [{"id": "self", "weight": 1}]
+        self.raw["stages"][0]["opponents"] = "self"
+        for definition in ({"type": "self_play", "deterministic": True},
+                           {"type": "frozen_self_play", "every_updates": 2, "deterministic": False}):
+            self.raw["opponents"]["self"] = definition
+            resolved = self.resolve()
+            self.assertEqual(resolve_plan(resolved), resolved)
+            for mutate in (
+                lambda value: value["policy"]["observations"][0].update(grid=[5, 9, 9]),
+                lambda value: value["policy"]["observations"][0].update(feature="bridge.local_voxels"),
+                lambda value: value["policy"]["actions"][0]["values"].remove("neutral"),
+                lambda value: value["policy"].update(ticks_per_action=2),
+                lambda value: value["opponents"]["self"].update(options={}),
+            ):
+                changed = deepcopy(resolved)
+                mutate(changed)
+                with self.subTest(definition=definition, mutate=mutate), self.assertRaises(ValueError):
+                    resolve_plan(changed)
+        for definition in ({"type": "self_play", "deterministic": 1},
+                           {"type": "frozen_self_play", "every_updates": 0},
+                           {"type": "frozen_self_play", "every_updates": True}):
+            self.raw["opponents"]["self"] = definition
+            with self.subTest(definition=definition), self.assertRaises(ValueError):
+                self.resolve()
+
+    def test_bridge_fixed_lane_controller_contract_and_spawn_alignment(self):
+        bridge = self.bridge_setup()
+        bridge["goals"] = [{"min": [-1, 1, -6], "max": [1, 3, -5]},
+                           {"min": [-1, 1, 5], "max": [1, 3, 6]}]
+        self.environment["players"]["overrides"] = [
+            {"position": [0, 1, -2], "yaw": 0}, {"position": [0, 1, 2], "yaw": 180}]
+        self.raw["opponents"]["lane"] = {"type": "scripted", "controller": "bridge_fixed_lane"}
+        self.raw["mixtures"]["lane"] = [{"id": "lane", "weight": 1}]
+        self.raw["stages"][0]["opponents"] = "lane"
+        self.write()
+        resolved = self.resolve()
+        self.assertEqual(resolve_plan(resolved), resolved)
+        self.raw["bridge_observation"] = bridge_observation_descriptor()
+        self.assertEqual(resolve_plan(self.resolve()), self.resolve())
+        self.raw.pop("bridge_observation")
+        movement = next(action for action in self.policy["actions"] if action["name"] == "movement")
+        movement["values"].remove("forward")
+        self.write()
+        with self.assertRaisesRegex(ValueError, "forward"):
+            self.resolve()
+        movement["values"].append("forward")
+        self.write()
+        for mutate, error in (
+            (lambda value: value["opponents"]["lane"].update(options={"speed": 1}), "without options"),
+            (lambda value: value["policy"]["observations"].__setitem__(
+                0, {"feature": "self.yaw_fraction", "scale": 1, "clip": [-0.5, 0.5]}), "unclipped"),
+            (lambda value: next(entry for entry in value["policy"]["observations"]
+                                if entry["feature"] == "self.yaw_fraction").update(scale=0), "yaw_fraction"),
+            (lambda value: value["stages"][0]["scenario"]["arenas"][0]["environment"]["players"][0].update(yaw=90), "aligned"),
+            (lambda value: value["stages"][0]["scenario"]["arenas"][0]["environment"]["players"][0].update(
+                velocity=[0.1, 0, 0]), "aligned"),
+            (lambda value: value["stages"][0]["scenario"]["bridge"]["goals"][1].update(
+                min=[2, 1, 5], max=[3, 3, 6]), "aligned"),
+            (lambda value: value["policy"].update(ticks_per_action=2), "tick rate"),
+        ):
+            changed = deepcopy(resolved)
+            changed.pop("scenario")
+            mutate(changed)
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
                 resolve_plan(changed)
 
     def test_bridge_rejects_unsupported_conditions_and_opponents(self):
@@ -490,7 +756,12 @@ class ExperimentChecks(unittest.TestCase):
         evaluation.pop("advance")
         with_evaluation = deepcopy(resolved)
         with_evaluation["evaluations"]["bridge"] = evaluation
-        with self.assertRaisesRegex(ValueError, "Bridge evaluation is not supported"):
+        self.assertEqual(resolve_plan(with_evaluation)["evaluations"]["bridge"], evaluation)
+        with_evaluation["stages"][0]["advance"] = {"evaluation": {
+            "suite": "bridge", "metric": "draw_rate", "at_least": 0.5}}
+        resolve_plan(with_evaluation)
+        with_evaluation["stages"][0]["advance"]["evaluation"]["metric"] = "mace_smash_rate"
+        with self.assertRaisesRegex(ValueError, "metric"):
             resolve_plan(with_evaluation)
         changed = deepcopy(resolved["stages"][0])
         changed["name"] = "different"
@@ -498,6 +769,15 @@ class ExperimentChecks(unittest.TestCase):
         resolved["stages"].append(changed)
         with self.assertRaisesRegex(ValueError, "same fixed scenario"):
             resolve_plan(resolved)
+
+    def test_bridge_authored_evaluation_roundtrip(self):
+        self.bridge_setup()
+        self.raw["evaluations"] = {"held": {"stage": "bridge", "every_updates": 2,
+                                             "episodes": 5, "seed": 1729, "worlds": 2}}
+        self.raw["stages"][0]["advance"] = {"evaluation": {"suite": "held", "metric": "win_rate", "at_least": 0.5}}
+        resolved = self.resolve()
+        self.assertEqual(resolved["evaluations"]["held"]["seed"], 1729)
+        self.assertEqual(resolve_plan(resolved), resolved)
 
     def test_large_arena_geometry_limits(self):
         self.arena["bounds"]["size"] = [32, 48, 96]

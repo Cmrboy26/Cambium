@@ -28,15 +28,21 @@ is explicitly rejected. Normal duel batches are unchanged.
 Authored Bridge environments place this configuration in their `bridge` field;
 the resolved scenario retains it separately from the native scene. The supported
 research subset has one fixed arena and fixed spawns/loadouts, existing scalar
-policy features, stationary-target opponents and zero duel reward weights.
+policy features or the opt-in local voxel model, and zero duel reward weights.
+Supported opponents are stationary targets, fixed-lane runners and current or
+frozen self-play. The fixed-lane runner follows its initial north/south heading;
+it is not a general navigation controller. The [building/items plan](../setups/curricula/bridge/building-voxel-selfplay.json)
+uses the experimental kit, building and local-voxel subsets.
 Bridge `task_rewards` provide score, win and loss signals; match-clock endings
 are terminal, while an external limit truncates and bootstraps the final
 observation. Training logs match outcomes rather than duel reward breakdowns.
 The per-rollout `bridge_goals_for`, `bridge_goals_against`, `bridge_wins`,
 `bridge_losses` and `bridge_draws` counters are relative to the learner's seat.
-Sampling, task overrides, evaluation, replay, resident collection and live
-serving are rejected. Bridge checkpoints preserve reset counters and resume
-with fresh episodes; checkpoints missing those counters cannot be resumed.
+Fixed-scenario evaluation and version-4 website replay are supported. Replay
+export runs a separate sampled match; it is not a recording of an in-progress
+training world. Sampling, task overrides, resident collection, Fabric Bridge
+replay and live serving are rejected. Bridge checkpoints preserve reset counters
+and resume with fresh episodes; checkpoints missing those counters cannot be resumed.
 
 For a bounded CPU plumbing check, choose a new output directory and run:
 
@@ -128,11 +134,14 @@ recaptured with the matching build.
 
 Concrete episode descriptions include `experimental_bridge` and are rejected
 by the ordinary scene loader; the research collector configures Bridge through
-the dedicated API instead. Duel reward totals, behavior metrics and replay
-serialization reject Bridge rather than reporting misleading data. The additive native calls are
-`mcsim_configure_bridge`, `mcsim_bridge_state` and `mcsim_bridge_kits`;
+the dedicated API instead. Duel reward totals and duel behavior metrics reject
+Bridge rather than reporting misleading data. The additive native calls include
+`mcsim_configure_bridge`, `mcsim_bridge_state`, `mcsim_bridge_kits` and
+`mcsim_bridge_local_voxels`; `Environment.bridge_local_voxels()` returns a
+`uint8` array shaped `[world, 2, 5, 9, 9]` from the current host state.
 `mcsim_build_info` advertises
-`bridge_host_batch_version: 3` for mutable building. Focused CPU and T4 checks
+`bridge_host_batch_version: 3` for mutable building and
+`bridge_local_voxels_version: 1` for the grid. Focused CPU and T4 checks
 cover the experimental host batch; see the [Phase 1 tracker](../../docs/BRIDGE_PHASE1_CHECKLIST.md)
 for evidence and remaining integration and conformance gates.
 

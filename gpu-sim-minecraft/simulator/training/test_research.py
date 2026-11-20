@@ -2,8 +2,10 @@ import contextlib
 from copy import deepcopy
 import io
 import json
+import os
 from pathlib import Path
 import shutil
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -12,17 +14,18 @@ from uuid import uuid4
 import numpy as np
 import torch
 
-from backend.fast_rl_model import ActorCritic
+from backend.fast_rl_model import ActorCritic, BridgeActorCritic
 from simulator.training.analyze_metrics import main as analyze_metrics
-from simulator.training._test_plans import example_plan
-from simulator.training.contract import from_legacy, resolve_players, resolve_scenario, validate_contract
-from simulator.training.environment import ROOT, SCHEMA, SCHEMA_V2, load_library
+from simulator.training._test_plans import TEST_SETUPS, example_plan
+from simulator.training.contract import bridge_observation_descriptor, from_legacy, resolve_players, resolve_scenario, validate_contract
+from simulator.training.environment import Environment, ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
 from simulator.training.research import (BehaviorEvaluation, EpisodeMetrics, OpponentPool,
-                                         ResidentOpponentPool, SampledWorlds, collect, evaluate, export_replay,
+                                         ResidentOpponentPool, SampledWorlds, bridge_observation_inputs,
+                                         collect, evaluate, export_replay,
                                          requires_new_worlds, research_metadata, resident_unsupported)
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
@@ -38,6 +41,438 @@ def short_plan():
 
 
 class BridgeResearchChecks(unittest.TestCase):
+    def test_structured_plan_rejects_invalid_descriptor_and_duel(self):
+        plan = short_plan()
+        plan["opponents"] = {"stationary": plan["opponents"]["stationary"]}
+        plan["mixtures"] = {"target": plan["mixtures"]["target"]}
+        plan["stages"] = [plan["stages"][0]]
+        plan["bridge_observation"] = {**bridge_observation_descriptor(), "version": 2}
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            resolve_plan(plan)
+        plan["bridge_observation"] = bridge_observation_descriptor()
+        with self.assertRaisesRegex(ValueError, "Bridge stages"):
+            resolve_plan(plan)
+
+    def test_structured_trainer_checkpoint_resume_and_consumers(self):
+        import simulator.training.research as research
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = json.loads((TEST_SETUPS / "environment.json").read_text())
+            environment["arena"] = str(TEST_SETUPS / "arena.json")
+            environment.pop("spawns")
+            environment.pop("equipment")
+            environment["task"] = {"max_ticks": 3, "rewards": {}}
+            environment["bridge"] = {"mode": {"name": "bridge", "version": 1},
+                "goals": [{"min": [-6, 1, -1], "max": [-5, 3, 1]},
+                          {"min": [5, 1, -1], "max": [6, 3, 1]}],
+                "void_y": 0, "match": {"goals_to_win": 2, "max_ticks": 3, "cage_ticks": 0,
+                    "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+            environment_path = root / "environment.json"
+            environment_path.write_text(json.dumps(environment))
+            plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "structured-test", "seed": 42,
+                "policy": str(TEST_SETUPS / "policy.json"), "environment": str(environment_path),
+                "bridge_observation": bridge_observation_descriptor(),
+                "learner": {"hidden_dim": 8, "epochs": 1, "minibatch_size": 2},
+                "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
+                "mixtures": {"target": [{"id": "target", "weight": 1}]},
+                "stages": [{"name": "bridge", "opponents": "target", "advance": {"updates": 5}}],
+                "evaluations": {"held": {"stage": "bridge", "every_updates": 1, "episodes": 2, "seed": 9}},
+                "snapshots": [{"name": "initial", "at_updates": 0}]}
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            output = root / "run"
+            common = ["--device", "cpu", "--threads", "1", "--library", self.library,
+                      "--updates", "1", "--replay-every-updates", "1"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(plan_path), "--output", str(output), "--envs", "2",
+                                       "--rollout-steps", "2", *common]), 0)
+            first = torch.load(output / "latest.pt", weights_only=True)
+            snapshot = torch.load(output / "snapshots/initial.pt", weights_only=True)
+            self.assertEqual(first["metadata"]["bridge_observation"], plan["bridge_observation"])
+            self.assertEqual(snapshot["metadata"]["bridge_observation"], plan["bridge_observation"])
+            self.assertFalse(torch.equal(first["model"]["voxel_encoder.0.weight"],
+                                         snapshot["model"]["voxel_encoder.0.weight"]))
+            metrics = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+            self.assertTrue(all(np.isfinite(metrics[0][name]) for name in ("loss", "policy_loss", "value_loss", "entropy")))
+            self.assertEqual(metrics[0]["evaluations"]["held"]["episodes"], 2)
+            replay = next((output / "replays").glob("*.jsonl"))
+            header = json.loads(replay.read_text().splitlines()[0])
+            self.assertEqual(header["training"]["bridge_observation"], plan["bridge_observation"])
+            self.assertEqual(header["version"], 4)
+            restored = {}
+            original_collect = research.collect
+            original_optimize = research.optimize
+            original_load_pool = OpponentPool.load_state_dict
+
+            def observed_collect(model, worlds, pool, *args, **kwargs):
+                restored["model"] = deepcopy(model.state_dict())
+                restored["rng"] = torch.get_rng_state().clone()
+                restored["episodes"] = worlds.bridge_reset_episodes()
+                return original_collect(model, worlds, pool, *args, **kwargs)
+
+            def observed_optimize(model, optimizer, *args, **kwargs):
+                restored["optimizer"] = deepcopy(optimizer.state_dict())
+                return original_optimize(model, optimizer, *args, **kwargs)
+
+            def observed_load_pool(pool, state):
+                original_load_pool(pool, state)
+                restored["pool"] = deepcopy(pool.state_dict())
+
+            with patch.object(research, "collect", side_effect=observed_collect), \
+                 patch.object(research, "optimize", side_effect=observed_optimize), \
+                 patch.object(OpponentPool, "load_state_dict", new=observed_load_pool), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+            for name, value in first["model"].items():
+                torch.testing.assert_close(restored["model"][name], value)
+            torch.testing.assert_close(restored["rng"], first["rng_state"])
+            self.assertEqual(restored["episodes"], [value + 1 for value in first["research"]["bridge_episodes"]])
+            self.assertEqual(restored["optimizer"]["param_groups"], first["optimizer"]["param_groups"])
+            for key, state in first["optimizer"]["state"].items():
+                for name, value in state.items():
+                    torch.testing.assert_close(restored["optimizer"]["state"][key][name], value)
+            self.assertEqual(restored["pool"], first["research"]["pool"])
+            second = torch.load(output / "latest.pt", weights_only=True)
+            self.assertEqual(second["update"], 2)
+            self.assertEqual(second["research"]["resume_mode"], "fresh_episodes")
+            resolved = second["research"]["plan"]
+            reloaded = BridgeActorCritic(resolved["policy"]["observation_dim"],
+                second["metadata"]["bridge_observation"], second["metadata"]["hidden_dim"],
+                dict(zip(resolved["policy"]["action_names"], resolved["policy"]["action_sizes"])))
+            reloaded.load_state_dict(second["model"], strict=True)
+            consumer_options = SimpleNamespace(device="cpu", library=self.library, max_ticks=None)
+            result = evaluate(reloaded, resolved, resolved["evaluations"]["held"], consumer_options,
+                              torch.device("cpu"), {})
+            self.assertEqual(result["episodes"], 2)
+            path = export_replay(reloaded, resolved, resolved["stages"][0], consumer_options,
+                header["environment"], header["training"]["opponent"], torch.device("cpu"), 2, 2,
+                root / "reloaded-replay")
+            self.assertEqual(json.loads(Path(path).read_text().splitlines()[0])["training"]["bridge_observation"],
+                             plan["bridge_observation"])
+            with self.assertRaisesRegex(ValueError, "Structured Bridge checkpoints"):
+                Policy(output / "latest.pt")
+            with self.assertRaisesRegex(ValueError, "Structured Bridge checkpoints"):
+                CheckpointController(output / "latest.pt", resolved["policy"], 1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(plan_path), "--initialize", str(output / "latest.pt"),
+                                       "--output", str(root / "initialized"), "--envs", "2",
+                                       "--rollout-steps", "2", *common]), 0)
+            scalar_plan = deepcopy(plan)
+            scalar_plan.pop("bridge_observation")
+            scalar_path = root / "scalar.json"
+            scalar_path.write_text(json.dumps(scalar_plan))
+            scalar_output = root / "scalar-run"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(scalar_path), "--output", str(scalar_output), "--envs", "2",
+                                       "--rollout-steps", "2", *common]), 0)
+            scalar_checkpoint = scalar_output / "latest.pt"
+            self.assertNotIn("bridge_observation", torch.load(scalar_checkpoint, weights_only=True)["metadata"])
+            for selected_plan, checkpoint_path in ((plan_path, scalar_checkpoint),
+                                                    (scalar_path, output / "latest.pt")):
+                for flag in ("--initialize", "--resume"):
+                    with self.subTest(plan=selected_plan.name, flag=flag), \
+                         contextlib.redirect_stdout(io.StringIO()), \
+                         self.assertRaisesRegex(ValueError, "structured Bridge model descriptor"):
+                        main(["--plan", str(selected_plan), flag, str(checkpoint_path),
+                              "--output", str(root / "incompatible"), *common])
+            for invalid in (None, {**plan["bridge_observation"], "version": 2},
+                            {**plan["bridge_observation"], "old_field": True}):
+                broken = deepcopy(first)
+                broken["metadata"]["bridge_observation"] = invalid
+                broken_path = root / "broken.pt"
+                torch.save(broken, broken_path)
+                for flag in ("--initialize", "--resume"):
+                    with self.subTest(invalid=invalid, flag=flag), \
+                         contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "descriptor"):
+                        main(["--plan", str(plan_path), flag, str(broken_path),
+                              "--output", str(root / "broken-run"), *common])
+            with self.assertRaisesRegex(ValueError, "resident rollout unavailable"):
+                main(["--plan", str(plan_path), "--output", str(root / "resident"),
+                      "--rollout-backend", "cuda-resident", *common])
+
+    def test_structured_mixed_self_play_train_save_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = json.loads((TEST_SETUPS / "environment.json").read_text())
+            environment["arena"] = str(TEST_SETUPS / "arena.json")
+            environment.pop("spawns")
+            environment.pop("equipment")
+            environment["task"] = {"max_ticks": 3, "rewards": {}}
+            environment["bridge"] = {"mode": {"name": "bridge", "version": 1},
+                "goals": [{"min": [-6, 1, -1], "max": [-5, 3, 1]},
+                          {"min": [5, 1, -1], "max": [6, 3, 1]}],
+                "void_y": 0, "match": {"goals_to_win": 2, "max_ticks": 3, "cage_ticks": 0,
+                    "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+            environment_path = root / "environment.json"
+            environment_path.write_text(json.dumps(environment))
+            plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "mixed", "seed": 42,
+                "policy": str(TEST_SETUPS / "policy.json"), "environment": str(environment_path),
+                "bridge_observation": bridge_observation_descriptor(),
+                "learner": {"hidden_dim": 8, "epochs": 1, "minibatch_size": 2},
+                "opponents": {"target": {"type": "scripted", "controller": "stationary_target"},
+                              "current": {"type": "self_play"},
+                              "past": {"type": "frozen_self_play", "every_updates": 1}},
+                "mixtures": {"mixed": [{"id": name, "weight": 1} for name in ("target", "current", "past")],
+                             "past": [{"id": "past", "weight": 1}]},
+                "stages": [{"name": "bridge", "opponents": "mixed", "advance": {"updates": 3}}],
+                "evaluations": {"held": {"stage": "bridge", "overrides": {"opponents": "past"}, "every_updates": 1,
+                                         "episodes": 4, "worlds": 2, "seed": 9}},
+                "snapshots": [{"name": "initial", "at_updates": 0}]}
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            output = root / "run"
+            common = ["--device", "cpu", "--threads", "1", "--library", self.library,
+                      "--updates", "1", "--replay-every-updates", "1"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(plan_path), "--output", str(output), "--envs", "4",
+                                       "--rollout-steps", "2", *common]), 0)
+            first = torch.load(output / "latest.pt", weights_only=True)
+            initial = torch.load(output / "snapshots/initial.pt", weights_only=True)
+            self.assertFalse(torch.equal(first["model"]["voxel_encoder.0.weight"],
+                                         initial["model"]["voxel_encoder.0.weight"]))
+            self.assertEqual(first["research"]["pool"]["controllers"]["past"]["latest_update"], 1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+            final = torch.load(output / "latest.pt", weights_only=True)
+            self.assertEqual((final["update"], final["research"]["resume_mode"]), (2, "fresh_episodes"))
+            self.assertEqual(final["research"]["pool"]["controllers"]["past"]["latest_update"], 2)
+            metrics = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([entry["evaluations"]["held"]["opponents"][0]["controller"]["snapshot_update"]
+                              for entry in metrics], [1, 2])
+            self.assertEqual([[seat["episodes"] for seat in entry["evaluations"]["held"]["seats"]]
+                              for entry in metrics], [[2, 2], [2, 2]])
+            self.assertEqual(len(list((output / "replays").glob("*.jsonl"))), 2)
+
+    def test_scalar_contract_rejects_structured_bridge_descriptor(self):
+        policy = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                  "ticks_per_action": 1, "observations": [{"feature": "relative.z"}],
+                  "actions": [{"name": "movement", "values": ["neutral"]}],
+                  "bridge_observation": {"version": 1}}
+        with self.assertRaisesRegex(ValueError, "Structured Bridge observations"):
+            validate_contract(policy)
+        with self.assertRaisesRegex(ValueError, "Structured Bridge observations"):
+            from_legacy({**LEGACY_SCHEMA, "bridge_observation": bridge_observation_descriptor()})
+
+    def test_bridge_observation_inputs_are_actor_relative(self):
+        worlds = self.worlds()
+        environment = worlds.groups[0][1]
+        scalar = environment.observe()
+        state = {**environment.bridge_state()[0], "scores": [1, 2], "ticks": 25, "cage_remaining": 3}
+        kits = [{"blocks": 16, "golden_apples": 2, "arrows": 1,
+                 "arrow_refill_elapsed": 4, "selected_slot": 1},
+                {"blocks": 48, "golden_apples": 3, "arrows": 0,
+                 "arrow_refill_elapsed": 2, "selected_slot": 4}]
+        environment.bridge["match"].update(cage_ticks=6, arrow_refill_ticks=8)
+        with patch.object(environment, "bridge_state", return_value=[state]), \
+             patch.object(environment, "bridge_kits", side_effect=lambda player: [kits[player]]):
+            inputs = bridge_observation_inputs(environment, scalar)
+        self.assertEqual(inputs["voxels"].shape, (1, 2, 5, 9, 9))
+        self.assertEqual(inputs["voxels"].dtype, np.uint8)
+        np.testing.assert_array_equal(inputs["voxels"], environment.bridge_local_voxels())
+        np.testing.assert_array_equal(inputs["scalar"], scalar)
+        np.testing.assert_allclose(inputs["match"][0, 0],
+                                   [0.5, 1, 0.75, 0.5, 0.25, 2/64, 1/64, 0.5, 1, 1/8])
+        np.testing.assert_allclose(inputs["match"][0, 1],
+                                   [1, 0.5, 0.75, 0.5, 0.75, 3/64, 0, 0.25, 1, 0.5])
+        with self.assertRaisesRegex(ValueError, "shape or dtype"):
+            bridge_observation_inputs(environment, scalar.astype(np.float64))
+
+    def test_bridge_observation_reads_native_own_kits(self):
+        for player in self.scenario["arenas"][0]["environment"]["players"]:
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air", "minecraft:air"],
+                                 "selected": 0, "offhand": "minecraft:air"}
+        self.scenario["bridge"]["kits"] = [
+            {"slots": ["sword", "blocks", "golden_apple"] + ["empty"] * 6, "blocks": 16, "golden_apples": 2},
+            {"slots": ["sword", "blocks", "golden_apple"] + ["empty"] * 6, "blocks": 48, "golden_apples": 3}]
+        worlds = self.worlds()
+        inputs = bridge_observation_inputs(worlds.groups[0][1], worlds.observe())
+        np.testing.assert_allclose(inputs["match"][0, :, 4:6], [[16/64, 2/64], [48/64, 3/64]])
+        np.testing.assert_array_equal(inputs["match"][0, :, 8], [0, 0])
+
+    def test_bridge_observation_reads_native_score_perspectives(self):
+        worlds = self.worlds()
+        environment = worlds.groups[0][1]
+        actions = np.zeros((1, 2, 1), dtype=np.int64)
+        actions[0, 0, 0] = 1
+        for _ in range(50):
+            scalar, _, terminated, truncated = worlds.step(actions)
+            if environment.bridge_state()[0]["scores"][0]:
+                break
+            self.assertFalse(terminated[0] or truncated[0])
+        else:
+            self.fail("Player 0 did not score")
+        inputs = bridge_observation_inputs(environment, scalar)
+        np.testing.assert_allclose(inputs["match"][0, :, :2], [[0.5, 0], [0, 0.5]])
+
+    def test_bridge_model_is_separate_and_strict(self):
+        descriptor = bridge_observation_descriptor()
+        legacy = self.model()
+        keys = set(legacy.state_dict())
+        self.assertEqual(keys, {"shared.0.weight", "shared.0.bias", "shared.2.weight", "shared.2.bias",
+                    "movement_head.weight", "movement_head.bias", "value_head.weight", "value_head.bias"})
+        model = BridgeActorCritic(1, descriptor, 8, {"movement": 3})
+        inputs = {"scalar": torch.zeros(2, 1), "match": torch.zeros(2, 10),
+                  "voxels": torch.zeros(2, 5, 9, 9, dtype=torch.uint8)}
+        logits, values = model(inputs)
+        self.assertEqual(logits["movement"].shape, (2, 3))
+        self.assertEqual(values.shape, (2,))
+        (logits["movement"].sum() + values.sum()).backward()
+        self.assertIsNotNone(model.voxel_encoder[0].weight.grad)
+        self.assertEqual(keys, set(self.model().state_dict()))
+        buffer = io.BytesIO()
+        torch.save({"descriptor": descriptor, "model": model.state_dict()}, buffer)
+        buffer.seek(0)
+        saved = torch.load(buffer, weights_only=True)
+        restored = BridgeActorCritic(1, saved["descriptor"], 8, {"movement": 3})
+        restored.load_state_dict(saved["model"], strict=True)
+        restored_logits, restored_values = restored(inputs)
+        torch.testing.assert_close(restored_logits["movement"], logits["movement"])
+        torch.testing.assert_close(restored_values, values)
+        with self.assertRaises(RuntimeError):
+            model.load_state_dict(legacy.state_dict(), strict=True)
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            BridgeActorCritic(1, {**descriptor, "version": 2}, 8, {"movement": 3})
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            BridgeActorCritic(1, {**descriptor, "version": True}, 8, {"movement": 3})
+        with self.assertRaisesRegex(ValueError, "observation tensors"):
+            model({**inputs, "voxels": inputs["voxels"].float()})
+
+    def test_bridge_observation_samples_final_state_before_reset(self):
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                self.scenario["bridge"]["match"]["max_ticks"] = 1 if terminal else 100
+                worlds = self.worlds(max_ticks=100 if terminal else 1)
+                environment = worlds.groups[0][1]
+                initial = bridge_observation_inputs(environment, worlds.observe())
+                final_scalar, _, terminated, truncated = worlds.step(np.zeros((1, 2, 1), dtype=np.int64))
+                self.assertEqual((bool(terminated[0]), bool(truncated[0])), (terminal, not terminal))
+                final = bridge_observation_inputs(environment, final_scalar)
+                np.testing.assert_allclose(final["match"][0, :, 2], 0 if terminal else 0.99)
+                reset = bridge_observation_inputs(environment, worlds.reset(np.array([True])))
+                np.testing.assert_allclose(initial["match"][0, :, 2], 1)
+                np.testing.assert_allclose(reset["match"][0, :, 2], 1)
+                np.testing.assert_allclose(final["match"][0, :, 2], 0 if terminal else 0.99)
+
+    def test_bridge_ppo_optimizer_updates_voxel_encoder(self):
+        torch.manual_seed(42)
+        model = BridgeActorCritic(1, bridge_observation_descriptor(), 8, {"movement": 3})
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        scalar = torch.arange(4, dtype=torch.float32).reshape(2, 2, 1)
+        match = torch.arange(40, dtype=torch.float32).reshape(2, 2, 10) / 40
+        voxels = (torch.arange(4 * 5 * 9 * 9).reshape(2, 2, 5, 9, 9) % 5).to(torch.uint8)
+        observations = {"scalar": scalar, "match": match, "voxels": voxels}
+        flat = {name: value.flatten(0, 1) for name, value in observations.items()}
+        with torch.no_grad():
+            actions, log_probs, values, _ = policy_actions(model, flat, model.action_names)
+        rollout = {"observations": observations, "actions": actions.reshape(2, 2, 1),
+                   "log_probs": log_probs.reshape(2, 2), "values": values.reshape(2, 2),
+                   "advantages": torch.tensor([[1., -1.], [0.5, -0.5]]),
+                   "returns": values.reshape(2, 2) + 1}
+        original = model.voxel_encoder[0].weight.detach().clone()
+        metrics = optimize(model, optimizer, rollout, epochs=2, minibatch_size=2)
+        self.assertTrue(all(np.isfinite(value) for value in metrics.values()))
+        self.assertFalse(torch.equal(original, model.voxel_encoder[0].weight))
+
+    def test_structured_bridge_collects_final_before_reset_for_both_seats(self):
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                torch.manual_seed(42)
+                self.scenario["bridge"]["match"]["max_ticks"] = 1 if terminal else 100
+                worlds = self.worlds(count=2, max_ticks=100 if terminal else 1)
+                pool = self.pool(2)
+                pool.learner_slots[:] = [0, 1]
+                model = BridgeActorCritic(1, bridge_observation_descriptor(), 8, {"movement": 3})
+                scalar = worlds.observe()
+                initial = worlds.bridge_observations(scalar)
+                seen = []
+
+                def capture(module, inputs, outputs):
+                    seen.append(({name: value.detach().clone() for name, value in inputs[0].items()},
+                                 outputs[1].detach().clone()))
+
+                handle = model.register_forward_hook(capture)
+                try:
+                    rollout, reset_scalar, endings, timeouts = collect(
+                        model, worlds, pool, scalar, 1, torch.device("cpu"), {"movement": 0},
+                        structured_bridge=True)
+                finally:
+                    handle.remove()
+                self.assertEqual((endings, timeouts), (2, 0) if terminal else (0, 2))
+                for name in ("scalar", "match", "voxels"):
+                    np.testing.assert_array_equal(rollout["observations"][name][0].numpy(),
+                                                  initial[name][[0, 1], [0, 1]])
+                self.assertEqual(rollout["observations"]["voxels"].dtype, torch.uint8)
+                self.assertGreater(torch.unique(rollout["observations"]["voxels"]).numel(), 1)
+                np.testing.assert_allclose(seen[1][0]["match"][:, 2], 0 if terminal else 0.99)
+                np.testing.assert_allclose(worlds.bridge_observations(reset_scalar)["match"][:, :, 2], 1)
+                torch.testing.assert_close(rollout["next_values"][0], seen[1][1])
+                expected = rollout["rewards"][0] - rollout["values"][0]
+                if not terminal:
+                    expected += 0.99 * seen[1][1]
+                torch.testing.assert_close(rollout["advantages"][0], expected)
+                optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+                metrics = optimize(model, optimizer, rollout, epochs=1, minibatch_size=2)
+                self.assertTrue(all(np.isfinite(value) for value in metrics.values()))
+
+    def test_structured_bridge_collection_requires_explicit_scripted_opt_in(self):
+        worlds = self.worlds()
+        pool = self.pool(1)
+        model = BridgeActorCritic(1, bridge_observation_descriptor(), 8, {"movement": 3})
+        observations = worlds.observe()
+        with self.assertRaisesRegex(ValueError, "explicit opt-in"):
+            collect(model, worlds, pool, observations, 1, torch.device("cpu"), {})
+        with self.assertRaisesRegex(ValueError, "current scalar"):
+            collect(model, worlds, pool, observations + 1, 1, torch.device("cpu"), {}, structured_bridge=True)
+        incompatible = BridgeActorCritic(1, bridge_observation_descriptor(), 8, {"movement": 2})
+        with self.assertRaisesRegex(ValueError, "model and scalar policy are incompatible"):
+            collect(incompatible, worlds, pool, observations, 1, torch.device("cpu"), {}, structured_bridge=True)
+        model.descriptor["version"] = 2
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            collect(model, worlds, pool, observations, 1, torch.device("cpu"), {}, structured_bridge=True)
+        model.descriptor = bridge_observation_descriptor()
+        with self.assertRaisesRegex(ValueError, "shape or dtype"):
+            worlds.bridge_observations(np.zeros((2, 2, 1), dtype=np.float32))
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            collect(model, worlds, pool, observations, 1, torch.device("cpu"), {}, structured_bridge=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "opponent.pt"
+            scalar_model = self.model()
+            torch.save({"format": "minecraft_sim_ppo", "version": 1,
+                        "metadata": {"schema": self.contract, "hidden_dim": 8,
+                                     "players_per_environment": 2, "learner": "opponent_pool"},
+                        "model": scalar_model.state_dict()}, path)
+            for definition in ({"type": "self_play"}, {"type": "frozen_self_play", "every_updates": 1},
+                               {"type": "checkpoint", "path": str(path)}):
+                with self.subTest(definition=definition):
+                    unsupported = OpponentPool({"opponent": definition}, self.contract, 1, "cpu", 42,
+                                               learner=scalar_model)
+                    unsupported.configure([{"id": "opponent", "weight": 1}])
+                    unsupported.reset(np.ones(1, dtype=bool))
+                    message = "opponent model descriptor differs" if definition["type"] != "checkpoint" else "scripted and self-play"
+                    with self.assertRaisesRegex(ValueError, message):
+                        collect(model, worlds, unsupported, observations, 1, torch.device("cpu"), {},
+                                structured_bridge=True)
+        pool.controllers["target"] = object()
+        with self.assertRaisesRegex(ValueError, "scripted and self-play"):
+            collect(model, worlds, pool, observations, 1, torch.device("cpu"), {}, structured_bridge=True)
+
+    def test_structured_checkpoint_rejected_by_scalar_consumers(self):
+        saved = {"format": "minecraft_sim_ppo", "version": 1,
+                 "metadata": {"schema": self.contract, "contract": self.contract,
+                              "players_per_environment": 2, "learner": "opponent_pool",
+                              "hidden_dim": 8, "bridge_observation": bridge_observation_descriptor()},
+                 "model": self.model().state_dict()}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "structured.pt"
+            torch.save(saved, path)
+            with self.assertRaisesRegex(ValueError, "Structured Bridge checkpoints"):
+                Policy(path)
+            with self.assertRaisesRegex(ValueError, "Structured Bridge checkpoints"):
+                CheckpointController(path, self.contract, 1)
+
     def setUp(self):
         torch.set_num_threads(1)
         scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
@@ -56,7 +491,7 @@ class BridgeResearchChecks(unittest.TestCase):
         self.stage = {"name": "bridge", "scenario": self.scenario,
                       "opponents": [{"id": "target", "weight": 1}], "controls": {"fixed": {}}}
         self.definitions = {"target": {"type": "scripted", "controller": "stationary_target"}}
-        self.library = str(load_library()._name)
+        self.library = str(load_library(os.environ.get("MCSIM_TEST_CPU_LIBRARY"))._name)
 
     def worlds(self, count=1, max_ticks=100):
         worlds = SampledWorlds(self.scenario, self.contract, count, "cpu", self.library, max_ticks, 42)
@@ -71,11 +506,232 @@ class BridgeResearchChecks(unittest.TestCase):
         return pool
 
     def model(self):
-        model = ActorCritic(self.contract["observation_dim"], 8, action_sizes={"movement": 3})
+        model = ActorCritic(self.contract["observation_dim"], 8,
+                            action_sizes=dict(zip(self.contract["action_names"], self.contract["action_sizes"])))
         with torch.no_grad():
             model.value_head.weight.zero_()
             model.value_head.bias.fill_(3)
         return model
+
+    def replay_inputs(self, slot=0, max_ticks=100):
+        self.stage["controls"] = {"fixed": {"movement": "forward" if slot == 0 else "backward"}}
+        worlds = self.worlds(max_ticks=max_ticks)
+        pool = self.pool(1)
+        pool.learner_slots[:] = slot
+        plan = {"name": "fixture", "seed": 42, "policy": self.contract, "opponents": self.definitions,
+                "stages": [self.stage]}
+        options = SimpleNamespace(device="cpu", library=self.library, max_ticks=max_ticks)
+        return plan, options, worlds.episode_scenario(0), pool.provenance(0)
+
+    def dashboard_replay(self, directory):
+        from simulator.training.dashboard import RunStore
+
+        root = Path(directory)
+        (root / "config.json").write_text("{}", encoding="utf-8")
+        store = RunStore(runs=[root], discover=False)
+        identity = store.list_runs()[0]["id"]
+        recordings = store.list_replays(identity)
+        self.assertEqual(len(recordings), 1)
+        return store.read_replay(identity, recordings[0]["id"])
+
+    def test_bridge_replay_complete_match_and_provenance(self):
+        for slot in (0, 1):
+            with self.subTest(slot=slot), tempfile.TemporaryDirectory() as directory:
+                self.scenario["bridge"]["match"]["persist_blocks_on_goal"] = bool(slot)
+                plan, options, scenario, provenance = self.replay_inputs(slot)
+                original = deepcopy(scenario)
+                model = self.model()
+                path = Path(export_replay(model, plan, self.stage, options, scenario, provenance,
+                                          torch.device("cpu"), 17, 4, Path(directory) / "replays"))
+                header, *frames = [json.loads(line) for line in path.read_text().splitlines()]
+                self.assertEqual((header["format"], header["version"], header["players"], header["ticks_per_second"]),
+                                 ("minecraft_sim_replay", 4, 2, 20))
+                self.assertEqual(header["bridge"], self.scenario["bridge"])
+                self.assertNotIn("experimental_bridge", header["environment"])
+                self.assertEqual(header["environment"]["players"], original["players"])
+                self.assertEqual(header["environment"]["max_ticks"], 100)
+                self.assertEqual(header["policy"], self.contract)
+                self.assertEqual(header["training"]["opponent"], provenance)
+                self.assertEqual((header["training"]["completed_rounds"], header["training"]["policy_update"]), (17, 4))
+                self.assertEqual([frame["tick"] for frame in frames], list(range(len(frames))))
+                self.assertEqual([frame["bridge"]["ticks"] for frame in frames], list(range(len(frames))))
+                self.assertEqual(frames[0]["bridge"]["terrain_edits"], [])
+                self.assertFalse(frames[0]["bridge"]["clear_overlay"])
+                self.assertEqual(sum(frame["bridge"]["scored"][slot] for frame in frames), 2)
+                self.assertTrue(any(frame["bridge"]["round_reset"] for frame in frames))
+                self.assertEqual([frame["bridge"]["clear_overlay"] for frame in frames],
+                                 [frame["bridge"]["round_reset"] and not bool(slot) for frame in frames])
+                self.assertEqual(frames[-1]["bridge"]["outcome"], f"team{slot}")
+                self.assertTrue(frames[-1]["terminated"] and frames[-1]["bridge"]["terminated"])
+                self.assertFalse(frames[-1]["truncated"] or frames[-1]["bridge"]["truncated"])
+                self.assertTrue(all(not frame.get("terminated", False) and not frame.get("truncated", False)
+                                    for frame in frames[:-1]))
+                self.assertEqual(scenario, original)
+                self.assertTrue(model.training)
+                self.assertEqual(list(path.parent.glob("*.part")), [])
+                self.assertEqual(len(self.dashboard_replay(directory)["frames"]), len(frames))
+
+    def test_bridge_replay_external_cutoff_and_match_clock_precedence(self):
+        for match_limit, expected_terminal in ((100, False), (1, True)):
+            with self.subTest(match_limit=match_limit), tempfile.TemporaryDirectory() as directory:
+                self.scenario["bridge"]["match"]["max_ticks"] = match_limit
+                plan, options, scenario, provenance = self.replay_inputs(max_ticks=1)
+                path = export_replay(self.model(), plan, self.stage, options, scenario, provenance,
+                                     torch.device("cpu"), 1, 1, directory)
+                header, initial, final = [json.loads(line) for line in Path(path).read_text().splitlines()]
+                self.assertEqual(header["environment"]["max_ticks"], 1)
+                self.assertEqual((initial["tick"], final["tick"]), (0, 1))
+                self.assertEqual((final["terminated"], final["truncated"]), (expected_terminal, not expected_terminal))
+                self.assertEqual((final["bridge"]["terminated"], final["bridge"]["truncated"]),
+                                 (expected_terminal, not expected_terminal))
+
+    def test_bridge_replay_failure_cleanup_and_unsupported_tick_rate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan, options, scenario, provenance = self.replay_inputs()
+            model = self.model()
+            with patch.object(Environment, "step", side_effect=RuntimeError("step failed")):
+                with self.assertRaisesRegex(RuntimeError, "step failed"):
+                    export_replay(model, plan, self.stage, options, scenario, provenance,
+                                  torch.device("cpu"), 1, 1, directory)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            self.assertTrue(model.training)
+            plan["policy"] = {**plan["policy"], "ticks_per_action": 2}
+            with self.assertRaisesRegex(ValueError, "ticks_per_action 1"):
+                export_replay(model, plan, self.stage, options, scenario, provenance,
+                              torch.device("cpu"), 1, 1, directory)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            plan["policy"] = self.contract
+            options.max_ticks = 100001
+            with self.assertRaisesRegex(ValueError, "max_ticks <= 100000"):
+                export_replay(model, plan, self.stage, options, scenario, provenance,
+                              torch.device("cpu"), 1, 1, directory)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            scenario["experimental_bridge"]["void_y"] = -3
+            with self.assertRaisesRegex(ValueError, "differs from the stage"):
+                export_replay(model, plan, self.stage, options, scenario, provenance,
+                              torch.device("cpu"), 1, 1, directory)
+
+    def test_bridge_replay_size_limit_removes_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan, options, scenario, provenance = self.replay_inputs()
+            model = self.model()
+            dumps = json.dumps
+
+            def oversized_frame(value, *args, **kwargs):
+                if isinstance(value, dict) and "actors" in value:
+                    return '"' + 'x' * (64 * 1024 * 1024) + '"'
+                return dumps(value, *args, **kwargs)
+
+            with patch("simulator.training.research.json.dumps", side_effect=oversized_frame):
+                with self.assertRaisesRegex(RuntimeError, "64 MiB"):
+                    export_replay(model, plan, self.stage, options, scenario, provenance,
+                                  torch.device("cpu"), 1, 1, directory)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            self.assertTrue(model.training)
+
+    def test_bridge_replay_preserves_native_terrain_edits(self):
+        scene = self.scenario["arenas"][0]["environment"]
+        scene["blocks"].append({"from": [0, 2, 1], "to": [0, 2, 1], "block": "minecraft:stone"})
+        scene["players"][1]["position"][0] = -2.5
+        for player in scene["players"]:
+            player["velocity"][1] = -0.0784000015258789
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air", "minecraft:air"],
+                                 "selected": 1, "arrows": 0, "offhand": "minecraft:air"}
+        self.contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "arena.ray_world_0"}],
+            "actions": [{"name": "weapon", "values": [0, 1, 2]},
+                        {"name": "use_item", "values": [False, True]},
+                        {"name": "attack", "values": [False, True]}]})
+        kit = {"slots": ["sword", "blocks", "pickaxe"] + ["empty"] * 6, "blocks": 4, "golden_apples": 0}
+        self.scenario["bridge"].update(kits=[kit, kit], building={
+            "zones": [{"min": [-3, 0, -3], "max": [4, 4, 4]}], "block_range": 4.5,
+            "entity_range": 3.0, "hardness": 1.0, "mining_speed": 15.0, "correct_tool": True})
+        with tempfile.TemporaryDirectory() as directory:
+            worlds = self.worlds(max_ticks=2)
+            pool = self.pool(1)
+            pool.learner_slots[:] = 0
+            self.stage["controls"] = {"fixed": {"weapon": 1, "use_item": True, "attack": False}}
+            plan = {"name": "fixture", "seed": 42, "policy": self.contract, "opponents": self.definitions,
+                    "stages": [self.stage]}
+            options = SimpleNamespace(device="cpu", library=self.library, max_ticks=2)
+            path = export_replay(self.model(), plan, self.stage, options, worlds.episode_scenario(0),
+                                 pool.provenance(0), torch.device("cpu"), 1, 1, Path(directory) / "replays")
+            _, initial, first, final = [json.loads(line) for line in Path(path).read_text().splitlines()]
+            self.assertEqual(initial["bridge"]["terrain_edits"], [])
+            self.assertTrue(first["bridge"]["placed"][0])
+            self.assertEqual(first["bridge"]["terrain_edits"],
+                             [{"player": 0, "action": "place", "position": [0, 2, 0]}])
+            self.assertEqual(final["bridge"]["terrain_edits"], [])
+            self.assertTrue(final["truncated"])
+            self.assertEqual(self.dashboard_replay(directory)["frames"][1]["bridge"]["terrain_edits"],
+                             first["bridge"]["terrain_edits"])
+
+    def test_duel_replay_remains_version_three(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan, options, scenario, provenance = self.replay_inputs(max_ticks=2)
+            self.stage["scenario"] = {name: value for name, value in self.scenario.items() if name != "bridge"}
+            scenario.pop("experimental_bridge")
+            path = export_replay(self.model(), plan, self.stage, options, scenario, provenance,
+                                 torch.device("cpu"), 1, 1, directory)
+            header, *frames = [json.loads(line) for line in Path(path).read_text().splitlines()]
+            self.assertEqual(header["version"], 3)
+            self.assertNotIn("bridge", header)
+            self.assertTrue(all("bridge" not in frame for frame in frames))
+            self.assertTrue(frames[-1]["truncated"])
+
+    def test_bridge_periodic_and_dashboard_requests_export(self):
+        from simulator.training.replay_requests import create_request, read_request
+        from simulator.training.research import collect as collect_training
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scene = self.scenario["arenas"][0]["environment"]
+            arena = {"format": "minecraft_sim_arena", "version": 1, "minecraft": "26.3", "name": "fixture",
+                     "rules": {"simulate_food": False, "natural_regeneration": False},
+                     "bounds": scene["bounds"], "blocks": scene["blocks"]}
+            bridge = deepcopy(self.scenario["bridge"])
+            bridge["match"]["max_ticks"] = 2
+            environment = {"format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+                           "name": "fixture", "arena": "arena.json", "players": {"overrides": scene["players"]},
+                           "task": {"max_ticks": 3, "rewards": {}}, "bridge": bridge}
+            plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "fixture", "seed": 42,
+                    "policy": "policy.json", "environment": "environment.json", "opponents": self.definitions,
+                    "mixtures": {"target": [{"id": "target", "weight": 1}]},
+                    "stages": [{"name": "bridge", "opponents": "target", "advance": {"updates": 1}}]}
+            for name, value in (("arena", arena), ("environment", environment),
+                                ("policy", self.contract), ("plan", plan)):
+                (root / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
+            for mode in ("updates", "episodes", "dashboard"):
+                with self.subTest(mode=mode):
+                    output = root / mode
+                    flags = ["--plan", str(root / "plan.json"), "--library", self.library, "--envs", "1",
+                             "--hidden-dim", "8", "--rollout-steps", "2", "--epochs", "1", "--minibatch-size", "2",
+                             "--updates", "1", "--threads", "1", "--output", str(output)]
+
+                    def collect_then_request(*args, **kwargs):
+                        result = collect_training(*args, **kwargs)
+                        create_request(output)
+                        return result
+
+                    with contextlib.ExitStack() as stack:
+                        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                        if mode == "dashboard":
+                            stack.enter_context(patch("simulator.training.research.collect", side_effect=collect_then_request))
+                        else:
+                            flags.extend(["--replay-every-updates" if mode == "updates" else "--replay-every", "1"])
+                        self.assertEqual(main(flags), 0)
+                    recordings = list((output / "replays").glob("*.jsonl"))
+                    self.assertEqual(len(recordings), 1)
+                    header, *frames = [json.loads(line) for line in recordings[0].read_text().splitlines()]
+                    self.assertEqual(header["version"], 4)
+                    self.assertEqual(header["bridge"], bridge)
+                    self.assertTrue(frames[-1]["terminated"])
+                    self.assertTrue(json.loads((output / "config.json").read_text())["options"]["dashboard_replay_requests"])
+                    if mode == "dashboard":
+                        request = read_request(output)
+                        self.assertEqual(request["status"], "completed")
+                        self.assertEqual(request["replay"], recordings[0].name)
 
     def test_scoring_outcomes_rewards_and_selective_reset(self):
         original = deepcopy(self.scenario)
@@ -157,13 +813,556 @@ class BridgeResearchChecks(unittest.TestCase):
                 metrics = rollout["episode_metrics"]
                 self.assertEqual(metrics["training_draw_rate" if terminal else "training_timeout_rate"], 1)
 
+    def evaluation_inputs(self, episodes=4, worlds=3, max_ticks=100):
+        plan = {"policy": self.contract, "opponents": self.definitions}
+        suite = {**self.stage, "episodes": episodes, "worlds": worlds, "seed": 1729}
+        options = SimpleNamespace(device="cpu", library=self.library, max_ticks=max_ticks)
+        return plan, suite, options
+
+    def test_bridge_evaluation_complete_matches_both_seats_and_isolated_seed(self):
+        class ScoringPolicy(torch.nn.Module):
+            def forward(self, observations):
+                direction = observations[:, 0]
+                logits = torch.stack((torch.full_like(direction, -1000),
+                                      torch.where(direction > 0, 1000, -1000),
+                                      torch.where(direction < 0, 1000, -1000)), dim=1)
+                return {"movement": logits}, torch.zeros_like(direction)
+
+        final_states = []
+
+        class ObservedWorlds(SampledWorlds):
+            def step(self, actions):
+                result = super().step(actions)
+                self.final_observations = result[0].copy()
+                self.finished_mask = result[2] | result[3]
+                return result
+
+            def bridge_states(self):
+                states = super().bridge_states()
+                np.testing.assert_array_equal(self.observe()[self.finished_mask],
+                                              self.final_observations[self.finished_mask])
+                final_states.extend(deepcopy(states[world]) for world in np.flatnonzero(self.finished_mask))
+                return states
+
+        plan, suite, options = self.evaluation_inputs(episodes=5, worlds=3)
+        model = ScoringPolicy()
+        training_pool = self.pool(3)
+        before = deepcopy(training_pool.state_dict())
+        assignments, slots = training_pool.assignments.copy(), training_pool.learner_slots.copy()
+        rng = torch.random.get_rng_state().clone()
+        with patch("simulator.training.research.SampledWorlds", ObservedWorlds), \
+                patch("simulator.training.research._lost", side_effect=AssertionError("duel loss")), \
+                patch.object(SampledWorlds, "step_behavior_events", side_effect=AssertionError("duel behavior")):
+            first = evaluate(model, plan, suite, options, torch.device("cpu"), {}, training_pool)
+            second = evaluate(model, plan, suite, options, torch.device("cpu"), {}, training_pool)
+        self.assertEqual(first, second)
+        self.assertEqual(training_pool.state_dict(), before)
+        np.testing.assert_array_equal(training_pool.assignments, assignments)
+        np.testing.assert_array_equal(training_pool.learner_slots, slots)
+        torch.testing.assert_close(torch.random.get_rng_state(), rng)
+        self.assertTrue(model.training)
+        self.assertEqual((first["wins"], first["losses"], first["draws"], first["truncations"]), (5, 0, 0, 0))
+        self.assertEqual((first["goals_for"], first["goals_against"]), (10, 0))
+        self.assertEqual([seat["episodes"] for seat in first["seats"]], [3, 2])
+        self.assertTrue(all(state["outcome"] in ("team0", "team1") and sum(state["scores"]) == 2
+                            for state in final_states))
+        self.assertNotIn("mace_smash_rate", first)
+
+    def test_bridge_evaluation_draw_and_external_truncation(self):
+        for match_limit, external_limit, key in ((1, 100, "draws"), (100, 1, "truncations"),
+                                                  (1, 1, "draws")):
+            with self.subTest(match_limit=match_limit, external_limit=external_limit):
+                self.scenario["bridge"]["match"]["max_ticks"] = match_limit
+                plan, suite, options = self.evaluation_inputs(episodes=6, worlds=2, max_ticks=external_limit)
+                suite["controls"] = {"fixed": {"movement": "neutral"}}
+                result = evaluate(self.model(), plan, suite, options, torch.device("cpu"), {})
+                self.assertEqual(result[key], 6)
+                self.assertEqual(sum(result[name] for name in ("wins", "losses", "draws", "truncations")), 6)
+                self.assertEqual([seat["episodes"] for seat in result["seats"]], [3, 3])
+                self.assertEqual((result["goals_for"], result["goals_against"]), (0, 0))
+
+    def test_structured_bridge_scripted_evaluation_and_replay(self):
+        torch.manual_seed(42)
+        self.scenario["bridge"]["match"]["max_ticks"] = 2
+        plan, suite, options = self.evaluation_inputs(episodes=4, worlds=2)
+        plan["bridge_observation"] = bridge_observation_descriptor()
+        suite["controls"] = {"fixed": {"movement": "neutral"}}
+        model = BridgeActorCritic(1, bridge_observation_descriptor(), 8, {"movement": 3})
+        worlds = self.worlds(count=2)
+        pool = self.pool(2)
+        pool.learner_slots[:] = [0, 1]
+        rollout, _, _, _ = collect(model, worlds, pool, worlds.observe(), 2,
+                       torch.device("cpu"), {"movement": 0}, structured_bridge=True)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        original = model.voxel_encoder[0].weight.detach().clone()
+        metrics = optimize(model, optimizer, rollout, epochs=1, minibatch_size=2)
+        self.assertTrue(all(np.isfinite(value) for value in metrics.values()))
+        self.assertFalse(torch.equal(original, model.voxel_encoder[0].weight))
+        result = evaluate(model, plan, suite, options, torch.device("cpu"), {})
+        self.assertEqual(result["draws"], 4)
+        self.assertEqual([seat["episodes"] for seat in result["seats"]], [2, 2])
+        with tempfile.TemporaryDirectory() as directory:
+            replay_plan, replay_options, scenario, provenance = self.replay_inputs(slot=1)
+            replay_plan["bridge_observation"] = bridge_observation_descriptor()
+            path = export_replay(model, replay_plan, self.stage, replay_options, scenario, provenance,
+                                 torch.device("cpu"), 0, 0, Path(directory) / "replays")
+            header, *frames = [json.loads(line) for line in Path(path).read_text().splitlines()]
+            self.assertEqual(header["version"], 4)
+            self.assertEqual(header["training"]["bridge_observation"], bridge_observation_descriptor())
+            self.assertEqual(header["training"]["opponent"]["learner_slot"], 1)
+            self.assertTrue(frames[-1]["terminated"])
+            self.assertEqual(len(self.dashboard_replay(directory)["frames"]), len(frames))
+        plan["opponents"]["target"] = {"type": "self_play"}
+        self.assertEqual(evaluate(model, plan, suite, options, torch.device("cpu"), {})["draws"], 4)
+
+    def test_bridge_evaluation_truncation_retains_partial_score(self):
+        self.scenario["bridge"]["match"]["goals_to_win"] = 5
+        plan, suite, options = self.evaluation_inputs(episodes=1, worlds=1, max_ticks=5)
+        suite["controls"] = {"fixed": {"movement": "forward"}}
+        result = evaluate(self.model(), plan, suite, options, torch.device("cpu"), {})
+        self.assertEqual((result["wins"], result["losses"], result["draws"], result["truncations"]), (0, 0, 0, 1))
+        self.assertEqual((result["goals_for"], result["goals_against"]), (2, 0))
+        self.assertEqual(result["reward_mean"], 4)
+
+    def test_bridge_evaluation_stochastic_policy_uses_suite_seed(self):
+        self.scenario["bridge"]["match"]["max_ticks"] = 6
+        plan, suite, options = self.evaluation_inputs(episodes=6, worlds=3)
+        model = self.model()
+        traces = []
+
+        def capture(*args, **kwargs):
+            result = resident_policy_actions(*args, **kwargs)
+            traces[-1].append(result[0].cpu().tolist())
+            return result
+
+        rng = torch.random.get_rng_state().clone()
+        with patch("simulator.training.research.resident_policy_actions", side_effect=capture):
+            for seed in (1729, 1729, 1730):
+                suite["seed"] = seed
+                traces.append([])
+                evaluate(model, plan, suite, options, torch.device("cpu"), {})
+        self.assertEqual(traces[0], traces[1])
+        self.assertNotEqual(traces[0], traces[2])
+        torch.testing.assert_close(torch.random.get_rng_state(), rng)
+
+    def test_bridge_frozen_evaluation_uses_source_snapshot(self):
+        self.scenario["bridge"]["match"]["max_ticks"] = 2
+        self.definitions["past"] = {"type": "frozen_self_play", "every_updates": 1, "deterministic": True}
+        plan, suite, options = self.evaluation_inputs(episodes=5, worlds=3)
+        suite["opponents"] = [{"id": "past", "weight": 1}]
+        model = self.model()
+        source = OpponentPool(self.definitions, self.contract, 2, "cpu", 42, learner=model)
+        source.configure(suite["opponents"], {"fixed": {"movement": "backward"}})
+        source.capture(model, 3, {"fixed": {"movement": "backward"}}, force=True)
+        frozen_weight = next(source.controllers["past"].snapshots[3][0].parameters()).detach().clone()
+        source_rng = source.controllers["past"]._generator.get_state().clone()
+        with torch.no_grad():
+            next(model.parameters()).add_(1)
+        seen = []
+        original_act = OpponentPool.act
+
+        def capture(pool, observations, actions):
+            self.assertEqual(pool.controllers["past"].latest_update, 3)
+            torch.testing.assert_close(next(pool.controllers["past"].snapshots[3][0].parameters()), frozen_weight)
+            self.assertFalse(torch.equal(frozen_weight, next(model.parameters())))
+            result = original_act(pool, observations, actions)
+            seen.append(result[np.arange(pool.count), 1 - pool.learner_slots].copy())
+            return result
+
+        with self.assertRaisesRegex(ValueError, "requires a compatible source snapshot"):
+            evaluate(model, plan, suite, options, torch.device("cpu"), {})
+        with patch.object(OpponentPool, "act", capture):
+            first = evaluate(model, plan, suite, options, torch.device("cpu"), {}, source)
+            first_actions = deepcopy(seen)
+            seen.clear()
+            second = evaluate(model, plan, suite, options, torch.device("cpu"), {}, source)
+        self.assertEqual(first, second)
+        self.assertEqual([seat["episodes"] for seat in first["seats"]], [3, 2])
+        self.assertTrue(all((actions == 2).all() for actions in first_actions))
+        for left, right in zip(first_actions, seen, strict=True):
+            np.testing.assert_array_equal(left, right)
+        torch.testing.assert_close(source.controllers["past"]._generator.get_state(), source_rng)
+        incompatible = OpponentPool({"past": {"type": "frozen_self_play", "every_updates": 2}},
+                                    self.contract, 2, "cpu", 42, learner=model)
+        with self.assertRaisesRegex(ValueError, "requires a compatible source snapshot"):
+            evaluate(model, plan, suite, options, torch.device("cpu"), {}, incompatible)
+        source.controllers["past"].snapshots.clear()
+        with self.assertRaisesRegex(ValueError, "snapshot is unavailable"):
+            evaluate(model, plan, suite, options, torch.device("cpu"), {}, source)
+
+    def test_structured_frozen_evaluation_and_replay_use_pinned_snapshot(self):
+        self.scenario["bridge"]["match"]["max_ticks"] = 2
+        self.definitions["past"] = {"type": "frozen_self_play", "every_updates": 1}
+        plan, suite, options = self.evaluation_inputs(episodes=5, worlds=3, max_ticks=3)
+        plan["bridge_observation"] = bridge_observation_descriptor()
+        suite["opponents"] = [{"id": "past", "weight": 1}]
+        model = BridgeActorCritic(1, plan["bridge_observation"], 8, {"movement": 3})
+        source = OpponentPool(self.definitions, self.contract, 3, "cpu", 42, learner=model)
+        source.configure(suite["opponents"])
+        source.capture(model, 0, {"fixed": {"movement": "forward"}}, force=True)
+        source.reset(np.ones(3, dtype=bool))
+        source.learner_slots[:] = [0, 0, 1]
+        original_weight = next(source.controllers["past"].snapshots[0][0].parameters()).detach().clone()
+        with torch.no_grad():
+            next(model.parameters()).add_(1)
+        source.capture(model, 1, {"fixed": {"movement": "backward"}})
+        source.reset(np.array([True, True, False]))
+        self.assertEqual(source.controllers["past"].snapshot_updates.tolist(), [1, 1, 0])
+        result = evaluate(model, plan, suite, options, torch.device("cpu"), {}, source)
+        self.assertEqual([seat["episodes"] for seat in result["seats"]], [3, 2])
+        self.assertEqual(result["opponents"][0]["controller"]["snapshot_update"], 1)
+        self.assertEqual(result["opponents"][0]["controller"]["fixed_actions"], {"movement": 2})
+        self.assertEqual(len(result["opponents"][0]["controller"]["snapshot_sha256"]), 64)
+        with self.assertRaisesRegex(ValueError, "compatible source snapshot"):
+            evaluate(model, plan, suite, options, torch.device("cpu"), {})
+        missing = source.controllers["past"].snapshots.pop(1)
+        with self.assertRaisesRegex(ValueError, "snapshot is unavailable"):
+            evaluate(model, plan, suite, options, torch.device("cpu"), {}, source)
+        with self.assertRaisesRegex(ValueError, "snapshot is unavailable"):
+            source.provenance(0)
+        source.controllers["past"].snapshots[1] = missing
+        source.controllers["past"].snapshots[1][0].descriptor["version"] = 2
+        with self.assertRaisesRegex(ValueError, "compatible source snapshot"):
+            evaluate(model, plan, suite, options, torch.device("cpu"), {}, source)
+        source.controllers["past"].snapshots[1][0].descriptor["version"] = 1
+        worlds = self.worlds(count=3, max_ticks=3)
+        provenance = source.provenance(2)
+        self.assertEqual(provenance["controller"]["fixed_actions"], {"movement": 1})
+        stage = {**self.stage, "opponents": suite["opponents"]}
+        plan.update(name="fixture", seed=42, stages=[stage])
+        seen = []
+        original_act = OpponentPool.act
+
+        def capture(pool, observations, actions, bridge_inputs=None):
+            controller = pool.controllers["past"]
+            torch.testing.assert_close(next(controller.snapshots[0][0].parameters()), original_weight)
+            self.assertEqual(controller.seed, provenance["controller"]["seed"])
+            if not seen:
+                stream = np.random.SeedSequence(controller.seed).spawn(3)[2]
+                expected_seed = int(stream.generate_state(1, dtype=np.uint64)[0]) % 2**63
+                expected = torch.Generator().manual_seed(expected_seed).get_state()
+                torch.testing.assert_close(controller._actor_generators[0].get_state(), expected)
+            result = original_act(pool, observations, actions, bridge_inputs)
+            seen.append(result[0, 1 - pool.learner_slots[0], 0])
+            return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = (model, plan, stage, options, worlds.episode_scenario(2), provenance,
+                         torch.device("cpu"), 0, 1, Path(directory))
+            with patch.object(OpponentPool, "act", capture):
+                path = export_replay(*arguments, opponent_pool=source)
+            header = json.loads(Path(path).read_text().splitlines()[0])
+            self.assertEqual(header["training"]["opponent"], provenance)
+            self.assertTrue(seen and all(action == 1 for action in seen))
+            for key, value, message in (("snapshot_update", 1, "assignment differs"),
+                                        ("fixed_actions", {"movement": 2}, "controls differ"),
+                                        ("seed", provenance["controller"]["seed"] + 1, "assignment differs")):
+                invalid = deepcopy(provenance)
+                invalid["controller"][key] = value
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, message):
+                    export_replay(*arguments[:5], invalid, *arguments[6:], opponent_pool=source)
+            wrong_seat = {**provenance, "learner_slot": 0}
+            with self.assertRaisesRegex(ValueError, "assignment differs"):
+                export_replay(*arguments[:5], wrong_seat, *arguments[6:], opponent_pool=source)
+            with torch.no_grad():
+                next(source.controllers["past"].snapshots[0][0].parameters()).add_(1)
+            with self.assertRaisesRegex(ValueError, "snapshot differs from provenance"):
+                export_replay(*arguments, opponent_pool=source)
+            with torch.no_grad():
+                next(source.controllers["past"].snapshots[0][0].parameters()).copy_(original_weight)
+            with self.assertRaisesRegex(ValueError, "compatible source snapshot"):
+                export_replay(*arguments)
+            source.controllers["past"].snapshots[0][0].descriptor["version"] = 2
+            with self.assertRaisesRegex(ValueError, "compatible source snapshot"):
+                export_replay(*arguments, opponent_pool=source)
+
+    def test_structured_current_evaluation_uses_suite_seed(self):
+        self.scenario["bridge"]["match"]["max_ticks"] = 3
+        self.definitions["current"] = {"type": "self_play"}
+        plan, suite, options = self.evaluation_inputs(episodes=6, worlds=3)
+        plan["bridge_observation"] = bridge_observation_descriptor()
+        suite["opponents"] = [{"id": "current", "weight": 1}]
+        model = BridgeActorCritic(1, plan["bridge_observation"], 8, {"movement": 3})
+        traces = []
+        original_act = OpponentPool.act
+
+        def capture(pool, observations, actions, bridge_inputs=None):
+            self.assertIsNotNone(bridge_inputs)
+            result = original_act(pool, observations, actions, bridge_inputs)
+            traces[-1].append(result[np.arange(pool.count), 1 - pool.learner_slots].copy())
+            return result
+
+        with patch.object(OpponentPool, "act", capture):
+            for seed in (1729, 1729, 1730):
+                suite["seed"] = seed
+                traces.append([])
+                result = evaluate(model, plan, suite, options, torch.device("cpu"), {})
+                self.assertEqual([seat["episodes"] for seat in result["seats"]], [3, 3])
+                self.assertEqual(result["opponents"][0]["controller"]["type"], "self_play")
+        self.assertTrue(all(np.array_equal(left, right) for left, right in zip(traces[0], traces[1], strict=True)))
+        self.assertTrue(any(not np.array_equal(left, right) for left, right in zip(traces[0], traces[2], strict=True)))
+        plan["bridge_observation"] = {**plan["bridge_observation"], "version": 2}
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            evaluate(model, plan, suite, options, torch.device("cpu"), {})
+
+    def test_structured_pool_routes_opponent_seats_for_mixed_worlds(self):
+        definitions = {"target": {"type": "scripted", "controller": "stationary_target"},
+                       "current": {"type": "self_play", "deterministic": True},
+                       "past": {"type": "frozen_self_play", "every_updates": 1, "deterministic": True}}
+        model = BridgeActorCritic(1, bridge_observation_descriptor(), 8, {"movement": 3})
+        pool = OpponentPool(definitions, self.contract, 5, "cpu", 73, learner=model)
+        pool.configure([{"id": name, "weight": 1} for name in definitions])
+        pool.reset(np.ones(5, dtype=bool))
+        pool.assignments[:] = [0, 1, 2, 1, 2]
+        pool.learner_slots[:] = [0, 1, 0, 0, 1]
+        scalar = np.array([[[10], [11]], [[20], [21]], [[30], [31]],
+                           [[40], [41]], [[50], [51]]], dtype=np.float32)
+        match = np.zeros((5, 2, 10), dtype=np.float32)
+        match[:, :, 4] = [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]
+        voxels = np.zeros((5, 2, 5, 9, 9), dtype=np.uint8)
+        voxels[1, 0, 0, 1, 2] = 2
+        voxels[3, 1, 4, 5, 6] = 3
+        voxels[2, 1, 1, 2, 3] = 4
+        voxels[4, 0, 3, 4, 5] = 2
+        inputs = {"scalar": scalar, "match": match, "voxels": voxels}
+        current, past, target = (pool.controllers[name] for name in ("current", "past", "target"))
+        with patch.object(current, "act", wraps=current.act) as current_act, \
+             patch.object(past, "act", wraps=past.act) as past_act, \
+             patch.object(target, "act", wraps=target.act) as target_act:
+            actions = pool.act(scalar, np.zeros((5, 1), dtype=np.int64), inputs)
+        np.testing.assert_array_equal(target_act.call_args.args[0], [[11]])
+        for called, expected_scalar, expected_blocks, cells in (
+                (current_act, [20, 41], [3, 8], [(0, 0, 1, 2, 2), (1, 4, 5, 6, 3)]),
+                (past_act, [31, 50], [6, 9], [(0, 1, 2, 3, 4), (1, 3, 4, 5, 2)])):
+            batch = called.call_args.args[0]
+            np.testing.assert_array_equal(batch["scalar"][:, 0], expected_scalar)
+            np.testing.assert_array_equal(batch["match"][:, 4], expected_blocks)
+            self.assertEqual(np.count_nonzero(batch["voxels"]), 2)
+            for row, up, right, forward, category in cells:
+                self.assertEqual(batch["voxels"][row, up, right, forward], category)
+        np.testing.assert_array_equal(actions[np.arange(5), pool.learner_slots], np.zeros((5, 1)))
+        worlds = self.worlds(count=5)
+        rollout, _, _, _ = collect(model, worlds, pool, worlds.observe(), 1,
+                        torch.device("cpu"), {}, structured_bridge=True)
+        self.assertEqual(rollout["observations"]["voxels"].shape, (1, 5, 5, 9, 9))
+
+    def test_bridge_self_play_uses_opponent_seat_observations(self):
+        observations = np.arange(64, dtype=np.float32).reshape(32, 2, 1)
+        learner_actions = np.zeros((32, 1), dtype=np.int64)
+        for definition in ({"type": "self_play", "deterministic": True},
+                           {"type": "frozen_self_play", "every_updates": 1, "deterministic": True}):
+            with self.subTest(definition=definition):
+                model = self.model()
+                pool = OpponentPool({"opponent": definition}, self.contract, 32, "cpu", 73, learner=model)
+                pool.configure([{"id": "opponent", "weight": 1}], {"fixed": {}})
+                pool.capture(model, 0, {"fixed": {}}, force=True)
+                pool.reset(np.ones(32, dtype=bool))
+                self.assertEqual(set(pool.learner_slots.tolist()), {0, 1})
+                controller = pool.controllers["opponent"]
+                with patch.object(controller, "act", wraps=controller.act) as act:
+                    result = pool.act(observations, learner_actions)
+                np.testing.assert_array_equal(act.call_args.args[0],
+                                              observations[np.arange(32), 1 - pool.learner_slots])
+                np.testing.assert_array_equal(result[np.arange(32), pool.learner_slots], learner_actions)
+
+    def test_bridge_frozen_snapshot_pinning_and_pool_resume(self):
+        definition = {"past": {"type": "frozen_self_play", "every_updates": 1, "deterministic": True}}
+        model = self.model()
+        pool = OpponentPool(definition, self.contract, 2, "cpu", 42, learner=model)
+        pool.configure([{"id": "past", "weight": 1}], {"fixed": {}})
+        pool.capture(model, 0, {"fixed": {"movement": "forward"}}, force=True)
+        pool.reset(np.ones(2, dtype=bool))
+        pool.capture(model, 1, {"fixed": {"movement": "backward"}})
+        pool.reset(np.array([True, False]))
+        self.assertEqual([pool.provenance(world)["controller"]["snapshot_update"] for world in range(2)], [1, 0])
+        observations = np.zeros((2, 2, 1), dtype=np.float32)
+        learner_actions = np.zeros((2, 1), dtype=np.int64)
+        joint = pool.act(observations, learner_actions)
+        np.testing.assert_array_equal(joint[np.arange(2), 1 - pool.learner_slots, 0], [2, 1])
+        saved = deepcopy(pool.state_dict())
+        resumed = OpponentPool(definition, self.contract, 2, "cpu", 42, learner=model)
+        resumed.configure([{"id": "past", "weight": 1}], {"fixed": {}})
+        resumed.load_state_dict(saved)
+        self.assertEqual(resumed.controllers["past"].snapshot_updates.tolist(), [1, 0])
+        for candidate in (pool, resumed):
+            candidate.reset(np.ones(2, dtype=bool))
+        np.testing.assert_array_equal(pool.learner_slots, resumed.learner_slots)
+        self.assertEqual(resumed.controllers["past"].snapshot_updates.tolist(), [1, 1])
+        np.testing.assert_array_equal(pool.act(observations, learner_actions), resumed.act(observations, learner_actions))
+
+    def test_bridge_current_self_play_rng_resume_and_seeded_evaluation(self):
+        self.scenario["bridge"]["match"]["max_ticks"] = 3
+        self.definitions.update(current={"type": "self_play"},
+                                unused={"type": "frozen_self_play", "every_updates": 1})
+        plan, suite, options = self.evaluation_inputs(episodes=6, worlds=3)
+        suite["opponents"] = [{"id": "current", "weight": 1}]
+        model = self.model()
+        first = evaluate(model, plan, suite, options, torch.device("cpu"), {})
+        second = evaluate(model, plan, suite, options, torch.device("cpu"), {})
+        self.assertEqual(first, second)
+        self.assertEqual([seat["episodes"] for seat in first["seats"]], [3, 3])
+        pool = OpponentPool(self.definitions, self.contract, 3, "cpu", 42, learner=model)
+        pool.configure(suite["opponents"], suite["controls"])
+        pool.reset(np.ones(3, dtype=bool))
+        saved = deepcopy(pool.state_dict())
+        resumed = OpponentPool(self.definitions, self.contract, 3, "cpu", 42, learner=model)
+        resumed.configure(suite["opponents"], suite["controls"])
+        resumed.load_state_dict(saved)
+        observations = np.zeros((3, 2, 1), dtype=np.float32)
+        learner_actions = np.zeros((3, 1), dtype=np.int64)
+        for candidate in (pool, resumed):
+            candidate.reset(np.ones(3, dtype=bool))
+        np.testing.assert_array_equal(pool.learner_slots, resumed.learner_slots)
+        for _ in range(5):
+            np.testing.assert_array_equal(pool.act(observations, learner_actions), resumed.act(observations, learner_actions))
+
+    def test_bridge_self_play_checkpoints_resume_and_replay(self):
+        for opponent_type in ("self_play", "frozen_self_play"):
+            with self.subTest(opponent_type=opponent_type), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                scene = self.scenario["arenas"][0]["environment"]
+                arena = {"format": "minecraft_sim_arena", "version": 1, "minecraft": "26.3", "name": "fixture",
+                         "rules": {"simulate_food": False, "natural_regeneration": False},
+                         "bounds": scene["bounds"], "blocks": scene["blocks"]}
+                bridge = deepcopy(self.scenario["bridge"])
+                bridge["match"]["max_ticks"] = 2
+                environment = {"format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+                               "name": "fixture", "arena": "arena.json", "players": {"overrides": scene["players"]},
+                               "task": {"max_ticks": 3, "rewards": {}}, "bridge": bridge}
+                definition = {"type": opponent_type, "deterministic": True}
+                if opponent_type == "frozen_self_play":
+                    definition["every_updates"] = 1
+                plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "fixture", "seed": 42,
+                        "policy": "policy.json", "environment": "environment.json", "opponents": {"opponent": definition},
+                        "mixtures": {"opponent": [{"id": "opponent", "weight": 1}]},
+                        "stages": [{"name": "bridge", "opponents": "opponent", "advance": {"updates": 2}}],
+                        "snapshots": [{"name": "initial", "at_updates": 0}, {"name": "final", "on_completion": True}],
+                        "evaluations": {"held": {"stage": "bridge", "every_updates": 1,
+                                                 "episodes": 4, "worlds": 2, "seed": 1729}}}
+                for name, value in (("arena", arena), ("environment", environment),
+                                    ("policy", self.contract), ("plan", plan)):
+                    (root / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
+                output = root / "run"
+                flags = ["--plan", str(root / "plan.json"), "--library", self.library, "--envs", "2",
+                         "--hidden-dim", "8", "--rollout-steps", "2", "--epochs", "1", "--minibatch-size", "2",
+                         "--updates", "1", "--threads", "1", "--output", str(output), "--replay-every-updates", "1"]
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(flags), 0)
+                first = torch.load(output / "latest.pt", weights_only=True)
+                initial = torch.load(output / "snapshots/initial.pt", weights_only=True)
+                self.assertEqual((initial["update"], initial["samples"]), (0, 0))
+                CheckpointController(output / "snapshots/initial.pt", self.contract, 1)
+                self.assertEqual(first["research"]["pool"]["controllers"]["opponent"]["provenance"]["type"], opponent_type)
+                if opponent_type == "frozen_self_play":
+                    for name, value in initial["model"].items():
+                        torch.testing.assert_close(first["research"]["pool"]["controllers"]["opponent"]
+                                                   ["snapshots"][0]["model"][name], value)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(["--resume", str(output / "latest.pt"), "--library", self.library,
+                                           "--updates", "1", "--threads", "1", "--output", str(output),
+                                           "--replay-every-updates", "1"]), 0)
+                final = torch.load(output / "snapshots/final.pt", weights_only=True)
+                saved = torch.load(output / "latest.pt", weights_only=True)
+                self.assertEqual((final["update"], saved["update"]), (2, 2))
+                CheckpointController(output / "snapshots/final.pt", self.contract, 1)
+                self.assertEqual(saved["research"]["resume_mode"], "fresh_episodes")
+                self.assertEqual(len(saved["research"]["bridge_episodes"]), 2)
+                self.assertEqual([json.loads(line)["evaluations"]["held"]["episodes"]
+                                  for line in (output / "metrics.jsonl").read_text().splitlines()], [4, 4])
+                for recording in (output / "replays").glob("*.jsonl"):
+                    header, *frames = [json.loads(line) for line in recording.read_text().splitlines()]
+                    self.assertEqual(header["version"], 4)
+                    self.assertEqual(header["training"]["opponent"]["controller"]["type"], opponent_type)
+                    self.assertTrue(frames[-1]["terminated"] or frames[-1]["truncated"])
+                self.assertEqual(len(list((output / "replays").glob("*.jsonl"))), 2)
+                resolved = saved["research"]["plan"]
+                stage = resolved["stages"][0]
+                model = self.model()
+                source = OpponentPool(resolved["opponents"], self.contract, 2, "cpu", 42, learner=model)
+                source.configure(stage["opponents"], stage["controls"])
+                source.load_state_dict(first["research"]["pool"])
+                options = SimpleNamespace(device="cpu", library=self.library, max_ticks=3)
+                for name, checkpoint in (("initial", initial), ("final", final)):
+                    model.load_state_dict(checkpoint["model"])
+                    provenance = source.provenance(0)
+                    if opponent_type == "frozen_self_play":
+                        provenance["controller"]["snapshot_update"] = 0
+                        with self.assertRaisesRegex(ValueError, "requires a compatible source snapshot"):
+                            export_replay(model, resolved, stage, options, checkpoint["metadata"]["scenario"], provenance,
+                                          torch.device("cpu"), 0, checkpoint["update"], root / "missing")
+                    path = export_replay(model, resolved, stage, options, checkpoint["metadata"]["scenario"], provenance,
+                                         torch.device("cpu"), 0, checkpoint["update"], root / name, source)
+                    header, *frames = [json.loads(line) for line in Path(path).read_text().splitlines()]
+                    self.assertEqual((header["version"], header["training"]["policy_update"]), (4, checkpoint["update"]))
+                    self.assertTrue(frames[-1]["terminated"] or frames[-1]["truncated"])
+
+    def test_bridge_fixed_lane_evaluation_and_training_plan(self):
+        scene = self.scenario["arenas"][0]["environment"]
+        scene["players"][0]["position"][0] = -0.5
+        scene["players"][1]["position"][0] = 1.5
+        bridge = deepcopy(self.scenario["bridge"])
+        bridge["goals"] = [{"min": [-1, 1, -2.9], "max": [2, 3, -2.4]},
+                           {"min": [-1, 1, 2.4], "max": [2, 3, 2.9]}]
+        bridge["match"].update(goals_to_win=1, max_ticks=100)
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "yaw", "values": [-2, 0, 2]}]})
+        definitions = {"lane": {"type": "scripted", "controller": "bridge_fixed_lane"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arena = {"format": "minecraft_sim_arena", "version": 1, "minecraft": "26.3", "name": "lane",
+                     "rules": {"simulate_food": False, "natural_regeneration": False},
+                     "bounds": scene["bounds"], "blocks": scene["blocks"]}
+            environment = {"format": "minecraft_sim_environment", "version": 2, "minecraft": "26.3",
+                           "name": "lane", "arena": "arena.json", "players": {"overrides": scene["players"]},
+                           "task": {"max_ticks": 100, "rewards": {}}, "bridge": bridge}
+            plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "lane", "seed": 42,
+                    "policy": "policy.json", "environment": "environment.json", "opponents": definitions,
+                    "mixtures": {"lane": [{"id": "lane", "weight": 1}]},
+                    "stages": [{"name": "bridge", "opponents": "lane", "advance": {"updates": 1},
+                                "controls": {"fixed": {"movement": "neutral", "yaw": 0}}}],
+                    "evaluations": {"held": {"stage": "bridge", "episodes": 2, "worlds": 2,
+                                             "seed": 1729, "every_updates": 1}}}
+            for name, value in (("arena", arena), ("environment", environment),
+                                ("policy", contract), ("plan", plan)):
+                (root / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
+            resolved = resolve_plan(plan, root)
+            model = ActorCritic(contract["observation_dim"], 8,
+                                action_sizes=dict(zip(contract["action_names"], contract["action_sizes"])))
+            options = SimpleNamespace(device="cpu", library=self.library, max_ticks=100)
+            result = evaluate(model, resolved, resolved["evaluations"]["held"], options, torch.device("cpu"), {})
+            self.assertEqual((result["wins"], result["losses"], result["draws"], result["truncations"]), (0, 2, 0, 0))
+            self.assertEqual((result["goals_for"], result["goals_against"]), (0, 2))
+            self.assertEqual([seat["losses"] for seat in result["seats"]], [1, 1])
+            invalid_suite = deepcopy(resolved["evaluations"]["held"])
+            invalid_suite["scenario"]["arenas"][0]["environment"]["players"][0]["yaw"] = 90
+            with self.assertRaisesRegex(ValueError, "aligned"):
+                evaluate(model, resolved, invalid_suite, options, torch.device("cpu"), {})
+            output = root / "run"
+            flags = ["--plan", str(root / "plan.json"), "--library", self.library, "--envs", "2",
+                     "--hidden-dim", "8", "--rollout-steps", "2", "--epochs", "1", "--minibatch-size", "2",
+                     "--updates", "1", "--threads", "1", "--output", str(output)]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(flags), 0)
+            metrics = json.loads((output / "metrics.jsonl").read_text().splitlines()[0])
+            self.assertEqual(metrics["evaluations"]["held"]["losses"], 2)
+            self.assertEqual(metrics["evaluation_episodes"], 2)
+
     def test_unsupported_paths_are_explicit(self):
         plan = {"stages": [self.stage], "opponents": self.definitions, "policy": self.contract}
         self.assertIn("Bridge", resident_unsupported(plan, "cuda"))
-        with self.assertRaisesRegex(ValueError, "evaluation"):
-            evaluate(None, plan, {"scenario": self.scenario}, None, None, None)
-        with self.assertRaisesRegex(ValueError, "replay"):
-            export_replay(None, plan, self.stage, None, {}, None, None, 0, 0, ".")
+        plan, suite, options = self.evaluation_inputs()
+        for definition in ({"type": "scripted", "controller": "basic_melee"},
+                           {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"speed": 1}}):
+            plan["opponents"] = {"target": definition}
+            with self.subTest(definition=definition), self.assertRaisesRegex(ValueError, "Bridge requires"):
+                evaluate(self.model(), plan, suite, options, torch.device("cpu"), {})
+        plan["opponents"] = self.definitions
+        suite["scenario"] = {**self.scenario, "spawns": {"sample": "episode"}}
+        with self.assertRaisesRegex(ValueError, "fixed scenario"):
+            evaluate(self.model(), plan, suite, options, torch.device("cpu"), {})
         sampled = deepcopy(self.scenario)
         sampled["spawns"] = {"sample": "episode"}
         with self.assertRaisesRegex(ValueError, "fixed spawns"):
@@ -632,7 +1831,7 @@ class SnapshotChecks(unittest.TestCase):
             (self.directory / f"{name}.json").write_text(json.dumps(value))
         self.path = self.directory / "plan.json"
         self.path.write_text(json.dumps(self.raw))
-        self.library = str(load_library()._name)
+        self.library = str(load_library(os.environ.get("MCSIM_TEST_CPU_LIBRARY"))._name)
         self.flags = ["--plan", str(self.path), "--library", self.library, "--envs", "4", "--hidden-dim", "8",
                       "--rollout-steps", "3", "--epochs", "1", "--minibatch-size", "8", "--save-every", "1"]
 
@@ -849,6 +2048,33 @@ class SnapshotChecks(unittest.TestCase):
             header = json.loads(source.readline())
         self.assertEqual(header["training"]["opponent"]["controller"]["snapshot_update"], 0)
         self.assertEqual(aim_one["metadata"]["controls"], {"fixed": {"attack": False}})
+
+    def test_initial_and_stage_entry_snapshots_survive_resume(self):
+        self.raw["snapshots"] = [{"name": "initial", "at_updates": 0}]
+        self.raw["stages"][0]["snapshots"] = [{"name": "aim-start", "at_updates": 0}]
+        self.raw["stages"][1]["snapshots"] = [{"name": "combat-start", "at_updates": 0}]
+        self.path.write_text(json.dumps(self.raw))
+        output = self.directory / "stage-entry"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main([*self.flags, "--updates", "2", "--output", str(output)]), 0)
+        initial = torch.load(output / "snapshots/initial.pt", weights_only=True)
+        aim = torch.load(output / "snapshots/aim-start.pt", weights_only=True)
+        combat = torch.load(output / "snapshots/combat-start.pt", weights_only=True)
+        checkpoint = torch.load(output / "latest.pt", weights_only=True)
+        self.assertEqual((initial["update"], aim["update"], combat["update"]), (0, 0, 2))
+        self.assertEqual(combat["metadata"]["snapshot"]["stage_updates"], 0)
+        self.assertEqual(combat["metadata"]["experiment"]["stage"], "combat")
+        for name, value in initial["model"].items():
+            torch.testing.assert_close(aim["model"][name], value)
+            torch.testing.assert_close(checkpoint["research"]["pool"]["controllers"]["past"]
+                                       ["snapshots"][2]["model"][name], combat["model"][name])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--resume", str(output / "latest.pt"), "--library", self.library,
+                                   "--updates", "1", "--output", str(output)]), 0)
+        resumed = torch.load(output / "snapshots/combat-start.pt", weights_only=True)
+        self.assertEqual(resumed["update"], 2)
+        for name, value in combat["model"].items():
+            torch.testing.assert_close(resumed["model"][name], value)
 
     def test_collection_profile_preserves_rollout_and_rng(self):
         raw = deepcopy(self.raw)

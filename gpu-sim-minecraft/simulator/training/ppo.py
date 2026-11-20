@@ -24,27 +24,33 @@ def compute_gae(rewards, values, next_values, terminated, truncated, gamma=0.99,
 
 def optimize(model, optimizer, rollout, epochs, minibatch_size, learner=None, timer=None):
     learner = LEARNER_DEFAULTS if learner is None else learner
-    timer = OptimizationTimer(rollout["observations"].device) if timer is None else timer
+    structured = isinstance(rollout["observations"], dict)
+    reference = rollout["observations"]["scalar"] if structured else rollout["observations"]
+    timer = OptimizationTimer(reference.device) if timer is None else timer
     with timer.phase("setup"):
-        observations = rollout["observations"].flatten(0, 1)
+        observations = ({name: value.flatten(0, 1) for name, value in rollout["observations"].items()}
+                        if structured else rollout["observations"].flatten(0, 1))
+        sample_count = reference.shape[0] * reference.shape[1]
         actions = rollout["actions"].flatten(0, 1)
         old_log_probs = rollout["log_probs"].flatten()
         old_values = rollout["values"].flatten()
         advantages = rollout["advantages"].flatten()
         returns = rollout["returns"].flatten()
         advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
-        statistics = torch.zeros(4, device=observations.device)
-    timer.count("samples", observations.shape[0])
+        statistics = torch.zeros(4, device=reference.device)
+    timer.count("samples", sample_count)
     timer.count("epochs", epochs)
     updates = 0
     for _ in range(epochs):
         with timer.phase("shuffle"):
-            permutation = torch.randperm(observations.shape[0], device=observations.device)
-        for start in range(0, observations.shape[0], minibatch_size):
+            permutation = torch.randperm(sample_count, device=reference.device)
+        for start in range(0, sample_count, minibatch_size):
             cuda_sample = updates < OPTIMIZATION_CUDA_MINIBATCH_LIMIT
             with timer.phase("policy_evaluation", cuda=cuda_sample):
                 indices = permutation[start:start + minibatch_size]
-                _, log_probs, values, entropy = policy_actions(model, observations[indices], model.action_names,
+                batch = ({name: value[indices] for name, value in observations.items()}
+                         if structured else observations[indices])
+                _, log_probs, values, entropy = policy_actions(model, batch, model.action_names,
                                                                rollout.get("fixed_actions"), actions[indices])
             with timer.phase("loss", cuda=cuda_sample):
                 ratio = (log_probs - old_log_probs[indices]).exp()

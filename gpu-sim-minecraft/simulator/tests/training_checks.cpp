@@ -66,6 +66,12 @@ void checkBridgeBatch(const char* environment, int cuda) {
     const auto descriptor = policy.dump();
     Handle batch(mcsim_create_contract(2, cuda, environment, 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     require(batch != nullptr, "create experimental Bridge batch");
+    std::vector<std::uint8_t> voxels(2 * 2 * 5 * 9 * 9, 77);
+    const auto untouched = voxels;
+    require(mcsim_bridge_local_voxels(nullptr, voxels.data(), voxels.size()) != 0
+        && mcsim_bridge_local_voxels(batch.get(), nullptr, voxels.size()) != 0
+        && mcsim_bridge_local_voxels(batch.get(), voxels.data(), voxels.size()) != 0
+        && voxels == untouched, "invalid and duel Bridge voxel requests preserve output");
     std::array<std::uint64_t, 2> counters{91, 92};
     require(mcsim_bridge_reset_episodes(batch.get(), counters.data(), counters.size()) != 0
         && counters == std::array<std::uint64_t, 2>{91, 92}, "duel batch rejects Bridge counter access");
@@ -77,6 +83,25 @@ void checkBridgeBatch(const char* environment, int cuda) {
         "Bridge refill without a bow must be rejected");
     require(!scenario(batch.get(), 0).contains("experimental_bridge"), "rejection leaves duel scenario unchanged");
     require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) == 0, "configure static Bridge batch");
+    require(mcsim_bridge_local_voxels(batch.get(), voxels.data(), voxels.size() - 1) != 0
+        && mcsim_bridge_local_voxels(batch.get(), voxels.data(), voxels.size() + 1) != 0
+        && voxels == untouched, "incorrect Bridge voxel counts preserve output");
+    require(mcsim_bridge_local_voxels(batch.get(), voxels.data(), voxels.size()) == 0,
+        "observe initial static Bridge voxels");
+    const auto initial_voxels = voxels;
+    Handle yaw_batch(mcsim_create_contract(2, cuda, environment, 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    require(yaw_batch && mcsim_configure_bridge(yaw_batch.get(), config.dump().c_str()) == 0,
+        "configure actor yaw isolation fixture");
+    auto yaw_players = scenario(yaw_batch.get(), 0)["players"];
+    yaw_players[0]["yaw"] = 90.0;
+    const std::array<uint8_t, 2> yaw_mask{1, 0};
+    std::array<float, 4> yaw_observations{};
+    require(mcsim_reset_players(yaw_batch.get(), yaw_mask.data(), json::array({yaw_players, nullptr}).dump().c_str(),
+            yaw_observations.data()) == 0
+        && mcsim_bridge_local_voxels(yaw_batch.get(), voxels.data(), voxels.size()) == 0
+        && !std::equal(voxels.begin(), voxels.begin() + 5 * 9 * 9, initial_voxels.begin())
+        && std::equal(voxels.begin() + 5 * 9 * 9, voxels.end(), initial_voxels.begin() + 5 * 9 * 9),
+        "changing one actor yaw changes only that actor's grid");
     require(scenario(batch.get(), 0)["experimental_bridge"] == config, "resolved scenario records Bridge identity");
     require(mcsim_configure_bridge(batch.get(), config.dump().c_str()) != 0, "reject repeated Bridge configuration");
     {
@@ -137,6 +162,13 @@ void checkBridgeBatch(const char* environment, int cuda) {
         const auto states = status();
         require(states[1]["scores"] == json::array({0, 0}) && states[1]["outcome"] == "ongoing",
             "other Bridge world remains independent");
+        const auto recorded = frame(batch.get(), 0);
+        auto recorded_state = recorded.at("bridge");
+        require(recorded_state.at("terrain_edits").empty() && recorded_state.at("clear_overlay") == false,
+            "static Bridge replay has no terrain changes");
+        recorded_state.erase("terrain_edits");
+        recorded_state.erase("clear_overlay");
+        require(recorded_state == states[0], "Bridge replay matches authoritative state and events");
         if (states[0]["scored"][0] == true) {
             if (!first_goal) {
                 first_goal = true;
@@ -152,16 +184,20 @@ void checkBridgeBatch(const char* environment, int cuda) {
         }
     }
     require(first_goal && match_end, "Bridge match reaches two goals");
+    require(mcsim_bridge_local_voxels(batch.get(), voxels.data(), voxels.size()) == 0
+        && std::equal(voxels.begin() + 2 * 5 * 9 * 9, voxels.end(), initial_voxels.begin() + 2 * 5 * 9 * 9),
+        "finished match retains its final player view independently of the other world");
     std::array<uint8_t, 4> losses{};
     require(mcsim_losses(batch.get(), losses.data()) == 0 && !losses[0] && losses[1],
         "Bridge match losses reflect the outcome, not the last death");
     std::array<double, 18> totals{};
     require(mcsim_step_reward_totals(batch.get(), nullptr, totals.data()) != 0,
         "Bridge cannot report duel reward totals");
-    require(mcsim_replay_frame(batch.get(), 0) == nullptr, "Bridge replay is explicitly unsupported");
     const auto other_ticks = status()[1]["ticks"];
     const std::array<uint8_t, 2> mask{1, 0};
     require(mcsim_reset(batch.get(), mask.data(), observations.data()) == 0, "selective Bridge match reset");
+    require(mcsim_bridge_local_voxels(batch.get(), voxels.data(), voxels.size()) == 0
+        && voxels == initial_voxels, "reset restores initial Bridge voxel views");
     const auto reset = status();
     require(reset[0]["scores"] == json::array({0, 0}) && reset[0]["ticks"] == 0
         && reset[1]["ticks"] == other_ticks, "selected reset preserves the other match");
@@ -184,6 +220,8 @@ void checkBridgeBatch(const char* environment, int cuda) {
     require(!terminated[0] && truncated[0] && rewards[0] == 2.0F && cutoff_state[0]["scored"][0] == true
         && cutoff_state[0]["round_reset"] == false && std::abs(observations[0] - 0.271F) < 1e-5F,
         "external truncation retains the pre-reset goal observation");
+    require(mcsim_bridge_local_voxels(cutoff.get(), voxels.data(), voxels.size()) == 0,
+        "observe externally truncated Bridge match");
 }
 
 void checkBridgeFixedOpponentMatch(const char* environment, int cuda) {
@@ -504,10 +542,12 @@ void checkBridgeBuilding(const char* environment, int cuda, bool budget_only = f
     Handle combat(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), combat_descriptor.c_str()), mcsim_destroy);
     Handle persistent(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     Handle clearing(mcsim_create_contract(2, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
+    Handle cutoff(mcsim_create_contract(2, cuda, path.c_str(), 1, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     Handle replacement(mcsim_create_contract(3, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     Handle reference(mcsim_create_contract(3, cuda, path.c_str(), 100, 91, weights.data(), descriptor.c_str()), mcsim_destroy);
     std::filesystem::remove(path);
     require(batch != nullptr && movement != nullptr && combat != nullptr && persistent != nullptr && clearing != nullptr
+        && cutoff != nullptr
         && replacement != nullptr && reference != nullptr,
         "create Bridge building training batches");
     const json kit{{"slots", {"sword", "blocks", "pickaxe"}}, {"blocks", 4}, {"golden_apples", 0}};
@@ -593,6 +633,14 @@ void checkBridgeBuilding(const char* environment, int cuda, bool budget_only = f
         require(events[0]["placed"][0] == true && events[0]["scored"][0] == true
             && events[0]["round_reset"] == true && !terminated[0] && !truncated[0],
             "a nonwinning goal follows the placement on the same tick");
+        const auto goal_frame = frame(goal_batch.get(), 0).at("bridge");
+        require(goal_frame.at("terrain_edits") == json::array({
+            {{"player", 0}, {"action", "place"}, {"position", {0, 2, 0}}}})
+            && goal_frame.at("clear_overlay") == !persist,
+            "goal frame records placement before the configured terrain reset");
+        require(frame(goal_batch.get(), 1).at("bridge").at("terrain_edits").empty()
+            && frame(goal_batch.get(), 1).at("bridge").at("clear_overlay") == false,
+            "goal frame leaves the other world's terrain unchanged");
         const float expected = persist ? 0.03F : 0.05F;
         require(std::abs(observations[0] - expected) < 1E-6F && std::abs(observations[2] - 0.05F) < 1E-6F,
             "goal reset applies the configured terrain policy only to its world");
@@ -603,6 +651,158 @@ void checkBridgeBuilding(const char* environment, int cuda, bool budget_only = f
     };
     check_goal_reset(persistent, true);
     check_goal_reset(clearing, false);
+    {
+        auto cutoff_config = config;
+        cutoff_config["match"]["persist_blocks_on_goal"] = false;
+        require(mcsim_configure_bridge(cutoff.get(), cutoff_config.dump().c_str()) == 0,
+            "configure Bridge external cutoff");
+        auto players = scenario(cutoff.get(), 0)["players"];
+        players[0]["velocity"][2] = 0.2;
+        const auto definitions = json::array({players, nullptr}).dump();
+        const std::array<uint8_t, 2> first{1, 0};
+        std::array<float, 4> observations{}, rewards{};
+        std::array<uint8_t, 2> terminated{}, truncated{};
+        const std::array<int32_t, 12> actions{1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        require(mcsim_reset_players(cutoff.get(), first.data(), definitions.c_str(), observations.data()) == 0
+            && mcsim_step(cutoff.get(), actions.data(), observations.data(), rewards.data(),
+                          terminated.data(), truncated.data()) == 0,
+            "step a scoring placement at the external cutoff");
+        const auto recorded = frame(cutoff.get(), 0).at("bridge");
+        if (!(truncated[0] && !terminated[0] && recorded.at("scored")[0] == true
+            && recorded.at("round_reset") == false && recorded.at("clear_overlay") == false
+            && recorded.at("terrain_edits") == json::array({
+                {{"player", 0}, {"action", "place"}, {"position", {0, 2, 0}}}})
+            && std::abs(observations[0] - 0.026F) < 1E-6F)) {
+            throw std::runtime_error("truncated goal frame: " + recorded.dump() + " / terminated="
+                + std::to_string(terminated[0]) + ", truncated=" + std::to_string(truncated[0])
+                + ", observation=" + std::to_string(observations[0]));
+        }
+        std::vector<std::uint8_t> voxels(2 * 2 * 5 * 9 * 9);
+        const auto placed_index = (3 * 9 + 4) * 9 + 6;
+        require(mcsim_bridge_local_voxels(cutoff.get(), voxels.data(), voxels.size()) == 0
+            && voxels[placed_index] == 2, "truncated Bridge grid retains final placed block");
+        require(mcsim_reset(cutoff.get(), first.data(), observations.data()) == 0
+            && mcsim_bridge_local_voxels(cutoff.get(), voxels.data(), voxels.size()) == 0
+            && voxels[placed_index] == 0, "full reset removes the final placed block from the grid");
+        cutoff_config["match"]["goals_to_win"] = 1;
+        require(mcsim_configure_bridge(reference.get(), cutoff_config.dump().c_str()) == 0,
+            "configure terminal placement fixture");
+        auto terminal_players = scenario(reference.get(), 0)["players"];
+        terminal_players[0]["velocity"][2] = 0.2;
+        const auto terminal_definitions = json::array({terminal_players, nullptr, nullptr}).dump();
+        const std::array<uint8_t, 3> terminal_mask{1, 0, 0};
+        std::array<int32_t, 18> terminal_actions{1, 1, 0};
+        std::array<float, 6> terminal_observations{}, terminal_rewards{};
+        std::array<uint8_t, 3> terminal_done{}, terminal_cutoff{};
+        std::vector<std::uint8_t> terminal_voxels(3 * 2 * 5 * 9 * 9);
+        require(mcsim_reset_players(reference.get(), terminal_mask.data(), terminal_definitions.c_str(), terminal_observations.data()) == 0
+            && mcsim_step(reference.get(), terminal_actions.data(), terminal_observations.data(), terminal_rewards.data(),
+                          terminal_done.data(), terminal_cutoff.data()) == 0
+            && terminal_done[0] && !terminal_cutoff[0]
+            && mcsim_bridge_local_voxels(reference.get(), terminal_voxels.data(), terminal_voxels.size()) == 0
+            && terminal_voxels[placed_index] == 2, "terminal Bridge grid retains final placed block");
+    }
+    {
+        auto paired_definition = definition;
+        paired_definition["blocks"].push_back({{"from", {-3, 2, -1}}, {"to", {-3, 2, -1}},
+                                                {"block", "minecraft:stone"}});
+        const std::string paired_path = cuda ? "training-bridge-paired-cuda.json" : "training-bridge-paired-cpu.json";
+        {
+            std::ofstream output(paired_path);
+            require(static_cast<bool>(output), "open paired Bridge building scene");
+            output << paired_definition;
+        }
+        Handle paired(mcsim_create_contract(2, cuda, paired_path.c_str(), 100, 91, weights.data(),
+                                            descriptor.c_str()), mcsim_destroy);
+        Handle mixed(mcsim_create_contract(2, cuda, paired_path.c_str(), 100, 91, weights.data(),
+                                           descriptor.c_str()), mcsim_destroy);
+        std::filesystem::remove(paired_path);
+        require(paired != nullptr && mixed != nullptr
+            && mcsim_configure_bridge(paired.get(), config.dump().c_str()) == 0,
+            "configure paired Bridge building scene");
+        std::vector<std::uint8_t> voxels(2 * 2 * 5 * 9 * 9);
+        const auto voxel = [&](int world, int player, int up, int right, int forward) -> std::uint8_t {
+            return voxels[((((world * 2 + player) * 5 + up) * 9 + right) * 9 + forward)];
+        };
+        require(mcsim_bridge_local_voxels(paired.get(), voxels.data(), voxels.size()) == 0
+            && voxel(0, 0, 3, 4, 6) == 0 && voxel(0, 1, 3, 1, 5) == 0
+            && voxel(0, 0, 1, 4, 4) == 1 && voxel(0, 0, 2, 0, 4) == 4,
+            "initial Bridge grids include air, protected base and outside boundary");
+        std::array<int32_t, 12> actions{1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0};
+        std::array<float, 4> observations{}, rewards{};
+        std::array<uint8_t, 2> terminated{}, truncated{};
+        const auto step = [&] {
+            require(mcsim_step(paired.get(), actions.data(), observations.data(), rewards.data(),
+                               terminated.data(), truncated.data()) == 0, "step paired Bridge building scene");
+        };
+        step();
+        const auto state = json::parse(mcsim_bridge_state(paired.get()));
+        const auto placed_frame = frame(paired.get(), 0).at("bridge");
+        require(state[0]["placed"] == json::array({true, true})
+            && placed_frame.at("terrain_edits") == json::array({
+                {{"player", 0}, {"action", "place"}, {"position", {0, 2, 0}}},
+                {{"player", 1}, {"action", "place"}, {"position", {-3, 2, 0}}}})
+            && std::abs(observations[0] - 0.03F) < 1E-6F,
+            "paired replay preserves player order and ownership for placements");
+        require(mcsim_bridge_local_voxels(paired.get(), voxels.data(), voxels.size()) == 0
+            && voxel(0, 0, 3, 4, 6) == 2 && voxel(0, 1, 3, 1, 5) == 3
+            && voxel(0, 0, 3, 1, 6) == 3 && voxel(0, 1, 3, 4, 5) == 2
+            && voxel(1, 0, 3, 4, 6) == 2 && voxel(1, 1, 3, 4, 5) == 0,
+            "both actors see their own and opposing blocks in independent world overlays");
+        const auto kits0 = json::parse(mcsim_bridge_kits(paired.get(), 0));
+        const auto kits1 = json::parse(mcsim_bridge_kits(paired.get(), 1));
+        require(kits0[0]["blocks"] == 3 && kits1[0]["blocks"] == 3,
+            "both replayed placements consumed native inventory");
+        const std::array<uint8_t, 2> other{0, 1};
+        require(mcsim_reset(paired.get(), other.data(), observations.data()) == 0
+            && frame(paired.get(), 0).at("bridge") == placed_frame
+            && frame(paired.get(), 1).at("bridge").at("terrain_edits").empty()
+            && std::abs(observations[0] - 0.03F) < 1E-6F
+            && std::abs(observations[2] - 0.05F) < 1E-6F,
+            "selective reset clears only the selected world and its events");
+        require(mcsim_bridge_local_voxels(paired.get(), voxels.data(), voxels.size()) == 0
+            && voxel(0, 0, 3, 4, 6) == 2 && voxel(0, 1, 3, 4, 5) == 2
+            && voxel(1, 0, 3, 4, 6) == 0,
+            "selective reset preserves other world voxel ownership");
+        actions = {2, 0, 1, 2, 0, 1, 0, 0, 0, 0, 0, 0};
+        for (int tick = 0; tick < 3; ++tick) {
+            step();
+            const auto current = json::parse(mcsim_bridge_state(paired.get()));
+            const auto recorded = frame(paired.get(), 0).at("bridge");
+            const auto expected = tick == 2 ? json::array({
+                {{"player", 0}, {"action", "remove"}, {"position", {0, 2, 0}}},
+                {{"player", 1}, {"action", "remove"}, {"position", {-3, 2, 0}}}}) : json::array();
+            require(recorded.at("terrain_edits") == expected && recorded.at("clear_overlay") == false
+                && current[0]["broke"] == json::array({tick == 2, tick == 2}),
+                "paired replay captures only completed removals in player order");
+        }
+        require(std::abs(observations[0] - 0.05F) < 1E-6F,
+            "paired removals restore the native terrain observation");
+        require(mcsim_bridge_local_voxels(paired.get(), voxels.data(), voxels.size()) == 0
+            && voxel(0, 0, 3, 4, 6) == 0 && voxel(0, 1, 3, 4, 5) == 0,
+            "removed blocks disappear from both actor grids");
+        auto mixed_config = config;
+        mixed_config["building"]["mining_speed"] = 30.0;
+        require(mcsim_configure_bridge(mixed.get(), mixed_config.dump().c_str()) == 0,
+            "configure same-tick mixed terrain edits");
+        auto mixed_players = scenario(mixed.get(), 0)["players"];
+        mixed_players[1]["position"] = {2.5, 1.0, 0.5};
+        mixed_players[1]["yaw"] = 90.0;
+        const auto mixed_definitions = json::array({mixed_players, nullptr}).dump();
+        const std::array<uint8_t, 2> first{1, 0};
+        actions = {1, 1, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0};
+        require(mcsim_reset_players(mixed.get(), first.data(), mixed_definitions.c_str(), observations.data()) == 0
+            && mcsim_step(mixed.get(), actions.data(), observations.data(), rewards.data(),
+                          terminated.data(), truncated.data()) == 0, "step same-cell ordered edits");
+        const auto mixed_state = json::parse(mcsim_bridge_state(mixed.get()));
+        require(mixed_state[0]["placed"] == json::array({true, false})
+            && mixed_state[0]["broke"] == json::array({false, true})
+            && frame(mixed.get(), 0).at("bridge").at("terrain_edits") == json::array({
+                {{"player", 0}, {"action", "place"}, {"position", {0, 2, 0}}},
+                {{"player", 1}, {"action", "remove"}, {"position", {0, 2, 0}}}})
+            && std::abs(observations[0] - 0.05F) < 1E-6F,
+            "same-cell placement precedes removal in replay and native terrain");
+    }
     require(mcsim_configure_bridge(movement.get(), config.dump().c_str()) == 0, "configure Bridge collision test");
     auto moving_players = scenario(movement.get(), 0)["players"];
     moving_players[1]["position"] = {-0.8, 1.0, 0.5};
@@ -740,6 +940,10 @@ void checkBridgeBuilding(const char* environment, int cuda, bool budget_only = f
     require(status()[0]["placed"][0] == true && std::abs(observations[0] - 0.03F) < 1E-6F
         && std::abs(observations[2] - 0.05F) < 1E-6F,
         "placed terrain affects only the edited world's observation");
+    require(frame(batch.get(), 0).at("bridge").at("terrain_edits") == json::array({
+        {{"player", 0}, {"action", "place"}, {"position", {0, 2, 0}}}})
+        && frame(batch.get(), 1).at("bridge").at("terrain_edits").empty(),
+        "placement replay identifies its player, position and world");
     std::array<std::uint64_t, 2> reset_episodes{};
     require(mcsim_bridge_reset_episodes(batch.get(), reset_episodes.data(), reset_episodes.size()) == 0
         && mcsim_set_bridge_reset_episodes(batch.get(), reset_episodes.data(), reset_episodes.size()) == 0
@@ -761,6 +965,9 @@ void checkBridgeBuilding(const char* environment, int cuda, bool budget_only = f
     step();
     require(status()[0]["broke"][0] == true && std::abs(observations[0] - 0.05F) < 1E-6F,
         "broken terrain disappears from observations");
+    require(frame(batch.get(), 0).at("bridge").at("terrain_edits") == json::array({
+        {{"player", 0}, {"action", "remove"}, {"position", {0, 2, 0}}}}),
+        "removal replay identifies its player and position");
 }
 
 void checkResetPlayers(const char* environment, int cuda) {

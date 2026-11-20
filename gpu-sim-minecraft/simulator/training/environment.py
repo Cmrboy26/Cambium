@@ -288,6 +288,22 @@ class Environment:
             raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
         return json.loads(result)
 
+    def bridge_local_voxels(self):
+        """Return the current host-staged Bridge terrain as uint8 [world, player, up, right, forward]."""
+        self._require_open()
+        if self._cuda_resident_ready:
+            raise RuntimeError("Host state is unavailable after CUDA resident mode activation")
+        if self.bridge is None:
+            raise RuntimeError("Bridge is not configured")
+        function = getattr(self.native, "mcsim_bridge_local_voxels", None)
+        if function is None or self.build_info.get("bridge_local_voxels_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge local voxels")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        voxels = np.empty((self.count, 2, 5, 9, 9), dtype=np.uint8)
+        self._check(function(self._handle, voxels.ctypes.data, voxels.size))
+        return voxels
+
     def bridge_reset_episodes(self):
         """Return the next per-world Bridge reset counters as a uint64 array."""
         self._require_open()

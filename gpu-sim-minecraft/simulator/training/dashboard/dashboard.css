@@ -306,6 +306,9 @@ legend { float: left; padding: 0; margin-right: 10px; color: var(--muted); }
 .arena-scene { min-width: 0; }
 .arena-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; min-height: 48px; padding: 6px 12px; background: #fff; }
 .arena-state, .wall-control { font-size: 11px; color: var(--muted); }
+.bridge-scoreboard { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 12px; font-variant-numeric: tabular-nums; }
+.bridge-scoreboard[hidden] { display: none; }
+.bridge-scoreboard strong { color: var(--green); }
 .wall-control { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .camera-tools { display: flex; align-items: center; gap: 3px; }
 .camera-tools button { display: grid; place-items: center; width: 30px; height: 30px; min-height: 30px; padding: 5px; border-color: transparent; background: transparent; }
@@ -427,4 +430,8 @@ tbody tr:hover { background: #f3f7f4; }
     .plot { height: 215px; }
     .plot.multi-benchmark-plot { height: 400px; }
     dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 360px) {
+    .connection { margin-left: 0; gap: 6px; }
+    .camera-tools { flex-wrap: wrap; max-width: 100%; }
 }

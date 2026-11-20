@@ -52,6 +52,145 @@ def finite(value):
     return value
 
 
+def bridge_replay_base(header):
+    bridge = header.get("bridge")
+    scene = header["environment"]
+    mode = bridge.get("mode") if isinstance(bridge, dict) else None
+    if (not isinstance(mode, dict) or mode.get("name") != "bridge"
+            or type(mode.get("version")) is not int or mode["version"] != 1):
+        raise ValueError("Unsupported Bridge configuration")
+    bounds = scene.get("bounds")
+    if not isinstance(bounds, dict):
+        raise ValueError("Invalid Bridge arena bounds")
+    minimum, size = bounds.get("min"), bounds.get("size")
+    if (not isinstance(minimum, list) or not isinstance(size, list) or len(minimum) != 3 or len(size) != 3
+            or any(type(value) is not int or not -(2**31) <= value < 2**31 for value in minimum)
+            or any(type(value) is not int or value <= 0 for value in size)
+            or math.prod(size) > 262144 or any(start + extent > 2**31 - 1 for start, extent in zip(minimum, size))):
+        raise ValueError("Invalid Bridge arena bounds")
+    maximum = [start + extent for start, extent in zip(minimum, size)]
+    players = scene.get("players")
+    if not isinstance(players, list) or len(players) != 2:
+        raise ValueError("Invalid Bridge arena players")
+    for player in players:
+        if not isinstance(player, dict) or not replay_vector(player.get("position")):
+            raise ValueError("Invalid Bridge arena player")
+        loadout = player.get("loadout", {})
+        if (not isinstance(loadout, dict) or not isinstance(loadout.get("weapons", []), list)
+                or any(not isinstance(weapon, str) for weapon in loadout.get("weapons", []))
+                or not isinstance(loadout.get("armor", {}), dict)
+                or any(not isinstance(item, str) for item in loadout.get("armor", {}).values())
+                or not isinstance(loadout.get("offhand", "minecraft:air"), str)
+                or type(loadout.get("selected", 0)) is not int):
+            raise ValueError("Invalid Bridge arena loadout")
+    match = bridge.get("match")
+    if not isinstance(match, dict) or any(type(match.get(name)) is not int or not lower <= match[name] <= 1000000
+                                          for name, lower in (("goals_to_win", 1), ("max_ticks", 1), ("cage_ticks", 0))):
+        raise ValueError("Invalid Bridge match settings")
+    goals = bridge.get("goals")
+    if not isinstance(goals, list) or len(goals) != 2:
+        raise ValueError("Invalid Bridge goals")
+    for goal in goals:
+        if not isinstance(goal, dict):
+            raise ValueError("Invalid Bridge goal")
+        low, high = goal.get("min"), goal.get("max")
+        if (not isinstance(low, list) or not isinstance(high, list) or len(low) != 3 or len(high) != 3
+                or any(not replay_number(value) for value in low + high)
+                or any(not minimum[axis] <= low[axis] < high[axis] <= maximum[axis] for axis in range(3))):
+            raise ValueError("Invalid Bridge goal")
+    fills = scene.get("blocks", [])
+    if not isinstance(fills, list):
+        raise ValueError("Invalid Bridge arena blocks")
+    base = set()
+    for fill in fills:
+        if not isinstance(fill, dict) or fill.get("block") not in ("minecraft:air", "minecraft:stone"):
+            raise ValueError("Unsupported Bridge arena block")
+        start, end = fill.get("from"), fill.get("to")
+        if (not isinstance(start, list) or not isinstance(end, list) or len(start) != 3 or len(end) != 3
+                or any(type(value) is not int or not -(2**31) <= value < 2**31 for value in start + end)):
+            raise ValueError("Invalid Bridge arena block fill")
+        clipped_start = [max(start[axis], minimum[axis]) for axis in range(3)]
+        clipped_end = [min(end[axis], maximum[axis] - 1) for axis in range(3)]
+        for block_x in range(clipped_start[0], clipped_end[0] + 1):
+            for block_y in range(clipped_start[1], clipped_end[1] + 1):
+                for block_z in range(clipped_start[2], clipped_end[2] + 1):
+                    position = (block_x, block_y, block_z)
+                    if fill["block"] == "minecraft:stone":
+                        base.add(position)
+                    else:
+                        base.discard(position)
+    return minimum, maximum, base, match
+
+
+def replay_number(value):
+    return type(value) in (int, float) and -3.4e38 <= value <= 3.4e38 and math.isfinite(value)
+
+
+def replay_vector(value):
+    return isinstance(value, list) and len(value) == 3 and all(replay_number(number) for number in value)
+
+
+def validate_bridge_frame(frame, minimum, maximum, base, overlay, match, initial):
+    bridge = frame.get("bridge")
+    if not isinstance(bridge, dict):
+        raise ValueError("Missing Bridge frame")
+    scores = bridge.get("scores")
+    if (not isinstance(scores, list) or len(scores) != 2
+            or any(type(value) is not int or not 0 <= value <= match["goals_to_win"] for value in scores)
+            or type(bridge.get("ticks")) is not int or bridge["ticks"] != frame["tick"]
+            or not 0 <= bridge["ticks"] <= match["max_ticks"]
+            or type(bridge.get("cage_remaining")) is not int
+            or not 0 <= bridge["cage_remaining"] <= match["cage_ticks"]
+            or bridge.get("outcome") not in ("ongoing", "team0", "team1", "draw")):
+        raise ValueError("Invalid Bridge match state")
+    for name in ("terminated", "truncated", "round_reset", "clear_overlay"):
+        if type(bridge.get(name)) is not bool:
+            raise ValueError("Invalid Bridge event")
+    for name in ("scored", "died", "placed", "broke", "respawn"):
+        flags = bridge.get(name)
+        if not isinstance(flags, list) or len(flags) != 2 or any(type(flag) is not bool for flag in flags):
+            raise ValueError("Invalid Bridge event flags")
+    if (bridge["terminated"] and bridge["truncated"]
+            or bridge["terminated"] != (bridge["outcome"] != "ongoing")
+            or bridge["clear_overlay"] and not bridge["round_reset"]):
+        raise ValueError("Invalid Bridge outcome or reset")
+    edits = bridge.get("terrain_edits")
+    if not isinstance(edits, list) or len(edits) > 2 or (initial and (edits or bridge["clear_overlay"])):
+        raise ValueError("Invalid Bridge terrain edits")
+    previous_player = -1
+    for edit in edits:
+        if not isinstance(edit, dict):
+            raise ValueError("Invalid Bridge terrain edit")
+        player, action, position = edit.get("player"), edit.get("action"), edit.get("position")
+        if (type(player) is not int or player not in (0, 1) or player <= previous_player
+                or action not in ("place", "remove") or not isinstance(position, list) or len(position) != 3
+                or any(type(value) is not int or not minimum[axis] <= value < maximum[axis]
+                       for axis, value in enumerate(position))):
+            raise ValueError("Invalid Bridge terrain edit")
+        if not bridge["placed" if action == "place" else "broke"][player]:
+            raise ValueError("Bridge terrain edit does not match event flags")
+        previous_player = player
+        cell = tuple(position)
+        if cell in base or (action == "place" and cell in overlay) or (action == "remove" and cell not in overlay):
+            raise ValueError("Invalid Bridge terrain edit")
+        if action == "place":
+            overlay.add(cell)
+        else:
+            overlay.remove(cell)
+    if bridge["clear_overlay"]:
+        overlay.clear()
+    projectiles = frame.get("projectiles", [])
+    if not isinstance(projectiles, list):
+        raise ValueError("Invalid Bridge projectiles")
+    for projectile in projectiles:
+        if (not isinstance(projectile, dict) or type(projectile.get("id")) is not int or projectile["id"] < 0
+                or type(projectile.get("owner")) is not int or projectile["owner"] not in (0, 1)
+                or type(projectile.get("age")) is not int or projectile["age"] < 0
+                or type(projectile.get("in_ground")) is not bool
+                or not replay_vector(projectile.get("position")) or not replay_vector(projectile.get("velocity"))):
+            raise ValueError("Invalid Bridge projectile")
+
+
 def metric_metadata(record):
     result = {}
     if "training_rollout" in record:
@@ -318,27 +457,45 @@ class RunStore:
             raise ValueError("Replay must contain 1 to 100001 frames")
         header, *frames = [json.loads(line) for line in lines]
         if (not isinstance(header, dict) or header.get("format") != "minecraft_sim_replay"
-                or header.get("version") not in (2, 3) or header.get("players") != 2
+            or type(header.get("version")) is not int or header["version"] not in (2, 3, 4)
+            or type(header.get("players")) is not int or header["players"] != 2
                 or not isinstance(header.get("environment"), dict)):
             raise ValueError("Unsupported replay format")
         rate = header.get("ticks_per_second", 20)
-        if type(rate) not in (int, float) or not math.isfinite(rate) or not 0 < rate <= 1000:
+        if type(rate) not in (int, float) or not 0 < rate <= 1000 or not math.isfinite(rate):
             raise ValueError("Invalid replay tick rate")
         previous_tick = -1
+        bridge_base = bridge_replay_base(header) if header["version"] == 4 else None
+        overlay = set()
+        finished = False
         for frame in frames:
             if (not isinstance(frame, dict) or type(frame.get("tick")) is not int
                     or frame["tick"] <= previous_tick or not isinstance(frame.get("actors"), list)
                     or len(frame["actors"]) != 2):
                 raise ValueError("Invalid replay frame")
+            if bridge_base is not None:
+                if finished or frame["tick"] != previous_tick + 1:
+                    raise ValueError("Bridge replay ticks must be consecutive from zero")
+                minimum, maximum, base, match = bridge_base
+                validate_bridge_frame(frame, minimum, maximum, base, overlay, match, previous_tick == -1)
+                finished = frame["bridge"]["terminated"] or frame["bridge"]["truncated"]
             previous_tick = frame["tick"]
             actors = frame["actors"]
             for actor in actors:
                 if (not isinstance(actor, dict) or type(actor.get("id")) is not int
                         or actor["id"] not in (0, 1) or not isinstance(actor.get("position"), list)
                         or len(actor["position"]) != 3
-                        or not all(type(value) in (int, float) and math.isfinite(value)
+                        or not all(replay_number(value) if bridge_base is not None else
+                                   type(value) in (int, float) and -1.7976931348623157e308 <= value <= 1.7976931348623157e308 and math.isfinite(value)
                                    for value in [*actor["position"], actor.get("yaw"), actor.get("pitch"), actor.get("health")])):
                     raise ValueError("Invalid replay actor")
+                if bridge_base is not None and (
+                        "weapon" in actor and not isinstance(actor["weapon"], str)
+                        or "armor" in actor and (not isinstance(actor["armor"], dict)
+                                                 or any(not isinstance(item, str) for item in actor["armor"].values()))
+                        or "controls" in actor and not isinstance(actor["controls"], dict)
+                        or any(name in actor and not replay_number(actor[name]) for name in ("bow_power", "shield_cooldown"))):
+                    raise ValueError("Invalid Bridge replay actor")
             if actors[0]["id"] == actors[1]["id"]:
                 raise ValueError("Duplicate replay actor")
             actors.sort(key=lambda actor: actor["id"])
@@ -423,7 +580,7 @@ def make_server(store, port=8767):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'sha256-ZdR9UGyOZQEwPxK47ZPgqOxdhWhKh3ALmTM2YIpcodk='; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(body)
 

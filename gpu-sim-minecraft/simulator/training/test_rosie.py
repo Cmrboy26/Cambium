@@ -39,8 +39,11 @@ class SubmissionFormTests(unittest.TestCase):
         self.assertEqual(replay_default({"stages": [duel, bridge]}), "0")
         self.assertEqual(normalize(self.values(), bridge=True)[0]["REPLAY"], "0")
         for value in ("1", "0,5", "5,0"):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "Bridge.*replay"):
-                normalize({**self.values(), "REPLAY": value}, bridge=True)
+            with self.subTest(value=value):
+                settings, sweep = normalize({**self.values(), "REPLAY": value}, bridge=True)
+                self.assertEqual(settings["REPLAY"], value.split(",")[0])
+                if "," in value:
+                    self.assertEqual(sweep["values"], value.split(","))
         self.assertEqual(normalize({**self.values(), "REPLAY": "5"})[0]["REPLAY"], "5")
 
     def test_form_main_passes_resolved_replay_policy_to_form(self):
@@ -717,7 +720,7 @@ print(f"{12345 + count};test-cluster")
                 result = self.launch(local=local, line_mode=line_mode,
                                      SIM_REPLAY_EVERY="99", SIM_REPLAY_EVERY_UPDATES="99")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("Replay interval in completed duels (0 disables) [0]", result.stderr)
+                self.assertIn("Replay interval in completed episodes (0 disables) [0]", result.stderr)
                 self.assertIn("SIM_REPLAY_EVERY=0", result.stdout)
                 self.assertNotIn("SIM_REPLAY_EVERY=99", result.stdout)
                 self.assertFalse(self.log.exists())
@@ -732,7 +735,7 @@ print(f"{12345 + count};test-cluster")
         self.assertIn("SIM_REPLAY_EVERY=123", result.stdout)
         self.assertFalse(self.log.exists())
 
-    def test_bridge_rejects_replay_before_any_submission(self):
+    def test_bridge_replay_interval_and_sweep_remain_available(self):
         self.make_bridge_plan()
         for local, shared_gpu, values in ((False, False, ["5"]), (True, False, ["5"]),
                                           (False, False, ["0", "5"]), (False, True, ["0", "5"])):
@@ -741,12 +744,11 @@ print(f"{12345 + count};test-cluster")
                     answers = [""] * (10 if local else 14) + values + [""] * 2 + ["y"]
                 else:
                     answers = self.sweep_answers(14, values)
-                result = self.launch(answers, dry_run=local, local=local, shared_gpu=shared_gpu, line_mode=True)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Bridge research replay is not supported", result.stderr)
-                self.assertNotIn("sbatch --parsable", result.stdout)
+                result = self.launch(answers, dry_run=True, local=local, shared_gpu=shared_gpu, line_mode=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Shared-GPU sweep: replay_every, 2 trials" if shared_gpu
+                              else "SIM_REPLAY_EVERY=5", result.stdout)
                 self.assertFalse(self.log.exists())
-                self.assertFalse((self.root / "simulator/training/sweeps").exists())
 
     def test_explicit_replay_flags_remain_unsupported(self):
         for bridge in (False, True):

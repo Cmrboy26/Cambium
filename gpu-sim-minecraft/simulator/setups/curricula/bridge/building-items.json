@@ -1,0 +1,22 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "bridge-building-items",
+  "seed": 42,
+  "policy": "../../policies/bridge/building-items.json",
+  "environment": "../../environments/bridge/building-items.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
+  "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
+  "mixtures": {"target": [{"id": "target", "weight": 1}]},
+  "stages": [
+    {
+      "name": "building-items",
+      "opponents": "target",
+      "controls": {"fixed": {}},
+      "evaluations": {
+        "fixed-target": {"every_updates": 50, "worlds": 16, "episodes": 32, "seed": 1729}
+      },
+      "advance": {"updates": 1000}
+    }
+  ]
+}

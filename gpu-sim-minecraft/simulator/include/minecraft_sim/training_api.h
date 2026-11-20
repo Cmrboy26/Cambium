@@ -28,6 +28,10 @@ const char* mcsim_bridge_kits(void* handle, int player);
 int mcsim_bridge_reset_episodes(void* handle, uint64_t* episodes, size_t worlds);
 int mcsim_set_bridge_reset_episodes(void* handle, const uint64_t* episodes, size_t worlds);
 int mcsim_observe(void* handle, float* observations);
+/* Host-staged Bridge terrain [worlds, 2, 5, 9, 9], uint8. count is the
+   exact number of bytes; output is unchanged on error. Finished worlds retain
+   their final snapshot until reset. Caller serializes access to the batch. */
+int mcsim_bridge_local_voxels(void* handle, uint8_t* output, size_t count);
 /* Blocking diagnostic: raw 22-feature rows [worlds, 2, 22] in caller-owned
    CUDA device memory on the batch device. The caller must allocate count floats.
    stream is a cudaStream_t, or null for the default stream. This synchronizes
