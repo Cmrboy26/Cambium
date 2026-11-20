@@ -23,6 +23,7 @@ SHAPING_REWARD_NAMES = ("good_aim", "proximity", "pitch_control", "aim_hold", "e
 EVENT_REWARD_NAMES = ("wind_self_launch", "missed_attack_ready_time")
 REWARD_TYPE_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield", *EVENT_REWARD_NAMES)
 REWARD_NAMES = (*REWARD_TYPE_NAMES, *SHAPING_REWARD_NAMES)
+BRIDGE_UNSUPPORTED_REWARDS = ("won_duel", "win_speed")
 DEFAULT_REWARD_WEIGHTS = json.loads(Path(__file__).with_name("reward_weights.json").read_text(encoding="utf-8"))
 REWARD_SEMANTICS = "wind_launch_ready_time_episode_budgets_v6"
 
@@ -129,7 +130,14 @@ class Environment:
         self.count = environments
         self.device = device
         self.max_ticks = max_ticks
-        self.weights = resolve_reward_weights(definition, weights)
+        if bridge is None:
+            self.weights = resolve_reward_weights(definition, weights)
+        else:
+            zero = dict.fromkeys(REWARD_NAMES, 0.0)
+            initial = resolve_reward_weights({"reward_weights": zero}, definition.get("reward_weights", {}))
+            self.weights = resolve_reward_weights({"reward_weights": initial}, weights)
+            if any(self.weights[name] for name in BRIDGE_UNSUPPORTED_REWARDS):
+                raise ValueError("Bridge does not support duel win rewards")
         self.effective_weights = {name: value / max_ticks if name in SHAPING_REWARD_NAMES else value
                       for name, value in self.weights.items()}
         reward_weights = np.array([self.effective_weights[name] for name in REWARD_NAMES], dtype=np.float32)
@@ -232,7 +240,7 @@ class Environment:
         self.bridge = None
         if bridge is not None:
             try:
-                self.configure_bridge(bridge)
+                self.configure_bridge(bridge, weights=self.weights)
             except Exception:
                 self.close()
                 raise
@@ -248,7 +256,7 @@ class Environment:
         if owner is not None and owner != threading.get_ident():
             raise RuntimeError("CUDA observation environments must be used from their registration thread")
 
-    def configure_bridge(self, configuration):
+    def configure_bridge(self, configuration, *, weights=None):
         """Enable the experimental static-arena Bridge batch and reset all worlds."""
         self._require_open()
         if self.bridge is not None:
@@ -258,6 +266,11 @@ class Environment:
         bridge_version = self.build_info.get("bridge_host_batch_version", 0)
         if bridge_version < 1:
             raise RuntimeError("Rebuild minecraft_sim_training for experimental Bridge batches")
+        bridge_weights = resolve_reward_weights({"reward_weights": dict.fromkeys(REWARD_NAMES, 0.0)}, weights)
+        if any(bridge_weights[name] for name in BRIDGE_UNSUPPORTED_REWARDS):
+            raise ValueError("Bridge does not support duel win rewards")
+        if any(bridge_weights.values()) and self.build_info.get("bridge_shared_reward_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge shared rewards")
         if not isinstance(configuration, dict):
             raise ValueError("Bridge configuration must be an object")
         match = configuration.get("match")
@@ -277,7 +290,15 @@ class Environment:
         configure = self.native.mcsim_configure_bridge
         configure.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         configure.restype = ctypes.c_int
-        self._check(configure(self._handle, encoded))
+        previous_weights = self.weights.copy()
+        if bridge_weights != previous_weights:
+            self.set_rewards(bridge_weights)
+        try:
+            self._check(configure(self._handle, encoded))
+        except Exception:
+            if bridge_weights != previous_weights:
+                self.set_rewards(previous_weights)
+            raise
         self.bridge = json.loads(encoded)
         self.definition = json.loads(self.native.mcsim_environment(self._handle))
         self.scenario = json.loads(self.native.mcsim_scenario(self._handle))
@@ -755,6 +776,8 @@ class Environment:
 
     def step_reward_totals(self, mask=None):
         self._require_open()
+        if self.bridge is not None and self.build_info.get("bridge_shared_reward_version") != 1:
+            return None
         selected = None
         if mask is not None:
             raw = np.asarray(mask)
@@ -857,7 +880,7 @@ class Environment:
         if result is None:
             raise RuntimeError(self.native.mcsim_last_error().decode("utf-8", errors="replace"))
         scenario = json.loads(result)
-        if self.bridge is None:
+        if self.bridge is None or any(self.weights.values()):
             scenario["reward_weights"] = self.weights.copy()
         return {**scenario, "max_ticks": self.max_ticks}
 
@@ -878,9 +901,13 @@ class Environment:
 
     def set_rewards(self, weights):
         self._require_open()
+        defaults = {"reward_weights": dict.fromkeys(REWARD_NAMES, 0.0)} if self.bridge is not None else {}
+        resolved = resolve_reward_weights(defaults, weights)
         if self.bridge is not None:
-            raise RuntimeError("Bridge uses its explicitly configured task rewards")
-        resolved = resolve_reward_weights({}, weights)
+            if any(resolved[name] for name in BRIDGE_UNSUPPORTED_REWARDS):
+                raise ValueError("Bridge does not support duel win rewards")
+            if self.build_info.get("bridge_shared_reward_version") != 1:
+                raise RuntimeError("Rebuild minecraft_sim_training for Bridge shared rewards")
         if not all(np.isfinite(value) for value in resolved.values()):
             raise ValueError("Reward weights must be finite")
         effective = {name: value / self.max_ticks if name in SHAPING_REWARD_NAMES else value

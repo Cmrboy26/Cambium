@@ -15,7 +15,7 @@ import re
 from simulator.training.bridge import _intersects, _player_bounds
 from simulator.training.contract import (CAPABILITIES, RULES, resolve_scenario, validate_contract,
                                          validate_bridge_observation_descriptor)
-from simulator.training.environment import REWARD_NAMES, MAX_MAX_TICKS
+from simulator.training.environment import BRIDGE_UNSUPPORTED_REWARDS, REWARD_NAMES, MAX_MAX_TICKS
 from simulator.training.plans import (
     EpisodeSampler, _opponent_mix, _scenario, advance_rule, fields, finite, positive,
 )
@@ -286,7 +286,8 @@ def _structured_opponents(value):
                 opponent.get("type") not in ("self_play", "frozen_self_play", "checkpoint") and
                 (opponent.get("type") != "scripted"
                  or opponent.get("controller") not in ("stationary_target", "bridge_fixed_lane")
-                 or opponent.get("options", {}))) for opponent in value.values()):
+                 or (opponent.get("controller") == "stationary_target" and opponent.get("options", {}))))
+            for opponent in value.values()):
         raise ValueError("Structured Bridge supports self-play, checkpoint and scripted stationary_target or bridge_fixed_lane opponents only")
 
 
@@ -316,8 +317,8 @@ def _validate_bridge_opponents(policy, scenario, opponents):
             continue
         if (opponent.get("type") != "scripted"
                 or opponent.get("controller") not in ("stationary_target", "bridge_fixed_lane")
-                or opponent.get("options", {})):
-            raise ValueError("Bridge requires self-play or stationary_target or bridge_fixed_lane opponents without options")
+                or (opponent.get("controller") == "stationary_target" and opponent.get("options", {}))):
+            raise ValueError("Bridge requires self-play or stationary_target or bridge_fixed_lane opponents")
         if opponent["controller"] == "bridge_fixed_lane":
             from simulator.training.controllers import BridgeFixedLaneController
 
@@ -352,8 +353,8 @@ def _resolved_condition(value, policy, opponents):
         raise ValueError("Resolved rewards must explicitly replace all reward weights")
     result["rewards"] = {"mode": "replace", "weights": _rewards(reward["weights"])}
     if "bridge" in result["scenario"]:
-        if any(result["rewards"]["weights"].values()):
-            raise ValueError("Bridge requires zero duel reward weights")
+        if any(result["rewards"]["weights"][name] for name in BRIDGE_UNSUPPORTED_REWARDS):
+            raise ValueError("Bridge does not support duel win rewards")
         _validate_bridge_opponents(policy, result["scenario"], opponents)
     for arena in result["scenario"]["arenas"]:
         if arena["environment"]["reward_weights"] != result["rewards"]["weights"]:
@@ -430,10 +431,9 @@ def _resolved(value, base_dir):
         raise ValueError("Scalar Bridge requires stationary_target, bridge_fixed_lane or self-play opponents; checkpoints require structured observations")
     if "bridge_observation" in result and any("bridge" not in condition["scenario"] for condition in conditions):
         raise ValueError("Structured Bridge requires Bridge stages and evaluations only")
-    if any("bridge" in condition["scenario"] for condition in conditions):
-        bridge = stages[0]["scenario"].get("bridge")
-        if bridge is None or any(condition["scenario"].get("bridge") != bridge for condition in conditions):
-            raise ValueError("Bridge conditions must use the same fixed scenario rules in every stage and evaluation")
+    if (any("bridge" in condition["scenario"] for condition in conditions)
+            and any("bridge" not in condition["scenario"] for condition in conditions)):
+        raise ValueError("Bridge stages and evaluations cannot be mixed with duel conditions")
     result["scenario"] = deepcopy(stages[0]["scenario"])
     return result
 
@@ -507,8 +507,11 @@ class _Authoring:
         else:
             result = {key: deepcopy(base[key]) for key in RESOLVED_CONDITION_FIELDS if key in base}
         scenario = result["scenario"]
-        if "bridge" in scenario and any(key in value for key in ("spawns", "equipment", "task_override")):
-            raise ValueError("Bridge does not support sampling or task overrides")
+        changes = fields(value.get("task_override", {}), ("max_ticks", "rewards"), "task override")
+        if "bridge" in scenario and any(key in value for key in ("spawns", "equipment")):
+            raise ValueError("Bridge does not support sampling")
+        if "bridge" in scenario and "max_ticks" in changes:
+            raise ValueError("Bridge does not support max_ticks task overrides")
         for component in ("spawns", "equipment"):
             if component in value:
                 if value[component] is None:
@@ -519,7 +522,6 @@ class _Authoring:
                     scenario[component] = _patch(scenario.get(component, {}), value[component])
         concrete = scenario["arenas"][0]["environment"]
         task = {"max_ticks": concrete["max_ticks"], "rewards": concrete["reward_weights"]}
-        changes = fields(value.get("task_override", {}), ("max_ticks", "rewards"), "task override")
         task.update(changes)
         task = _task(task)
         concrete.update(max_ticks=task["max_ticks"], reward_weights=task["rewards"])

@@ -33,7 +33,11 @@
     {"feature": "target.distance_fraction"},
     {"feature": "target.aim_dot"},
     {"feature": "target.yaw_error"},
-    {"feature": "target.pitch_error"}
+    {"feature": "target.pitch_error"},
+    {"feature": "relative.velocity.x"},
+    {"feature": "relative.velocity.y"},
+    {"feature": "relative.velocity.z"},
+    {"feature": "opponent.on_ground"}
   ],
   "actions": [
     {"name": "movement", "values": ["neutral", "forward", "forward_right", "right", "backward_right",

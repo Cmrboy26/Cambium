@@ -47,9 +47,12 @@ keeps Bridge rules outside the native concrete scene. Host-staged research
 supports one fixed arena per stage, fixed spawns and loadouts, scalar observations and
 an optional local voxel/match-state model, stationary or fixed-lane scripted
 opponents and self-play, with explicit score/win/loss task rewards. Fixed-scenario
-evaluation and website replay are supported. Stages may change arenas while
-retaining the same Bridge rules. Sampling, task overrides, resident
-collection, Fabric replay and live serving are not supported. See the
+evaluation and website replay are supported. Stages and evaluations may use
+different fixed arenas and Bridge rules. Generic combat/shaping weights in
+`task.rewards` may be replaced using `task_override.rewards` in stages and
+evaluations; `won_duel` and `win_speed` are not Bridge rewards. Sampling,
+`task_override.max_ticks`, resident collection, Fabric replay and live serving
+are not supported. See the
 [Bridge training reference](../simulator/training/AGENTS.md#experimental-bridge-batches).
 
 In the [example environment](../simulator/setups/environments/example/sword-duel.json),

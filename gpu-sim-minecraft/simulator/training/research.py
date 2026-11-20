@@ -30,9 +30,12 @@ from simulator.training.timing import CollectionTimer, OptimizationTimer
 
 BRIDGE_REWARD_SEMANTICS = "bridge_score_win_loss_v1"
 BRIDGE_OBJECTIVE_REWARD_SEMANTICS = "bridge_score_opponent_objective_progress_v2"
+BRIDGE_SHARED_REWARD_SEMANTICS = "bridge_shared_rewards_v1"
 
 
-def bridge_reward_semantics(configuration):
+def bridge_reward_semantics(configuration, weights=None):
+    if weights and any(weights.values()):
+        return BRIDGE_SHARED_REWARD_SEMANTICS
     fields = configuration["task_rewards"]
     return (BRIDGE_OBJECTIVE_REWARD_SEMANTICS if set(fields) & {"opponent_score", "toward", "away"}
             else BRIDGE_REWARD_SEMANTICS)
@@ -114,8 +117,9 @@ def deployment_summary(plan, stage, stage_index):
 def research_metadata(environment, hidden_dim, learner):
     result = metadata(environment, hidden_dim, learner)
     if environment.bridge is not None:
-        result.pop("reward_weights", None)
-        result["reward_semantics"] = bridge_reward_semantics(environment.bridge)
+        if not any(environment.weights.values()):
+            result.pop("reward_weights", None)
+        result["reward_semantics"] = bridge_reward_semantics(environment.bridge, environment.weights)
     return result
 
 
@@ -272,8 +276,9 @@ class SampledWorlds:
         if self.bridge_scenario is not None:
             if scenario != self.bridge_scenario:
                 raise ValueError("Changing a Bridge scenario requires a new environment batch")
-            if any(stage.get("rewards", {}).get("weights", {}).values()):
-                raise ValueError("Bridge research does not support duel reward weights")
+            if "rewards" in stage and any(environment.weights != stage["rewards"]["weights"]
+                                          for _, environment in self.groups):
+                raise ValueError("Bridge stage rewards disagree with its environment batch")
             self.episode_metrics.reset()
             return
         if scenario.get("bridge") is not None:
@@ -371,8 +376,6 @@ class SampledWorlds:
         return observations, rewards, terminated, truncated
 
     def step_reward_totals(self, learner_slots):
-        if any(environment.bridge is not None for _, environment in self.groups):
-            return None
         totals = dict.fromkeys(REWARD_NAMES, 0.0)
         for ids, environment in self.groups:
             selected = np.zeros((len(ids), 2), dtype=bool)
@@ -1405,7 +1408,8 @@ def run(options, checkpoint=None):
         if checkpoint is not None:
             if (checkpoint.get("format") != "minecraft_sim_ppo" or checkpoint.get("version") != 1
                     or checkpoint["metadata"].get("reward_semantics") != (
-                        bridge_reward_semantics(worlds.bridge_scenario["bridge"])
+                        bridge_reward_semantics(worlds.bridge_scenario["bridge"],
+                                                worlds.bridge_scenario["arenas"][0]["environment"]["reward_weights"])
                         if worlds.bridge_scenario is not None else REWARD_SEMANTICS)
                     or checkpoint["metadata"]["hidden_dim"] != options.hidden_dim
                     or saved.get("rollout_steps") != options.rollout_steps

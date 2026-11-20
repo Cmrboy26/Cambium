@@ -582,6 +582,9 @@ struct TrainingBatch {
 #endif
         }
         const auto& task = config.at("task_rewards");
+        if (weights[2] != 0.0F || weights[8] != 0.0F) {
+            throw std::invalid_argument("Bridge does not support duel win rewards");
+        }
         if (!task.is_object() || !task.contains("score")
             || !task.contains("win") || !task.contains("loss")) {
             throw std::invalid_argument("Bridge requires explicit score, win and loss rewards");
@@ -990,8 +993,35 @@ struct TrainingBatch {
                 terminated[environment] = events.terminated;
                 truncated[environment] = !events.terminated && bridge_states[environment].ticks >= max_ticks;
                 finished[environment] = terminated[environment] || truncated[environment];
+                PlayerState combat_players[2]{players[offset], players[offset + 1]};
+                for (int player = 0; player < 2; ++player) {
+                    combat_players[player].last_attack = events.attacks[player];
+                    combat_players[player].weapon = events.attack_weapons[player];
+                }
+                app::DuelRewardState reward_state{{dealt_damage[offset] != 0, dealt_damage[offset + 1] != 0}};
+                auto shared = app::sharedRewardEvents(combat_players, worlds[environment], reward_settings, reward_state);
+                const bool timeout = truncated[environment] || (events.terminated
+                    && bridge_states[environment].ticks >= bridge_rules.max_ticks
+                    && bridge_states[environment].scores[0] < bridge_rules.goals_to_win
+                    && bridge_states[environment].scores[1] < bridge_rules.goals_to_win);
                 for (int player = 0; player < 2; ++player) {
                     const auto index = offset + player;
+                    dealt_damage[index] = reward_state.dealt_damage[player];
+                    if (events.died[player]) app::addDuelReward(shared, player, 3, reward_settings.weights[3]);
+                    if (timeout) {
+                        app::addDuelReward(shared, player, 4, reward_settings.weights[4]);
+                        if (!reward_state.dealt_damage[player]) {
+                            app::addDuelReward(shared, player, 5, reward_settings.weights[5]);
+                        }
+                    }
+                    if (!finished[environment] && !events.round_reset && !events.respawn[0] && !events.respawn[1]
+                        && std::any_of(shaping_weights.begin(), shaping_weights.end(), [](float weight) { return weight != 0.0F; })) {
+                        float shaping[5]{};
+                        app::shapingRewards(players[index], players[offset + 1 - player],
+                            players[index].ordinary_arrow_count,
+                            blocks[environment], reward_settings.shaping_weights, shaping);
+                        for (int term = 0; term < 5; ++term) app::addDuelReward(shared, player, 13 + term, shaping[term]);
+                    }
                     selected_slots[index] = players[index].selected_weapon_slot;
                     const bool restored = !finished[environment]
                         && (events.round_reset || events.respawn[0] || events.respawn[1]);
@@ -1008,7 +1038,10 @@ struct TrainingBatch {
                              events.scored[1 - player] ? double(bridge_opponent_score_reward) : 0.0,
                              progress.toward / 50.0 * bridge_toward_reward,
                              -progress.away / 50.0 * bridge_away_penalty};
-                    rewards[index] = static_cast<float>(terms[0] + terms[1] + terms[2] + terms[3]);
+                    rewards[index] = static_cast<float>(terms[0] + terms[1] + terms[2] + terms[3]) + shared.rewards[player];
+                    for (std::size_t term = 0; term < step_reward_totals[index].size(); ++term) {
+                        recordReward(index, term, shared.contributions[player][term]);
+                    }
                     const auto winner = player == 0 ? BridgeOutcome::team0 : BridgeOutcome::team1;
                     if (events.terminated && events.outcome != BridgeOutcome::draw) {
                         rewards[index] += events.outcome == winner ? bridge_win_reward : bridge_loss_reward;
@@ -1093,6 +1126,7 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"cuda_resident_step_version", 1},
         {"cuda_resident_episode_version", 1},
         {"bridge_host_batch_version", 3},
+        {"bridge_shared_reward_version", 1},
         {"bridge_local_voxels_version", 1},
         {"bridge_opponent_score_version", 1},
         {"bridge_objective_reward_version", 1},
@@ -1218,7 +1252,9 @@ MCSIM_EXPORT int mcsim_set_reward_weights(void* handle, const float* weights) {
         if (!handle || !weights) throw std::invalid_argument("Null base reward argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.requireHostState();
-        batch.requireDuelRewards();
+        if (batch.bridge_enabled && (weights[2] != 0.0F || weights[8] != 0.0F)) {
+            throw std::invalid_argument("Bridge does not support duel win rewards");
+        }
         for (std::size_t index = 0; index < batch.weights.size(); ++index) {
             if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         }
@@ -1231,7 +1267,6 @@ MCSIM_EXPORT int mcsim_set_block_reward(void* handle, float weight) {
         if (!std::isfinite(weight)) throw std::invalid_argument("Reward weights must be finite");
         auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.requireHostState();
-        batch.requireDuelRewards();
         batch.block_weight = weight;
     });
 }
@@ -1240,7 +1275,6 @@ MCSIM_EXPORT int mcsim_set_event_rewards(void* handle, const float* weights) {
         if (!handle || !weights) throw std::invalid_argument("Null event reward argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.requireHostState();
-        batch.requireDuelRewards();
         for (std::size_t index = 0; index < batch.event_weights.size(); ++index) {
             if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         }
@@ -1252,7 +1286,6 @@ MCSIM_EXPORT int mcsim_set_shaping_rewards(void* handle, const float* weights) {
         if (!handle || !weights) throw std::invalid_argument("Null shaping reward argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.requireHostState();
-        batch.requireDuelRewards();
         for (std::size_t index = 0; index < batch.shaping_weights.size(); ++index) {
             if (!std::isfinite(weights[index])) throw std::invalid_argument("Reward weights must be finite");
         }
@@ -1654,7 +1687,6 @@ MCSIM_EXPORT int mcsim_step_reward_totals(void* handle, const std::uint8_t* mask
         if (!handle || !totals) throw std::invalid_argument("Null step reward totals argument");
         const auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.requireHostState();
-        batch.requireDuelRewards();
         if (mask && std::any_of(mask, mask + batch.players.size(), [](auto value) { return value > 1; })) {
             throw std::invalid_argument("Step reward mask must contain one boolean per player");
         }

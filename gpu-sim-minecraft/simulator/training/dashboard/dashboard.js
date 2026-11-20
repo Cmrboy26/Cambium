@@ -19,6 +19,13 @@ const rewardTypes = [
     ["pitch_control", "Pitch control", "#4f6170"], ["aim_hold", "Aim hold", "#ab7256"],
     ["extreme_pitch_penalty", "Extreme pitch", "#bc596c"],
 ];
+const rewardSeries = [
+    ...rewardTypes.map(([name, label, color]) => [(row) => row.reward_types?.[name], label, color]),
+    [row => row.bridge_reward_score, "Bridge score", colors.green],
+    [row => row.bridge_reward_opponent_score, "Bridge opponent score", colors.red],
+    [row => row.bridge_reward_toward, "Bridge toward objective", colors.blue],
+    [row => row.bridge_reward_away, "Bridge away from objective", colors.amber],
+];
 const definitions = [
     ["benchmark-win-chart", [["win_rate", "Benchmark win rate", colors.green]]],
     ["benchmark-return-chart", [["evaluation_reward", "Benchmark episode return", colors.blue]]],
@@ -32,7 +39,7 @@ const definitions = [
     ["metric-chart", [["training_return", "Episode return", colors.blue]]],
     ["reward-chart", [["reward_mean", "Mean reward", colors.green]]],
     ["total-reward-chart", [["reward_total", "Total reward", colors.blue]]],
-    ["reward-types-chart", rewardTypes.map(([name, label, color]) => [(row) => row.reward_types?.[name], label, color])],
+    ["reward-types-chart", rewardSeries],
     ["policy-loss-chart", [["policy_loss", "Policy loss", colors.red]]],
     ["loss-chart", [["value_loss", "Value", colors.amber], ["loss", "Total", colors.blue]]],
     ["entropy-chart", [["entropy", "Entropy", colors.blue]]],
@@ -736,6 +743,30 @@ function updateBenchmarkDatasets(chart, id, key, derivative) {
         ? "Click a legend entry to toggle it. Right-click to solo; right-click the solo entry again to show all." : "";
 }
 
+function updateRewardDatasets(chart, visible, derivative) {
+    const visibility = chart.rewardVisibility ??= new Map();
+    const previous = new Map();
+    chart.data.datasets.forEach((dataset, index) => {
+        visibility.set(dataset.label, chart.isDatasetVisible(index));
+        previous.set(dataset.label, dataset);
+    });
+    const available = rewardSeries.map(([key, label, color]) => ({label, color, points: metricPoints(key, derivative)}))
+        .filter(({points}) => points.some(point => Number.isFinite(point.y) && point.y !== 0));
+    chart.data.datasets = available.map(({label, color, points}) => {
+        const dataset = previous.get(label) ?? chartDataset("reward-types-chart", label, color, true);
+        dataset.data = points;
+        return dataset;
+    });
+    chart.data.datasets.forEach((dataset, index) => chart.setDatasetVisibility(index, visibility.get(dataset.label) ?? true));
+    chart.options.plugins.legend.display = available.length > 0;
+    legendSolo.afterInit(chart);
+    const hasData = visible.some(row => Number.isFinite(row[chartAxis])
+        && rewardSeries.some(([key]) => Number.isFinite(key(row))));
+    const empty = element("reward-types-empty");
+    empty.hidden = available.length > 0;
+    empty.textContent = hasData ? "No non-zero reward contributions in this window." : "No per-type reward data recorded in this window.";
+}
+
 function initCharts() {
     if (typeof Chart === "undefined") throw new Error("Chart library could not be loaded.");
     Chart.defaults.font.family = '"Bahnschrift", "Segoe UI", sans-serif';
@@ -824,7 +855,8 @@ function redrawCharts() {
         const derivative = document.querySelector(`input[name="${id}-mode"]:checked`)?.value === "derivative";
         const evaluationChart = ["benchmark-win-chart", "benchmark-return-chart"].includes(id)
             || (id === "metric-chart" && metricCatalog[series[0][0]]?.scope === "evaluation");
-        if (evaluationChart) updateBenchmarkDatasets(chart, id, series[0][0], derivative);
+        if (id === "reward-types-chart") updateRewardDatasets(chart, visible, derivative);
+        else if (evaluationChart) updateBenchmarkDatasets(chart, id, series[0][0], derivative);
         else {
             if (chart.data.datasets.some(dataset => dataset.suiteName !== undefined) || chart.data.datasets.length !== series.length) {
                 chart.data.datasets = series.map(([, label, color]) => chartDataset(id, label, color, id === "reward-types-chart"));
@@ -1422,7 +1454,6 @@ function renderRecords() {
     const latest = records.at(-1) ?? {};
     renderCurriculum();
     renderPerformance();
-    element("reward-types-empty").hidden = records.some((row) => row.reward_types && Object.keys(row.reward_types).length > 0);
     element("stat-update").textContent = format(latest.update);
     element("stat-total").textContent = `${format(records.length)} updates recorded`;
     element("stat-samples").textContent = format(latest.samples);

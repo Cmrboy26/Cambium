@@ -707,11 +707,21 @@ class ExperimentChecks(unittest.TestCase):
         self.raw["opponents"]["lane"] = {"type": "scripted", "controller": "bridge_fixed_lane"}
         self.raw["mixtures"]["lane"] = [{"id": "lane", "weight": 1}]
         self.raw["stages"][0]["opponents"] = "lane"
+        self.policy["actions"].append({"name": "sneak", "values": [False, True]})
         self.write()
         resolved = self.resolve()
         self.assertEqual(resolve_plan(resolved), resolved)
         self.raw["bridge_observation"] = bridge_observation_descriptor()
         self.assertEqual(resolve_plan(self.resolve()), self.resolve())
+        self.raw["opponents"]["lane"]["options"] = {"sneak": True, "jump": True}
+        configured = self.resolve()
+        self.assertEqual(resolve_plan(configured), configured)
+        self.assertEqual(configured["opponents"]["lane"]["options"], {"sneak": True, "jump": True})
+        for options in ({"speed": 1}, {"jump": 1}, {"sneak": "true"}):
+            self.raw["opponents"]["lane"]["options"] = options
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.resolve()
+        self.raw["opponents"]["lane"].pop("options")
         self.raw.pop("bridge_observation")
         movement = next(action for action in self.policy["actions"] if action["name"] == "movement")
         movement["values"].remove("forward")
@@ -721,7 +731,7 @@ class ExperimentChecks(unittest.TestCase):
         movement["values"].append("forward")
         self.write()
         for mutate, error in (
-            (lambda value: value["opponents"]["lane"].update(options={"speed": 1}), "without options"),
+            (lambda value: value["opponents"]["lane"].update(options={"speed": 1}), "controller options"),
             (lambda value: value["policy"]["observations"].__setitem__(
                 0, {"feature": "self.yaw_fraction", "scale": 1, "clip": [-0.5, 0.5]}), "unclipped"),
             (lambda value: next(entry for entry in value["policy"]["observations"]
@@ -739,17 +749,42 @@ class ExperimentChecks(unittest.TestCase):
             with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
                 resolve_plan(changed)
 
+    def test_bridge_accepts_shared_reward_overrides(self):
+        self.bridge_setup()
+        self.environment["task"]["rewards"] = {"taking_damage": -1}
+        self.write()
+        self.raw["stages"][0]["task_override"] = {"rewards": {"doing_damage": 1, "no_damage_penalty": -2}}
+        self.raw["stages"][0]["evaluations"] = {"held": {"every_updates": 1, "episodes": 2, "seed": 1,
+            "overrides": {"task_override": {"rewards": {"missed_attack": -0.5}}}}}
+        resolved = self.resolve()
+        weights = resolved["stages"][0]["rewards"]["weights"]
+        self.assertEqual(weights["doing_damage"], 1)
+        self.assertEqual(weights["no_damage_penalty"], -2)
+        self.assertEqual(weights["taking_damage"], 0)
+        evaluation = resolved["stages"][0]["evaluations"]["held"]["rewards"]["weights"]
+        self.assertEqual(evaluation["missed_attack"], -0.5)
+        self.assertEqual(evaluation["doing_damage"], 0)
+        self.assertEqual(resolve_plan(resolved), resolved)
+        for name in ("won_duel", "win_speed"):
+            self.raw["stages"][0]["task_override"] = {"rewards": {name: 1}}
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "duel win rewards"):
+                self.resolve()
+
     def test_bridge_rejects_unsupported_conditions_and_opponents(self):
         self.bridge_setup()
         resolved = self.resolve()
-        for key, value in (("spawns", None), ("equipment", None), ("task_override", {})):
+        for key, value in (("spawns", None), ("equipment", None)):
             self.raw["stages"][0][key] = value
-            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "sampling or task overrides"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "sampling"):
                 self.resolve()
             self.raw["stages"][0].pop(key)
-        self.environment["task"]["rewards"] = {"doing_damage": 1}
+        self.raw["stages"][0]["task_override"] = {"max_ticks": 10}
+        with self.assertRaisesRegex(ValueError, "max_ticks"):
+            self.resolve()
+        self.raw["stages"][0].pop("task_override")
+        self.environment["task"]["rewards"] = {"won_duel": 1}
         self.write()
-        with self.assertRaisesRegex(ValueError, "zero duel reward"):
+        with self.assertRaisesRegex(ValueError, "duel win rewards"):
             self.resolve()
         self.environment["task"]["rewards"] = {}
         self.raw["opponents"]["fighter"] = {"type": "scripted", "controller": "basic_melee"}
@@ -788,9 +823,26 @@ class ExperimentChecks(unittest.TestCase):
         changed = deepcopy(resolved["stages"][0])
         changed["name"] = "different"
         changed["scenario"]["bridge"]["match"]["cage_ticks"] = 1
+        changed["scenario"]["bridge"]["task_rewards"]["score"] = 4
         resolved["stages"].append(changed)
-        with self.assertRaisesRegex(ValueError, "same fixed scenario"):
-            resolve_plan(resolved)
+        self.assertEqual(resolve_plan(resolved)["stages"][1]["scenario"]["bridge"], changed["scenario"]["bridge"])
+        different_evaluation = deepcopy(evaluation)
+        different_evaluation["scenario"]["bridge"]["task_rewards"]["score"] = 6
+        resolved["evaluations"]["different"] = different_evaluation
+        self.assertEqual(resolve_plan(resolved)["evaluations"]["different"]["scenario"]["bridge"]
+                 ["task_rewards"]["score"], 6)
+        invalid = deepcopy(resolved)
+        invalid["stages"][1]["scenario"]["bridge"]["match"]["cage_ticks"] = -1
+        with self.assertRaises(ValueError):
+            resolve_plan(invalid)
+        invalid = deepcopy(resolved)
+        invalid["evaluations"]["different"]["scenario"]["bridge"]["task_rewards"]["score"] = float("inf")
+        with self.assertRaises(ValueError):
+            resolve_plan(invalid)
+        mixed = deepcopy(resolved)
+        mixed["stages"][1]["scenario"].pop("bridge")
+        with self.assertRaisesRegex(ValueError, "cannot be mixed"):
+            resolve_plan(mixed)
 
     def test_bridge_authored_evaluation_roundtrip(self):
         self.bridge_setup()

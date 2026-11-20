@@ -93,6 +93,41 @@ def decoded(contract, actions, name):
 
 
 class ScriptedChecks(unittest.TestCase):
+    def test_bridge_fixed_lane_jump_and_sneak_options(self):
+        contract = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "yaw", "values": [-2, 0, 2]},
+            {"name": "jump", "values": [False, True]},
+            {"name": "sneak", "values": [False, True]},
+        ])
+        initial = observations(contract, 2, **{"self.yaw_fraction": [0, 1]})
+        for jump in (False, True):
+            for sneak in (False, True):
+                options = {"jump": jump, "sneak": sneak}
+                definition = {"type": "scripted", "controller": "bridge_fixed_lane", "options": options}
+                controller = create_controller(definition, contract, 2, seed=17)
+                clone = create_controller(definition, contract, 2, seed=17)
+                for _ in range(3):
+                    actions = controller.act(initial)
+                    self.assertEqual(decoded(contract, actions, "jump").tolist(), [jump, jump])
+                    self.assertEqual(decoded(contract, actions, "sneak").tolist(), [sneak, sneak])
+                    self.assertEqual(decoded(contract, actions, "movement").tolist(), ["forward", "forward"])
+                clone.load_state_dict(controller.state_dict())
+                np.testing.assert_array_equal(controller.act(initial), clone.act(initial))
+                self.assertEqual(controller.describe["options"], options)
+        for name in ("jump", "sneak"):
+            for value in (1, "true", None):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    create_controller({"type": "scripted", "controller": "bridge_fixed_lane",
+                                       "options": {name: value}}, contract, 1)
+            missing = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+                {"name": "movement", "values": ["neutral", "forward"]},
+                {"name": "yaw", "values": [-2, 0, 2]},
+            ])
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                create_controller({"type": "scripted", "controller": "bridge_fixed_lane",
+                                   "options": {name: True}}, missing, 1)
+
     def test_bridge_fixed_lane_seats_sub_batches_and_restore(self):
         contract = policy(observations=[
             {"feature": "self.on_ground", "encoding": "one_hot", "categories": [1, 0]},

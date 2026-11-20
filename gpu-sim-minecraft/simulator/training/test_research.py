@@ -42,6 +42,61 @@ def short_plan():
 
 
 class BridgeResearchChecks(unittest.TestCase):
+    def test_reward_only_stage_transition_and_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = json.loads((TEST_SETUPS / "environment.json").read_text())
+            environment.update(arena=str(TEST_SETUPS / "arena.json"), task={"max_ticks": 3, "rewards": {}})
+            environment.pop("spawns")
+            environment.pop("equipment")
+            environment["bridge"] = {"mode": {"name": "bridge", "version": 1},
+                "goals": [{"min": [-6, 1, -1], "max": [-5, 3, 1]},
+                          {"min": [5, 1, -1], "max": [6, 3, 1]}],
+                "void_y": 0, "match": {"goals_to_win": 2, "max_ticks": 3, "cage_ticks": 0,
+                    "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+            changed = deepcopy(environment)
+            changed["bridge"]["task_rewards"].update(score=7, opponent_score=-1, toward=0.25, away=0)
+            for name, value in (("first", environment), ("second", changed)):
+                (root / f"{name}.json").write_text(json.dumps(value))
+            plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "bridge-rewards", "seed": 42,
+                "policy": str(TEST_SETUPS / "policy.json"), "environment": "first.json",
+                "bridge_observation": bridge_observation_descriptor(2),
+                "learner": {"hidden_dim": 8, "epochs": 1, "minibatch_size": 2},
+                "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
+                "mixtures": {"target": [{"id": "target", "weight": 1}]},
+                "stages": [{"name": "first", "opponents": "target", "advance": {"updates": 1}},
+                           {"name": "second", "environment": "second.json", "opponents": "target",
+                            "task_override": {"rewards": {"pitch_control": 3, "no_damage_penalty": -2}},
+                            "advance": {"updates": 3}}]}
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            output = root / "run"
+            common = ["--device", "cpu", "--threads", "1", "--library", self.library, "--updates", "1",
+                      "--replay-every-updates", "1"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(plan_path), "--output", str(output), "--envs", "2",
+                                       "--rollout-steps", "2", *common]), 0)
+                boundary = torch.load(output / "latest.pt", weights_only=True)
+                self.assertEqual(boundary["research"]["stage_index"], 1)
+                self.assertEqual(boundary["metadata"]["scenario"]["experimental_bridge"], changed["bridge"])
+                self.assertEqual(boundary["metadata"]["reward_semantics"], "bridge_shared_rewards_v1")
+                self.assertEqual(boundary["metadata"]["reward_weights"]["pitch_control"], 3)
+                self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+            resumed = torch.load(output / "latest.pt", weights_only=True)
+            self.assertEqual(resumed["research"]["stage_index"], 1)
+            self.assertEqual(resumed["metadata"]["scenario"]["experimental_bridge"], changed["bridge"])
+            rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([row["stage"] for row in rows], ["first", "second"])
+            self.assertGreater(rows[1]["reward_types"]["pitch_control"], 0)
+            headers = [json.loads(path.read_text().splitlines()[0]) for path in (output / "replays").glob("*.jsonl")]
+            second_header = next(header for header in headers if header["training"]["stage"] == "second")
+            self.assertEqual(second_header["environment"]["reward_weights"]["pitch_control"], 3)
+            same_bridge = deepcopy(resumed["research"]["plan"]["stages"][0]["scenario"])
+            changed_weights = deepcopy(same_bridge)
+            changed_weights["arenas"][0]["environment"]["reward_weights"]["doing_damage"] = 1
+            self.assertTrue(requires_new_worlds(same_bridge, changed_weights))
+
     def test_evaluation_gated_bridge_curriculum_resume_and_completion(self):
         import simulator.training.research as research
 
@@ -66,6 +121,8 @@ class BridgeResearchChecks(unittest.TestCase):
             second_arena_path.write_text(json.dumps(second_arena))
             second_environment = deepcopy(environment)
             second_environment["arena"] = str(second_arena_path)
+            second_environment["bridge"]["task_rewards"].update(score=7, opponent_score=-1, toward=0.25, away=0)
+            second_environment["bridge"]["match"]["cage_ticks"] = 1
             second_environment_path = root / "second-environment.json"
             second_environment_path.write_text(json.dumps(second_environment))
             stages = []
@@ -83,13 +140,17 @@ class BridgeResearchChecks(unittest.TestCase):
                 "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
                 "mixtures": {"target": [{"id": "target", "weight": 1}]}, "stages": stages}
             plan["stages"][1]["environment"] = str(second_environment_path)
+            plan["stages"][0]["evaluations"]["first-b"]["overrides"] = {"environment": str(second_environment_path)}
             plan_path = root / "plan.json"
             plan_path.write_text(json.dumps(plan))
             output = root / "run"
-            common = ["--device", "cpu", "--threads", "1", "--library", self.library, "--updates", "1"]
+            common = ["--device", "cpu", "--threads", "1", "--library", self.library, "--updates", "1",
+                      "--replay-every-updates", "1"]
             rates = {17: 1.0, 19: 0.0}
+            observed_evaluations = []
 
             def evaluation(model, resolved, suite, options, device, fixed, opponent_pool=None):
+                observed_evaluations.append((suite["seed"], deepcopy(suite["scenario"]["bridge"])))
                 return {"episodes": suite["episodes"], "win_rate": rates[suite["seed"]]}
 
             with patch.object(research, "evaluate", side_effect=evaluation), contextlib.redirect_stdout(io.StringIO()):
@@ -104,6 +165,8 @@ class BridgeResearchChecks(unittest.TestCase):
                 self.assertEqual(second["research"]["stage_index"], 1)
                 self.assertEqual(second["research"]["evaluations"], {})
                 self.assertEqual(second["metadata"]["scenario"]["blocks"], second_arena["blocks"])
+                self.assertEqual(second["metadata"]["scenario"]["experimental_bridge"], second_environment["bridge"])
+                self.assertEqual(second["metadata"]["reward_semantics"], "bridge_score_opponent_objective_progress_v2")
                 self.assertTrue((output / "snapshots/first.pt").exists())
                 rates[19] = 0.0
                 self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
@@ -117,6 +180,14 @@ class BridgeResearchChecks(unittest.TestCase):
             self.assertEqual(rows[1]["curriculum_boundary"]["next_stage"], "second")
             self.assertTrue(rows[-1]["completed_curriculum"])
             self.assertTrue((output / "snapshots/second.pt").exists())
+            self.assertEqual(observed_evaluations[0][1], environment["bridge"])
+            self.assertEqual(observed_evaluations[1][1], second_environment["bridge"])
+            self.assertTrue(all(bridge == second_environment["bridge"] for _, bridge in observed_evaluations[4:]))
+            replays = [json.loads(path.read_text().splitlines()[0]) for path in (output / "replays").glob("*.jsonl")]
+            self.assertEqual({header["training"]["stage"] for header in replays}, {"first", "second"})
+            for header in replays:
+                expected = environment if header["training"]["stage"] == "first" else second_environment
+                self.assertEqual(header["bridge"], expected["bridge"])
 
     def test_structured_plan_rejects_invalid_descriptor_and_duel(self):
         plan = short_plan()
@@ -925,14 +996,14 @@ class BridgeResearchChecks(unittest.TestCase):
         self.assertEqual(metrics["training_win_rate"], 0.5)
         self.assertEqual(metrics["training_loss_rate"], 0.5)
         self.assertEqual(metrics["training_return"], 3)
-        self.assertIsNone(worlds.step_reward_totals(slots))
+        self.assertTrue(all(value == 0 for value in worlds.step_reward_totals(slots).values()))
         changed = deepcopy(self.stage)
         changed["scenario"]["bridge"]["task_rewards"]["win"] = 10
         with self.assertRaisesRegex(ValueError, "new environment batch"):
             worlds.configure(changed)
         changed = deepcopy(self.stage)
         changed["rewards"] = {"weights": {"good_aim": 1}}
-        with self.assertRaisesRegex(ValueError, "duel reward"):
+        with self.assertRaisesRegex(ValueError, "rewards disagree"):
             worlds.configure(changed)
         manifest = research_metadata(worlds.groups[0][1], 8, {})
         self.assertEqual(manifest["reward_semantics"], "bridge_score_win_loss_v1")
@@ -948,7 +1019,7 @@ class BridgeResearchChecks(unittest.TestCase):
             rollout, _, _, _ = collect(self.model(), worlds, pool, worlds.observe(), 30,
                                        torch.device("cpu"), {"movement": 1})
         self.assertTrue(stationary.called)
-        self.assertNotIn("reward_types", rollout)
+        self.assertTrue(all(value == 0 for value in rollout["reward_types"].values()))
         self.assertGreaterEqual(rollout["episode_metrics"]["training_episodes"], 1)
         self.assertEqual(rollout["episode_metrics"]["training_win_rate"], 1)
         self.assertEqual(rollout["episode_metrics"]["training_return"], 9)
@@ -1021,10 +1092,17 @@ class BridgeResearchChecks(unittest.TestCase):
         self.assertTrue(model.training)
         self.assertEqual((first["wins"], first["losses"], first["draws"], first["truncations"]), (5, 0, 0, 0))
         self.assertEqual((first["goals_for"], first["goals_against"]), (10, 0))
+        self.assertEqual(first["reward_mean"], 9)
         self.assertEqual([seat["episodes"] for seat in first["seats"]], [3, 2])
         self.assertTrue(all(state["outcome"] in ("team0", "team1") and sum(state["scores"]) == 2
                             for state in final_states))
         self.assertNotIn("mace_smash_rate", first)
+        different = deepcopy(suite)
+        different["scenario"]["bridge"]["match"]["goals_to_win"] = 1
+        different["scenario"]["bridge"]["task_rewards"].update(score=4, win=8)
+        changed = evaluate(model, plan, different, options, torch.device("cpu"), {}, training_pool)
+        self.assertEqual((changed["wins"], changed["goals_for"], changed["reward_mean"]), (5, 5, 12))
+        self.assertEqual(training_pool.state_dict(), before)
 
     def test_bridge_evaluation_draw_and_external_truncation(self):
         for match_limit, external_limit, key in ((1, 100, "draws"), (100, 1, "truncations"),
@@ -1515,7 +1593,7 @@ class BridgeResearchChecks(unittest.TestCase):
         for definition in ({"type": "scripted", "controller": "basic_melee"},
                            {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"speed": 1}}):
             plan["opponents"] = {"target": definition}
-            with self.subTest(definition=definition), self.assertRaisesRegex(ValueError, "Bridge requires"):
+            with self.subTest(definition=definition), self.assertRaises(ValueError):
                 evaluate(self.model(), plan, suite, options, torch.device("cpu"), {})
         plan["opponents"] = self.definitions
         suite["scenario"] = {**self.scenario, "spawns": {"sample": "episode"}}
@@ -1755,6 +1833,43 @@ class EpisodeMetricChecks(unittest.TestCase):
 
 
 class PlanChecks(unittest.TestCase):
+    def test_bridge_runner_mixture_selects_and_preserves_controls(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "yaw", "values": [-2, 0, 2]},
+                        {"name": "jump", "values": [False, True]},
+                        {"name": "sneak", "values": [False, True]}]})
+        variants = {"walk": {}, "sneak": {"sneak": True}, "sneak-jump": {"sneak": True, "jump": True},
+                    "jump": {"jump": True}}
+        definitions = {name: {"type": "scripted", "controller": "bridge_fixed_lane", "options": options}
+                       for name, options in variants.items()}
+        mixture = [{"id": name, "weight": 1} for name in variants]
+        pool = OpponentPool(definitions, contract, 1024, "cpu", 42)
+        pool.configure(mixture)
+        pool.reset(np.ones(pool.count, dtype=bool))
+        counts = np.bincount(pool.assignments, minlength=4)
+        self.assertTrue(np.all((counts > 200) & (counts < 310)), counts)
+        observation = np.zeros((pool.count, 2, contract["observation_dim"]), dtype=np.float32)
+        learner_actions = np.zeros((pool.count, len(contract["actions"])), dtype=np.int64)
+        for _ in range(3):
+            actions = pool.act(observation, learner_actions)
+            for index, name in enumerate(pool.names):
+                selected = np.flatnonzero(pool.assignments == index)
+                opponent = actions[selected, 1 - pool.learner_slots[selected]]
+                for action in ("sneak", "jump"):
+                    column = contract["action_names"].index(action)
+                    values = contract["actions"][column]["values"]
+                    self.assertTrue(np.all(opponent[:, column] == values.index(variants[name].get(action, False))))
+        clone = OpponentPool(definitions, contract, pool.count, "cpu", 42)
+        clone.configure(mixture)
+        clone.load_state_dict(pool.state_dict())
+        pool.reset(np.ones(pool.count, dtype=bool))
+        clone.reset(np.ones(clone.count, dtype=bool))
+        np.testing.assert_array_equal(pool.assignments, clone.assignments)
+        np.testing.assert_array_equal(pool.learner_slots, clone.learner_slots)
+
     def test_resolve_players_keeps_independent_mutable_outputs(self):
         shared = {"weapons": ["minecraft:iron_sword", "minecraft:air", "minecraft:air"],
                   "armor": {"helmet": "minecraft:turtle_helmet"}}
@@ -2678,9 +2793,9 @@ class ResearchChecks(unittest.TestCase):
             np.testing.assert_allclose(sum(rollout["reward_types"].values()),
                                        rollout["rewards"].sum(dtype=torch.float64).item(), atol=1e-6)
 
-    def test_bridge_does_not_request_duel_reward_breakdown(self):
+    def test_bridge_preserves_unavailable_reward_breakdown(self):
         worlds = SampledWorlds.__new__(SampledWorlds)
-        worlds.groups = [(np.array([0]), SimpleNamespace(bridge={}))]
+        worlds.groups = [(np.array([0]), SimpleNamespace(bridge={}, step_reward_totals=lambda mask: None))]
         self.assertIsNone(worlds.step_reward_totals(np.array([0])))
 
     def test_missing_native_breakdown_warns_without_fabricating_contributions(self):

@@ -191,8 +191,9 @@ void checkBridgeBatch(const char* environment, int cuda) {
     require(mcsim_losses(batch.get(), losses.data()) == 0 && !losses[0] && losses[1],
         "Bridge match losses reflect the outcome, not the last death");
     std::array<double, 18> totals{};
-    require(mcsim_step_reward_totals(batch.get(), nullptr, totals.data()) != 0,
-        "Bridge cannot report duel reward totals");
+    require(mcsim_step_reward_totals(batch.get(), nullptr, totals.data()) == 0
+        && std::all_of(totals.begin(), totals.end(), [](double value) { return value == 0.0; }),
+        "Bridge reports zero shared reward totals when none are configured");
     const auto other_ticks = status()[1]["ticks"];
     const std::array<uint8_t, 2> mask{1, 0};
     require(mcsim_reset(batch.get(), mask.data(), observations.data()) == 0, "selective Bridge match reset");

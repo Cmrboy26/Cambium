@@ -75,6 +75,8 @@ struct BridgeTickEvents {
     bool respawn[2]{};
     bool placed[2]{};
     bool broke[2]{};
+    AttackOutcome attacks[2]{};
+    WeaponItem attack_weapons[2]{};
     TerrainEdit terrain_edits[2]{};
     bool round_reset = false;
     bool terminated = false;
@@ -382,12 +384,16 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
     const auto item_events = processItemWorldTick(world, projectiles, rules.kits, rules.building, state.kits,
                                                    rules.arrow_refill_ticks, state.cage_remaining > 0);
     if (!item_events.advanced) return BridgeTickEvents();
+    const AttackOutcome attacks[2]{world.player(0).state().last_attack, world.player(1).state().last_attack};
+    const WeaponItem attack_weapons[2]{world.player(0).state().weapon, world.player(1).state().weapon};
     const bool preserve_final_state = external_cutoff > 0 && state.ticks >= external_cutoff - 1;
     auto events = finishBridgeWorldTick(world, projectiles, initial, rules, state, preserve_final_state);
     for (int player = 0; player < 2; ++player) {
         events.placed[player] = item_events.placed[player];
         events.broke[player] = item_events.broke[player];
         events.terrain_edits[player] = item_events.terrain_edits[player];
+        events.attacks[player] = attacks[player];
+        events.attack_weapons[player] = attack_weapons[player];
     }
     return events;
 }

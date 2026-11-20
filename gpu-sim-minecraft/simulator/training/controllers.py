@@ -13,8 +13,8 @@ stationary_melee retains aim/attacks/equipment without locomotion options.
 random_walk accepts change_interval (20 ticks), wall_margin (1.25 blocks) and
 sneak (False), using yaw/world rays and independent checkpointed RNG streams
 per actor.
-bridge_fixed_lane accepts no options and follows the initial north/south spawn
-heading without using private state or claiming position-aware navigation.
+bridge_fixed_lane accepts jump and sneak booleans (both False by default) and
+follows the initial north/south spawn heading without position-aware navigation.
 tactical_melee accepts basic_melee options plus style: evasive, aggressive or
 patient. These vary retreat/pressure/charge-based movement, not just timing.
 Checkpoint files are trusted standalone PPO archives, loaded with weights_only.
@@ -221,8 +221,12 @@ class StationaryTargetController(_BatchedController):
 
 class BridgeFixedLaneController(StationaryTargetController):
     def __init__(self, contract, count, seed=1, options=None):
-        super().__init__(contract, count, seed, options)
-        self._description.update(controller="bridge_fixed_lane")
+        options = _options({} if options is None else options, ("jump", "sneak"))
+        super().__init__(contract, count, seed)
+        self.options = options
+        self._description.update(controller="bridge_fixed_lane", options=options)
+        self.jump = _boolean(options, "jump")
+        self.sneak = _boolean(options, "sneak")
         self._require_feature("self.yaw_fraction")
         yaw_descriptor = self._features["self.yaw_fraction"][1]
         if "clip" in yaw_descriptor and (yaw_descriptor["clip"][0] > -1 or yaw_descriptor["clip"][1] < 1):
@@ -239,6 +243,9 @@ class BridgeFixedLaneController(StationaryTargetController):
         for name in ("attack", "jump", "sprint", "sneak", "shield", "use_item"):
             if name in self._heads:
                 self._require_choice(name, False)
+        for name in ("jump", "sneak"):
+            if getattr(self, name):
+                self._require_choice(name, True)
         self._directions = np.full(self.count, -1, dtype=np.int64)
 
     def act(self, observations, indices=None):
@@ -256,6 +263,9 @@ class BridgeFixedLaneController(StationaryTargetController):
         column, choices = self._heads["yaw"]
         actions[:, column] = np.abs(error[:, None] - np.asarray(choices)).argmin(axis=1)
         self._set(actions, "movement", np.where(np.abs(error) <= 1, "forward", "neutral"))
+        for name in ("jump", "sneak"):
+            if getattr(self, name):
+                self._set(actions, name, np.ones(len(observations), dtype=bool))
         return actions
 
     def reset(self, mask):

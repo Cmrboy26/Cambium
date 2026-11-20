@@ -167,9 +167,9 @@ field. Unknown fields, versions and altered values are rejected.
 }
 ```
 
-All stages and evaluations must use fixed Bridge scenarios with the same Bridge
-rules; fixed arenas may differ between stages. With host collection
-and mixtures of `stationary_target`, `bridge_fixed_lane`, compatible structured
+All stages and evaluations use fixed Bridge scenarios; their arenas, match rules,
+and task rewards may differ. Host collection supports mixtures of
+`stationary_target`, `bridge_fixed_lane`, compatible structured
 checkpoint, current-policy and frozen self-play opponents. Mixed Bridge/duel
 plans, resident execution and live inference remain unsupported. The model's
 descriptor is saved in checkpoint and snapshot metadata and v4 replay provenance.
@@ -232,6 +232,14 @@ scoring starts a new progress budget for the scorer. Positive-only shaping is
 not potential-based and may change the optimal policy. Curriculum gates still
 use actual goal or match outcomes, not shaped return. The four per-rollout score,
 opponent-score, toward and away contributions are logged separately.
+
+Generic combat and shaping rewards may also be specified in `task.rewards` or
+replaced per stage or evaluation with `task_override.rewards`. They add to the
+Bridge task rewards; `won_duel` and `win_speed` are rejected. Damage events are
+sampled before respawns. Death pays once per death, while timeout and no-damage
+penalties apply only when the match clock or external cutoff expires. The
+no-damage flag spans the entire match. Shaping uses the external tick limit as
+its budget and is skipped on terminal, truncation, respawn and goal-reset ticks.
 
 ### Proposed Structured Terrain Observations
 

@@ -20,6 +20,41 @@ class CUDAObservationChecks(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
                          and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
                          "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_bridge_shared_combat_rewards_match_cpu_and_cuda(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["players"][1]["health"] = 1
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "attack", "values": [False, True]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 2, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 0, "win": 0, "loss": 0}}
+        weights = {"doing_damage": 20, "taking_damage": -20, "death": -3,
+                   "episode_timeout": -4, "no_damage_penalty": -2}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "combat.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            options = {"environment": path, "contract": contract, "max_ticks": 10,
+                       "bridge": bridge, "weights": weights}
+            with Environment(2, device="cpu", library=os.environ["MCSIM_TEST_CPU_LIBRARY"], **options) as cpu, \
+                 Environment(2, device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"], **options) as cuda:
+                actions = np.zeros((2, 2, 1), dtype=np.int32)
+                actions[0, 0, 0] = 1
+                for tick in range(2):
+                    if tick:
+                        actions.fill(0)
+                    expected, actual = cpu.step(actions), cuda.step(actions)
+                    for first, second in zip(expected, actual, strict=True):
+                        np.testing.assert_allclose(first, second, rtol=0, atol=1e-6)
+                    self.assertEqual(cpu.bridge_state(), cuda.bridge_state())
+                    self.assertEqual(cpu.step_reward_totals(), cuda.step_reward_totals())
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+                         and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
     def test_objective_rewards_and_actor_state_match_cpu_and_cuda(self):
         contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
                     "ticks_per_action": 1, "observations": [{"feature": "relative.z"}],

@@ -22,9 +22,15 @@
   },
   "opponents": {
     "target": {"type": "scripted", "controller": "stationary_target"},
-    "runner": {"type": "scripted", "controller": "bridge_fixed_lane"}
+    "runner": {"type": "scripted", "controller": "bridge_fixed_lane"},
+    "runner-sneak": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"sneak": true}},
+    "runner-sneak-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"sneak": true, "jump": true}},
+    "runner-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true}}
   },
-  "mixtures": {"target": [{"id": "target", "weight": 1}], "runner": [{"id": "runner", "weight": 1}]},
+  "mixtures": {"target": [{"id": "target", "weight": 1}], "runner": [
+    {"id": "runner", "weight": 1}, {"id": "runner-sneak", "weight": 1},
+    {"id": "runner-sneak-jump", "weight": 1}, {"id": "runner-jump", "weight": 1}
+  ]},
   "snapshots": [{"name": "initial", "at_updates": 0}],
   "stages": [
     {
@@ -36,8 +42,8 @@
         "reach-b": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
       },
       "advance": {"all": [
-        {"evaluation": {"suite": "reach-a", "metric": "goals_for_mean", "at_least": 0.25}},
-        {"evaluation": {"suite": "reach-b", "metric": "goals_for_mean", "at_least": 0.25}}
+        {"evaluation": {"suite": "reach-a", "metric": "goals_for_mean", "at_least": 0.75}},
+        {"evaluation": {"suite": "reach-b", "metric": "goals_for_mean", "at_least": 0.75}}
       ]},
       "snapshots": [{"name": "reach-goal-wide", "on_completion": true}]
     },
@@ -49,8 +55,8 @@
         "target-b": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
       },
       "advance": {"all": [
-        {"evaluation": {"suite": "target-a", "metric": "win_rate", "at_least": 0.25}},
-        {"evaluation": {"suite": "target-b", "metric": "win_rate", "at_least": 0.25}}
+        {"evaluation": {"suite": "target-a", "metric": "win_rate", "at_least": 0.75}},
+        {"evaluation": {"suite": "target-b", "metric": "win_rate", "at_least": 0.75}}
       ]},
       "snapshots": [{"name": "defeat-target-wide", "on_completion": true}]
     },
@@ -61,9 +67,10 @@
         "runner-a": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
         "runner-b": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
       },
+      "task_override": {"rewards": {"doing_damage": 1}},
       "advance": {"all": [
-        {"evaluation": {"suite": "runner-a", "metric": "win_rate", "at_least": 0.125}},
-        {"evaluation": {"suite": "runner-b", "metric": "win_rate", "at_least": 0.125}}
+        {"evaluation": {"suite": "runner-a", "metric": "win_rate", "at_least": 0.50}},
+        {"evaluation": {"suite": "runner-b", "metric": "win_rate", "at_least": 0.50}}
       ]},
       "snapshots": [{"name": "bridge-narrow-baseline", "on_completion": true}]
     }

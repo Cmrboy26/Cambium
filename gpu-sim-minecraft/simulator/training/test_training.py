@@ -710,12 +710,125 @@ class TrainingChecks(unittest.TestCase):
             self.assertEqual(environment.bridge_state()[0]["scores"], [0, 0])
             self.assertEqual(environment.bridge_state()[1]["ticks"], other_ticks)
             self.assertEqual(environment.replay_frame(0)["bridge"]["scores"], [0, 0])
-            with self.assertRaisesRegex(RuntimeError, "Duel reward"):
-                environment.step_reward_totals()
-            with self.assertRaisesRegex(RuntimeError, "task rewards"):
-                environment.set_rewards({})
+            self.assertTrue(all(value == 0 for value in environment.step_reward_totals().values()))
+            environment.set_rewards({})
             with self.assertRaisesRegex(RuntimeError, "resident Bridge"):
                 environment.register_cuda_resident()
+
+    def test_bridge_shared_combat_rewards_survive_respawn_and_timeout(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["players"][1]["health"] = 1
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "attack", "values": [False, True]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 2, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 0, "win": 0, "loss": 0}}
+        weights = {"doing_damage": 20, "taking_damage": -20, "death": -3,
+                   "episode_timeout": -4, "no_damage_penalty": -2}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "combat.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            with Environment(2, environment=path, contract=contract, max_ticks=10, bridge=bridge,
+                             weights=weights, library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+                actions = np.zeros((2, 2, 1), dtype=np.int32)
+                actions[0, 0, 0] = 1
+                _, rewards, terminated, truncated = environment.step(actions)
+                self.assertEqual(environment.bridge_state()[0]["died"], [False, True])
+                np.testing.assert_allclose(rewards, [[1, -4], [0, 0]])
+                self.assertFalse(terminated.any() or truncated.any())
+                totals = environment.step_reward_totals([[True, False], [False, False]])
+                self.assertAlmostEqual(totals["doing_damage"], 1)
+                self.assertEqual(totals["death"], 0)
+                actions.fill(0)
+                _, rewards, terminated, truncated = environment.step(actions)
+                np.testing.assert_allclose(rewards, [[-4, -6], [-6, -6]])
+                self.assertTrue(terminated.all())
+                self.assertFalse(truncated.any())
+                environment.reset([True, False])
+                self.assertEqual(environment.bridge_state()[1]["ticks"], 2)
+                environment.reset([False, True])
+                _, rewards, _, _ = environment.step(actions)
+                np.testing.assert_allclose(rewards[0], [0, 0])
+                _, rewards, _, _ = environment.step(actions)
+                np.testing.assert_allclose(rewards[0], [-6, -6])
+
+    def test_bridge_shared_hit_is_preserved_through_goal_reset(self):
+        path = ROOT / "simulator/tests/reset_environment.json"
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                                {"name": "attack", "values": [False, True]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.17], "max": [1, 3, -1.0]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 2, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 0, "loss": 0}}
+        weights = {"doing_damage": 20, "taking_damage": -20, "no_damage_penalty": -2}
+        with Environment(1, environment=path, contract=contract, max_ticks=10, bridge=bridge, weights=weights,
+                         library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+            actions = np.zeros((1, 2, 2), dtype=np.int32)
+            actions[0, 0] = [1, 1]
+            _, rewards, terminated, _ = environment.step(actions)
+            self.assertTrue(environment.bridge_state()[0]["round_reset"])
+            self.assertFalse(terminated[0])
+            np.testing.assert_allclose(rewards, [[9, -7]])
+            totals = environment.step_reward_totals([[True, False]])
+            self.assertEqual(totals["doing_damage"], 7)
+            _, rewards, terminated, _ = environment.step(np.zeros_like(actions))
+            self.assertTrue(terminated[0])
+            np.testing.assert_allclose(rewards, [[0, -2]])
+            bridge["match"].update(goals_to_win=1, max_ticks=1)
+            weights["episode_timeout"] = -4
+            with Environment(1, environment=path, contract=contract, max_ticks=10, bridge=bridge, weights=weights,
+                     library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+                _, rewards, terminated, truncated = environment.step(actions)
+                self.assertTrue(terminated[0])
+                self.assertFalse(truncated[0])
+                np.testing.assert_allclose(rewards, [[9, -7]])
+
+    def test_bridge_shared_external_timeout_and_override(self):
+        path = ROOT / "simulator/tests/reset_environment.json"
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "attack", "values": [False, True]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 0, "win": 0, "loss": 0}}
+        with Environment(1, environment=path, contract=contract, max_ticks=1, bridge=bridge,
+                         library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+            self.assertTrue(all(value == 0 for value in environment.weights.values()))
+            environment.set_rewards({"no_damage_penalty": -2, "episode_timeout": -4})
+            for name in ("won_duel", "win_speed"):
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, "duel win rewards"):
+                    environment.set_rewards({name: 1})
+            self.assertEqual(environment.episode_scenario(0)["reward_weights"]["no_damage_penalty"], -2)
+            _, rewards, terminated, truncated = environment.step(np.zeros((1, 2, 1), dtype=np.int32))
+            np.testing.assert_allclose(rewards, [[-6, -6]])
+            self.assertFalse(terminated[0])
+            self.assertTrue(truncated[0])
+            totals = environment.step_reward_totals([[False, True]])
+            self.assertEqual(totals["episode_timeout"], -4)
+            self.assertEqual(totals["no_damage_penalty"], -2)
+            environment.reset()
+            environment.build_info["bridge_shared_reward_version"] = 0
+            with self.assertRaisesRegex(RuntimeError, "Rebuild"):
+                environment.set_rewards({"doing_damage": 1})
+        with Environment(1, environment=path, contract=contract, max_ticks=1,
+                         library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+            old_weights = environment.weights.copy()
+            with self.assertRaises(RuntimeError):
+                environment.configure_bridge({**bridge, "void_y": 100})
+            self.assertEqual(environment.weights, old_weights)
+            environment.configure_bridge(bridge)
+            self.assertTrue(all(value == 0 for value in environment.weights.values()))
 
     def test_compatibility_learning_rate_default_and_override(self):
         self.assertEqual(compatibility_arguments([]).lr, 0.0003)

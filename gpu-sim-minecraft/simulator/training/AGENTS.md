@@ -28,21 +28,35 @@ is explicitly rejected. Normal duel batches are unchanged.
 Authored Bridge environments place this configuration in their `bridge` field;
 the resolved scenario retains it separately from the native scene. The supported
 research subset has one fixed arena per stage and fixed spawns/loadouts, existing scalar
-policy features or the opt-in local voxel model, and zero duel reward weights.
+policy features or the opt-in local voxel model. Generic combat and shaping reward
+weights are supported; `won_duel` and `win_speed` are rejected.
 Supported opponents are stationary targets, fixed-lane runners, compatible
 structured Bridge checkpoints, and current or frozen self-play. The fixed-lane runner follows its initial north/south heading;
-it is not a general navigation controller. The [building/items plan](../setups/curricula/bridge/building-voxel-selfplay.json)
+it is not a general navigation controller. Its optional boolean `jump` and
+`sneak` settings hold those controls for the entire episode (default false).
+Enabled controls require the corresponding action head and true choice. Opponent
+mixture weights select a controller independently at each episode reset, so
+their proportions are expected probabilities, not exact per-batch quotas. The [building/items plan](../setups/curricula/bridge/building-voxel-selfplay.json)
 uses the experimental kit, building and local-voxel subsets.
 Bridge `task_rewards` provide score, win and loss signals; match-clock endings
 are terminal, while an external limit truncates and bootstraps the final
-observation. Training logs match outcomes rather than duel reward breakdowns.
+observation. Training logs match outcomes and learner-only shared reward breakdowns.
+Environment `task.rewards` and stage/evaluation `task_override.rewards` set the
+shared weights; the override replaces the entire shared map and omitted terms are
+zero. These are additive with `bridge.task_rewards`. Damage and attack events are
+captured before respawn; `death` pays for each Bridge death, including void deaths.
+`episode_timeout` and `no_damage_penalty` pay only at the Bridge match-clock limit
+or external truncation, not on a goal-limit win. No-damage state spans the whole
+match, including round resets. Shaping uses the external `max_ticks` as its budget
+and does not pay on terminal, truncation, respawn or goal-reset ticks.
 The per-rollout `bridge_goals_for`, `bridge_goals_against`, `bridge_wins`,
 `bridge_losses` and `bridge_draws` counters are relative to the learner's seat.
 Fixed-scenario evaluation and version-4 website replay are supported. Stages
-may use different fixed arenas with the same Bridge rules; changing the arena
-recreates worlds at the stage boundary. Replay
+and evaluations may use different fixed Bridge configurations, including task
+rewards and match rules. A changed Bridge scenario recreates worlds at the stage
+boundary; evaluation uses its own batch. Replay
 export runs a separate sampled match; it is not a recording of an in-progress
-training world. Sampling, task overrides, resident collection, Fabric Bridge
+training world. Sampling, `task_override.max_ticks`, resident collection, Fabric Bridge
 replay and live serving are rejected. Bridge checkpoints preserve reset counters
 and resume with fresh episodes; checkpoints missing those counters cannot be resumed.
 
@@ -88,7 +102,7 @@ refill. Once the last arrow is fired, the timer starts on the next match tick
 and restores one arrow at the end of the configured number of empty ticks.
 `bridge_state()` returns scores, clock, cage, outcomes and the last tick's
 score/death/reset/place/break events. `step()`
-returns the configured score/win/loss rewards, never duel reward weights.
+returns configured Bridge task rewards plus any enabled shared reward weights.
 The Bridge match clock produces `terminated`; the constructor's separate
 `max_ticks` is an external `truncated` cutoff, retaining the final observation.
 `reset(mask)` resets only selected matches. `configure_bridge(configuration)`
@@ -149,14 +163,15 @@ recaptured with the matching build.
 
 Concrete episode descriptions include `experimental_bridge` and are rejected
 by the ordinary scene loader; the research collector configures Bridge through
-the dedicated API instead. Duel reward totals and duel behavior metrics reject
-Bridge rather than reporting misleading data. The additive native calls include
+the dedicated API instead. Aggregate duel reward totals and duel behavior metrics
+reject Bridge; per-step shared reward totals are supported. The additive native calls include
 `mcsim_configure_bridge`, `mcsim_bridge_state`, `mcsim_bridge_kits` and
 `mcsim_bridge_local_voxels`; `Environment.bridge_local_voxels()` returns a
 `uint8` array shaped `[world, 2, 5, 9, 9]` from the current host state.
 `mcsim_build_info` advertises
 `bridge_host_batch_version: 3` for mutable building and
-`bridge_local_voxels_version: 1` for the grid. Focused CPU and T4 checks
+`bridge_local_voxels_version: 1` for the grid, and `bridge_shared_reward_version: 1`
+for shared rewards. Older libraries reject nonzero Bridge shared weights. Focused CPU and T4 checks
 cover the experimental host batch; see the [Phase 1 tracker](../../docs/BRIDGE_PHASE1_CHECKLIST.md)
 for evidence and remaining integration and conformance gates.
 

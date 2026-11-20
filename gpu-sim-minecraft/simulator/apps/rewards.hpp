@@ -101,9 +101,8 @@ MCSIM_HD inline void addDuelReward(DuelRewardStep& result, int player, int term,
     result.contributions[player][term] += amount;
 }
 
-MCSIM_HD inline DuelRewardStep duelRewards(const PlayerState* players, const WorldState& world,
-                                           BlockWorldView blocks, const ProjectileWorldState& projectiles,
-                                           const DuelRewardSettings& settings, DuelRewardState& state) {
+MCSIM_HD inline DuelRewardStep sharedRewardEvents(const PlayerState* players, const WorldState& world,
+                                                  const DuelRewardSettings& settings, DuelRewardState& state) {
     DuelRewardStep result;
     for (int player = 0; player < 2; ++player) {
         const auto& actor = players[player];
@@ -127,7 +126,16 @@ MCSIM_HD inline DuelRewardStep duelRewards(const PlayerState* players, const Wor
         if (actor.last_attack.blocked_damage > 0.0F && weaponAttributes(actor.weapon).disable_shield_seconds == 0.0F) {
             addDuelReward(result, 1 - player, 10, settings.block_weight);
         }
-        result.lost[player] = !actor.alive() || duelOutside(actor, blocks);
+    }
+    return result;
+}
+
+MCSIM_HD inline DuelRewardStep duelRewards(const PlayerState* players, const WorldState& world,
+                                           BlockWorldView blocks, const ProjectileWorldState& projectiles,
+                                           const DuelRewardSettings& settings, DuelRewardState& state) {
+    auto result = sharedRewardEvents(players, world, settings, state);
+    for (int player = 0; player < 2; ++player) {
+        result.lost[player] = !players[player].alive() || duelOutside(players[player], blocks);
     }
     result.terminated = result.lost[0] || result.lost[1];
     result.truncated = !result.terminated && world.tick >= static_cast<std::uint64_t>(settings.max_ticks);

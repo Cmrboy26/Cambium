@@ -853,6 +853,56 @@ assert.equal(document.documentElement.dataset.theme,'light');
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard chart checks")
+    def test_reward_chart_displays_nonzero_contributions_in_window(self):
+        script = Path(__file__).with_name("dashboard") / "dashboard.js"
+        result = subprocess.run(["node", "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const empty = {};
+const document = {documentElement:{dataset:{}}, getElementById:()=>empty};
+const context = vm.createContext({document, Intl});
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8').split('\ntry {\n    initTheme();')[0], context);
+const evaluate = code => JSON.parse(JSON.stringify(vm.runInContext(code, context)));
+vm.runInContext(`
+records = [
+    {update:1, reward_types:{death:0, doing_damage:4}, bridge_reward_score:1,
+        bridge_reward_opponent_score:-2, bridge_reward_toward:3, bridge_reward_away:0},
+    {update:2, reward_types:{death:-1, doing_damage:0}, bridge_reward_score:0,
+        bridge_reward_opponent_score:0, bridge_reward_toward:0, bridge_reward_away:-1},
+    {update:3, reward_types:{death:0, doing_damage:0}, bridge_reward_score:0,
+        bridge_reward_opponent_score:0, bridge_reward_toward:0, bridge_reward_away:0},
+];
+windowMode = 'all';
+chart = {data:{datasets:[]}, options:{plugins:{legend:{}}}, canvas:{addEventListener(){}}, visible:[],
+    isDatasetVisible(index){return this.visible[index] ?? true;},
+    setDatasetVisibility(index, value){this.visible[index] = value;}};
+updateRewardDatasets(chart, windowRows(chartRows()), false);
+`, context);
+assert.deepEqual(evaluate('chart.data.datasets.map(dataset => dataset.label)'),
+    ['Damage dealt', 'Death', 'Bridge score', 'Bridge opponent score', 'Bridge toward objective', 'Bridge away from objective']);
+assert.deepEqual(evaluate('chart.data.datasets.find(dataset => dataset.label === "Bridge opponent score").data.map(point => point.y)'), [-2, 0, 0]);
+vm.runInContext(`chart.visible[0] = false; windowMode='range'; windowStart=2; windowEnd=2;
+    updateRewardDatasets(chart, windowRows(chartRows()), false);`, context);
+assert.deepEqual(evaluate('chart.data.datasets.map(dataset => dataset.label)'), ['Death', 'Bridge away from objective']);
+vm.runInContext(`windowMode='all'; updateRewardDatasets(chart, windowRows(chartRows()), false);`, context);
+assert.equal(evaluate('chart.isDatasetVisible(0)'), false);
+vm.runInContext(`windowMode='range'; windowStart=3; windowEnd=3;
+    updateRewardDatasets(chart, windowRows(chartRows()), false);`, context);
+assert.equal(evaluate('chart.data.datasets.length'), 0);
+assert.equal(empty.hidden, false);
+assert.match(empty.textContent, /No non-zero/);
+vm.runInContext(`smoothing=3; updateRewardDatasets(chart, windowRows(chartRows()), false);`, context);
+assert.ok(evaluate('chart.data.datasets.length') > 0, 'Smoothed nonzero values are plotted');
+vm.runInContext(`smoothing=1; records=[{update:1,bridge_reward_toward:3}, {update:2,bridge_reward_toward:3}];
+    windowMode='all'; updateRewardDatasets(chart, windowRows(chartRows()), true);`, context);
+assert.equal(evaluate('chart.data.datasets.length'), 0, 'Zero derivative has no legend or tooltip entry');
+vm.runInContext(`records=[{update:1}]; updateRewardDatasets(chart, windowRows(chartRows()), false);`, context);
+assert.match(empty.textContent, /No per-type reward data/);
+""", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard chart checks")
     def test_chart_math_and_training_estimates(self):
         script = Path(__file__).with_name("dashboard") / "dashboard.js"
         result = subprocess.run(["node", "-e", r"""
