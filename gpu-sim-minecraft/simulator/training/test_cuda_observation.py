@@ -17,6 +17,38 @@ from simulator.training.environment import Environment, REWARD_NAMES, ROOT
 
 
 class CUDAObservationChecks(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+                         and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_objective_rewards_and_actor_state_match_cpu_and_cuda(self):
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "relative.z"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "forward", "backward"]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3,
+                                   "opponent_score": -1, "toward": 0.25, "away": 0.1}}
+        path = ROOT / "simulator/tests/reset_environment.json"
+        with Environment(2, device="cpu", environment=path, contract=contract, max_ticks=100, bridge=bridge,
+                         library=os.environ["MCSIM_TEST_CPU_LIBRARY"]) as cpu, \
+             Environment(2, device="cuda", environment=path, contract=contract, max_ticks=100, bridge=bridge,
+                         library=os.environ["MCSIM_TEST_CUDA_LIBRARY"]) as cuda:
+            actions = np.zeros((2, 2, 1), dtype=np.int32)
+            actions[0, 0, 0] = 1
+            actions[1, 1, 0] = 2
+            for _ in range(50):
+                expected, actual = cpu.step(actions), cuda.step(actions)
+                for first, second in zip(expected, actual, strict=True):
+                    np.testing.assert_allclose(first, second, rtol=0, atol=1e-5)
+                np.testing.assert_allclose(cpu.actor_task_state(), cuda.actor_task_state(), rtol=0, atol=1e-5)
+                np.testing.assert_allclose(cpu.bridge_reward_terms(), cuda.bridge_reward_terms(), rtol=0, atol=1e-7)
+                self.assertEqual(cpu.bridge_state(), cuda.bridge_state())
+                if expected[2].any() or expected[3].any():
+                    break
+
     def configured_cuda(self, environment):
         prepare = environment.native.mcsim_prepare_cuda_observations
         prepare.argtypes = [ctypes.c_void_p]
@@ -455,8 +487,11 @@ class CUDAObservationChecks(unittest.TestCase):
                 environment.reset(np.array([False, True]))
                 check([0.03, 0.05])
                 actions[0, 0] = [2, 0, 1]
-                for _ in range(3):
+                for tick in range(3):
                     environment.step(actions)
+                    if tick == 1:
+                        self.assertAlmostEqual(environment.actor_task_state()[0, 0, 6], 0.5)
+                        self.assertEqual(environment.actor_task_state()[1, 0, 6], 0)
                 self.assertTrue(environment.bridge_state()[0]["broke"][0])
                 check([0.05, 0.05])
                 actions[0, 0] = [1, 1, 0]

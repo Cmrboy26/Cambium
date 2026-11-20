@@ -82,13 +82,22 @@ def validate_bridge(configuration, scene):
             raise ValueError(f"Bridge {key} must be an integer in {minimum}..1000000")
     if type(match["persist_blocks_on_goal"]) is not bool:
         raise ValueError("Bridge persist_blocks_on_goal must be boolean")
-    rewards = _object(bridge["task_rewards"], ("score", "win", "loss"), "task_rewards")
+    rewards = bridge["task_rewards"]
+    required_rewards = {"score", "win", "loss"}
+    if (not isinstance(rewards, dict) or not required_rewards <= set(rewards)
+            or set(rewards) - required_rewards - {"opponent_score", "toward", "away"}):
+        raise ValueError("Invalid Bridge task_rewards fields")
     converted = {}
     for key, value in rewards.items():
         if abs(_number(value, f"reward {key}")) > FLOAT_MAX:
             raise ValueError("Bridge rewards must fit float32")
+        if key in ("toward", "away") and not 0 <= value <= 1000:
+            raise ValueError("Objective progress weights must be in 0..1000")
         converted[key] = struct.unpack("f", struct.pack("f", value))[0]
-    if any(abs(converted["score"] + converted[key]) > FLOAT_MAX for key in ("win", "loss")):
+    opponent = converted.get("opponent_score", 0)
+    if any(abs(score + opposing + outcome) > FLOAT_MAX
+           for score in (0, converted["score"]) for opposing in (0, opponent)
+           for outcome in (0, converted["win"], converted["loss"])):
         raise ValueError("Combined Bridge rewards must fit float32")
     for player in scene["players"]:
         position = player["position"]

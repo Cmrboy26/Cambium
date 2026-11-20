@@ -3,6 +3,7 @@
 #include "minecraft_sim/comparison.hpp"
 #include "minecraft_sim/constants_mace.hpp"
 #include "minecraft_sim/terrain.hpp"
+#include "minecraft_sim/objective_progress.hpp"
 #include "../apps/configuration.hpp"
 #include "../apps/observation.hpp"
 #include "../apps/rewards.hpp"
@@ -46,6 +47,26 @@ void near(double actual, double expected, double tolerance, const char* message)
                << ", expected=" << expected << ", tolerance=" << tolerance;
         throw std::runtime_error(detail.str());
     }
+}
+
+void checkObjectiveProgress() {
+    using namespace minecraft_sim;
+    ObjectiveProgress progress;
+    progress.reset({0, 0, 0}, {0, 0, 10});
+    auto delta = progress.advance({0, 0, 2}, false, false);
+    near(delta.toward, 2, 1e-12, "objective closer");
+    delta = progress.advance({0, 0, 1}, false, false);
+    near(delta.away, 1, 1e-12, "objective farther");
+    delta = progress.advance({0, 0, 2}, false, false);
+    near(delta.toward, 0, 1e-12, "objective revisit");
+    delta = progress.advance({0, 0, 0}, true, false);
+    near(delta.away, 0, 1e-12, "objective respawn");
+    delta = progress.advance({0, 0, 2}, false, false);
+    near(delta.toward, 0, 1e-12, "objective respawn revisit");
+    delta = progress.advance({0, 0, 0}, true, true);
+    near(delta.toward, 0, 1e-12, "objective completion teleport");
+    delta = progress.advance({0, 0, 2}, false, false);
+    near(delta.toward, 2, 1e-12, "new objective progress");
 }
 
 void checkBridgeLocalVoxels() {
@@ -192,6 +213,71 @@ void checkGoldenAppleBoundary() {
     processBridgeWorldTick(world, projectiles, initial, rules, match);
     require(players[0].health == 11.0F && players[0].golden_apple_regeneration_ticks == 99
         && match.kits[0].golden_apples == 1, "regeneration starts on next tick");
+}
+
+void checkStandaloneItemTick() {
+    using namespace minecraft_sim;
+    Block cells[7 * 4 * 7]{};
+    PlacedBlock overlay[7 * 4 * 7]{};
+    BlockWorldView blocks{cells, 7, 4, 7, -3, 0, -3, overlay};
+    for (int z = -3; z < 4; ++z) {
+        for (int x = -3; x < 4; ++x) cells[blocks.cellIndex(x, 0, z)] = Block::solid;
+    }
+    cells[blocks.cellIndex(0, 2, 1)] = Block::solid;
+    PlayerState players[2]{};
+    players[0].position = {0.5, 1.0, -1.5};
+    players[1].position = {-2.5, 1.0, 1.5};
+    players[0].on_ground = players[1].on_ground = true;
+    Controls queued[2]{}, held[2]{};
+    WorldState world_state;
+    WorldView world(players, queued, held, &world_state, 2, blocks, {testTable().data()});
+    ProjectileWorldState projectiles;
+    ItemKitConfig configs[2]{};
+    configs[0].explicit_hotbar = true;
+    configs[0].slot_count = 3;
+    configs[0].slots[0] = ItemHotbarItem::blocks;
+    configs[0].slots[1] = ItemHotbarItem::pickaxe;
+    configs[0].slots[2] = ItemHotbarItem::golden_apple;
+    ItemKitState kits[2]{};
+    kits[0].blocks = 1;
+    kits[0].golden_apples = 1;
+    ItemBuildRules building;
+    building.enabled = true;
+    building.zone_count = 1;
+    building.zones[0] = {{-3, 0, -3}, {4, 4, 4}};
+    building.hardness = 1;
+    building.mining_speed = 15;
+    queued[0].select_weapon = true;
+    queued[0].selected_slot = 0;
+    queued[0].use_item = true;
+    auto events = processItemWorldTick(world, projectiles, configs, building, kits);
+    require(events.placed[0] && kits[0].blocks == 0, "standalone item placement");
+    queued[0] = {};
+    queued[0].select_weapon = true;
+    queued[0].selected_slot = 1;
+    queued[0].attack = true;
+    const auto mining = queued[0];
+    processItemWorldTick(world, projectiles, configs, building, kits);
+    queued[0] = mining;
+    processItemWorldTick(world, projectiles, configs, building, kits);
+    near(itemProgressState(players[0], kits[0]).mining_progress, 0.5, 1e-6, "standalone mining progress");
+    queued[0] = mining;
+    events = processItemWorldTick(world, projectiles, configs, building, kits);
+    require(events.broke[0] && itemProgressState(players[0], kits[0]).mining_delay == 5,
+            "standalone mining completion");
+    queued[0] = {};
+    queued[0].select_weapon = true;
+    queued[0].selected_slot = 2;
+    queued[0].use_item = true;
+    const auto eating = queued[0];
+    processItemWorldTick(world, projectiles, configs, building, kits);
+    require(itemProgressState(players[0], kits[0]).eating_remaining == 31, "standalone eating progress");
+    for (int tick = 0; tick < 31; ++tick) {
+        queued[0] = eating;
+        processItemWorldTick(world, projectiles, configs, building, kits);
+    }
+    require(kits[0].golden_apples == 0 && itemProgressState(players[0], kits[0]).eating_remaining == 0,
+            "standalone eating completion");
 }
 
 void checkMutableTerrain() {
@@ -2325,11 +2411,13 @@ int main(int argc, char** argv) {
         require(bridge_match_checks::simultaneousBuilding({testTable().data()}), "Bridge ordered simultaneous building");
         require(bridge_match_checks::externalCutoff({testTable().data()}), "Bridge external cutoff retains final state");
         checkGoldenAppleBoundary();
+        checkStandaloneItemTick();
         const int apple_check = golden_apple_checks::run({testTable().data()});
         if (apple_check != 0) throw std::runtime_error("Golden apple shared check " + std::to_string(apple_check));
         require(terrain_checks::blockTargeting(), "full-cube block target faces and boundaries");
         checkMutableTerrain();
         checkBridgeLocalVoxels();
+        checkObjectiveProgress();
         checkCompositeWorldConsumers();
         checkPolicyFixtures();
         checkEquipmentObservation();

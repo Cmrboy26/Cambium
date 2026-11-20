@@ -44,10 +44,11 @@ accounting, limitations and live-world requirements.
 The experimental [static Bridge environment](../simulator/setups/environments/bridge/static-lane.json)
 adds a `bridge` configuration to environment version 2. Its resolved scenario
 keeps Bridge rules outside the native concrete scene. Host-staged research
-supports one fixed arena, fixed spawns and loadouts, scalar observations and
+supports one fixed arena per stage, fixed spawns and loadouts, scalar observations and
 an optional local voxel/match-state model, stationary or fixed-lane scripted
 opponents and self-play, with explicit score/win/loss task rewards. Fixed-scenario
-evaluation and website replay are supported. Sampling, task overrides, resident
+evaluation and website replay are supported. Stages may change arenas while
+retaining the same Bridge rules. Sampling, task overrides, resident
 collection, Fabric replay and live serving are not supported. See the
 [Bridge training reference](../simulator/training/AGENTS.md#experimental-bridge-batches).
 

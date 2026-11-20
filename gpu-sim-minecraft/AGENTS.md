@@ -27,6 +27,8 @@ Use the [contribution playbook](CONTRIBUTING.md) for source-derived mechanics,
 observations/actions, controllers, state lifecycle, rewards and verification.
 Use the [Phase 1 Bridge checklist](docs/BRIDGE_PHASE1_CHECKLIST.md) for the
 current implementation order, acceptance gates and agent handoffs.
+Keep its notes to major decisions, current status and blockers; do not add
+session histories, command transcripts, hashes or repetitive completion notes.
 For setup-only authoring, load the workspace's
 [GPU simulator setup skill](../.github/skills/gpu-sim-setup/SKILL.md) before
 changing definitions. It is also available as `/gpu-sim-setup` in supporting clients.

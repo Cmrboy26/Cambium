@@ -28,6 +28,7 @@ RUNS = Path(__file__).resolve().parent / "runs"
 ASSETS = Path(__file__).resolve().parent / "dashboard"
 METRICS = ("update", "samples", "completed_rounds", "terminated_duels", "terminated_matches", "timeouts",
            "bridge_goals_for", "bridge_goals_against", "bridge_wins", "bridge_losses", "bridge_draws",
+           "bridge_reward_score", "bridge_reward_opponent_score", "bridge_reward_toward", "bridge_reward_away",
            "replays_exported", "reward_mean", "reward_total", "loss", "policy_loss", "value_loss", "entropy",
            "collection_seconds", "update_seconds", "evaluation_seconds", "evaluation_episodes",
            "replay_seconds", "iteration_seconds", "elapsed_seconds", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes",

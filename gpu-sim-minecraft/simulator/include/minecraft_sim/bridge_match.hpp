@@ -25,6 +25,24 @@ struct BridgePlayerKit {
     BridgeBuildState building;
 };
 
+using ItemKitConfig = BridgeKitConfig;
+using ItemKitState = BridgePlayerKit;
+using ItemBuildRules = BridgeBuildRules;
+using ItemHotbarItem = BridgeHotbarItem;
+
+struct ItemProgressState {
+    int eating_remaining = 0;
+    int eating_duration = 32;
+    float mining_progress = 0.0F;
+    int use_delay = 0;
+    int mining_delay = 0;
+};
+
+MCSIM_HD inline ItemProgressState itemProgressState(const PlayerState& player, const ItemKitState& kit) {
+    return {player.golden_apple_use_ticks, 32, kit.building.break_progress,
+            kit.building.use_delay, kit.building.break_delay};
+}
+
 struct BridgeMatchRules {
     Aabb goals[2]{};
     double void_y = -64.0;
@@ -228,14 +246,19 @@ MCSIM_HD inline BridgeTickEvents finishBridgeWorldTick(WorldView world, Projecti
     return events;
 }
 
-MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, ProjectileWorldState& projectiles,
-                                                        const PlayerState (&initial)[2],
-                                                        const BridgeMatchRules& rules, BridgeMatchState& state,
-                                                        int external_cutoff = 0) {
-    if (world.playerCount() != 2 || state.outcome != BridgeOutcome::ongoing || rules.goals_to_win <= 0
-        || rules.max_ticks <= 0 || rules.cage_ticks < 0 || rules.arrow_refill_ticks < 0
-        || !validBridgeBuildRules(rules.building) || (rules.building.enabled && !world.blocks().overlay)) return BridgeTickEvents();
-    const bool caged = state.cage_remaining > 0;
+struct ItemTickEvents {
+    bool advanced = false;
+    bool placed[2]{};
+    bool broke[2]{};
+    TerrainEdit terrain_edits[2]{};
+};
+
+MCSIM_HD inline ItemTickEvents processItemWorldTick(WorldView world, ProjectileWorldState& projectiles,
+                                                    const ItemKitConfig (&configs)[2], const ItemBuildRules& building_rules,
+                                                    ItemKitState (&kits)[2], int arrow_refill_ticks = 0,
+                                                    bool caged = false) {
+    if (world.playerCount() != 2 || arrow_refill_ticks < 0 || !validBridgeBuildRules(building_rules)
+        || (building_rules.enabled && !world.blocks().overlay)) return ItemTickEvents();
     const bool movement_locked[2]{caged, caged};
     Vec3 locked_positions[2]{};
     int arrows_before_tick[2]{};
@@ -246,9 +269,15 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
     for (int player = 0; player < 2; ++player) {
         arrows_before_tick[player] = projectiles.bows[player].ordinary_arrows;
         locked_positions[player] = world.player(player).state().position;
-        auto controls = bridgeControls(state, world.queuedInput(player));
-        const auto& kit = rules.kits[player];
-        auto& building = state.kits[player].building;
+        auto controls = world.queuedInput(player);
+        if (caged) {
+            Controls locked;
+            locked.yaw_delta = controls.yaw_delta;
+            locked.pitch_delta = controls.pitch_delta;
+            controls = locked;
+        }
+        const auto& kit = configs[player];
+        auto& building = kits[player].building;
         if (building.use_delay > 0) --building.use_delay;
         const int slot = controls.select_weapon ? controls.selected_slot : world.player(player).state().selected_weapon_slot;
         // Minecraft 26.3: Minecraft.handleKeybinds (1939-1973); LivingEntity.updatingUsingItem (3428-3436).
@@ -274,17 +303,17 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
                 source.pitch = static_cast<float>(maximum(-90.0, minimum(90.0, source.pitch + controls.pitch_delta)));
                 if (kit.slots[slot] == BridgeHotbarItem::blocks) {
                     cancelBridgeBreaking(building);
-                    if (rules.building.enabled && controls.use_item && building.use_delay == 0) {
+                    if (building_rules.enabled && controls.use_item && building.use_delay == 0) {
                         building.use_delay = 4;
                         const auto target = bridgeInteractionTarget(world, player, source,
-                            rules.building.block_range, rules.building.entity_range);
-                        placed[player] = placeBridgeBlock(world, target, rules.building, player,
-                                                          state.kits[player].blocks, edits[player]);
+                            building_rules.block_range, building_rules.entity_range);
+                        placed[player] = placeBridgeBlock(world, target, building_rules, player,
+                                                          kits[player].blocks, edits[player]);
                     }
-                } else if (rules.building.enabled && controls.attack) {
+                } else if (building_rules.enabled && controls.attack) {
                     const auto target = bridgeInteractionTarget(world, player, source,
-                        rules.building.block_range, rules.building.entity_range);
-                    broken[player] = breakBridgeBlock(world, target, rules.building, building, player);
+                        building_rules.block_range, building_rules.entity_range);
+                    broken[player] = breakBridgeBlock(world, target, building_rules, building, player);
                     if (broken[player]) edits[player] = {TerrainEditAction::remove,
                         target.block.x, target.block.y, target.block.z};
                 } else {
@@ -297,15 +326,15 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
                 if (kit.slots[slot] == BridgeHotbarItem::golden_apple) {
                     controls.attack = false;
                     // Minecraft 26.3: Consumable.startConsuming/consumeTicks (61-73, 101-103).
-                    if (controls.use_item && actor.alive() && state.kits[player].golden_apples > 0
+                    if (controls.use_item && actor.alive() && kits[player].golden_apples > 0
                         && actor.golden_apple_use_ticks == 0 && !actor.using_shield
                         && !projectiles.bows[player].using_bow
-                        && (!rules.building.enabled || building.use_delay == 0)) {
+                        && (!building_rules.enabled || building.use_delay == 0)) {
                         actor.golden_apple_use_ticks = 32;
-                        if (rules.building.enabled) building.use_delay = 4;
+                        if (building_rules.enabled) building.use_delay = 4;
                     }
                     controls.use_item = false;
-                } else if (rules.building.enabled && controls.use_item) {
+                } else if (building_rules.enabled && controls.use_item) {
                     const auto actor = world.player(player);
                     const auto& player_state = actor.state();
                     const bool same_slot = !controls.select_weapon || controls.selected_slot == player_state.selected_weapon_slot;
@@ -328,18 +357,37 @@ MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, Project
         }
     }
     for (int player = 0; player < 2; ++player) {
-        if (world.player(player).state().golden_apple_consumed && state.kits[player].golden_apples > 0) {
-            --state.kits[player].golden_apples;
+        if (world.player(player).state().golden_apple_consumed && kits[player].golden_apples > 0) {
+            --kits[player].golden_apples;
         }
-        tickBridgeKit(state.kits[player], world.player(player).state(), projectiles.bows[player],
-                      arrows_before_tick[player], rules.arrow_refill_ticks);
+        tickBridgeKit(kits[player], world.player(player).state(), projectiles.bows[player],
+                      arrows_before_tick[player], arrow_refill_ticks);
     }
-    const bool preserve_final_state = external_cutoff > 0 && state.ticks >= external_cutoff - 1;
-    auto events = finishBridgeWorldTick(world, projectiles, initial, rules, state, preserve_final_state);
+    ItemTickEvents events;
+    events.advanced = true;
     for (int player = 0; player < 2; ++player) {
         events.placed[player] = placed[player];
         events.broke[player] = broken[player];
         events.terrain_edits[player] = edits[player];
+    }
+    return events;
+}
+
+MCSIM_HD inline BridgeTickEvents processBridgeWorldTick(WorldView world, ProjectileWorldState& projectiles,
+                                                        const PlayerState (&initial)[2],
+                                                        const BridgeMatchRules& rules, BridgeMatchState& state,
+                                                        int external_cutoff = 0) {
+    if (state.outcome != BridgeOutcome::ongoing || rules.goals_to_win <= 0
+        || rules.max_ticks <= 0 || rules.cage_ticks < 0) return BridgeTickEvents();
+    const auto item_events = processItemWorldTick(world, projectiles, rules.kits, rules.building, state.kits,
+                                                   rules.arrow_refill_ticks, state.cage_remaining > 0);
+    if (!item_events.advanced) return BridgeTickEvents();
+    const bool preserve_final_state = external_cutoff > 0 && state.ticks >= external_cutoff - 1;
+    auto events = finishBridgeWorldTick(world, projectiles, initial, rules, state, preserve_final_state);
+    for (int player = 0; player < 2; ++player) {
+        events.placed[player] = item_events.placed[player];
+        events.broke[player] = item_events.broke[player];
+        events.terrain_edits[player] = item_events.terrain_edits[player];
     }
     return events;
 }

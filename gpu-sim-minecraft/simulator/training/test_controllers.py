@@ -840,6 +840,37 @@ class CheckpointChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             controller.act(observations(self.contract, 8))
 
+    def test_structured_bridge_checkpoint_requires_explicit_compatible_descriptor(self):
+        descriptor = bridge_observation_descriptor()
+        model = BridgeActorCritic(self.contract["observation_dim"], descriptor, 8,
+                                  dict(zip(self.contract["action_names"], self.contract["action_sizes"])))
+        self.saved["metadata"].update(bridge_observation=descriptor,
+                                      scenario={"experimental_bridge": {"mode": {"name": "bridge", "version": 1}}})
+        self.saved["model"] = model.state_dict()
+        torch.save(self.saved, self.path)
+        with self.assertRaisesRegex(ValueError, "Structured Bridge checkpoints"):
+            CheckpointController(self.path, self.contract, 2)
+        controller = CheckpointController(self.path, self.contract, 2, bridge_observation=descriptor)
+        self.assertIsInstance(controller.model, BridgeActorCritic)
+        self.assertFalse(controller.model.training)
+        self.assertTrue(all(not parameter.requires_grad for parameter in controller.model.parameters()))
+        inputs = {"scalar": observations(self.contract, 2).astype(np.float32),
+                  "match": np.zeros((2, 10), dtype=np.float32),
+                  "voxels": np.zeros((2, 5, 9, 9), dtype=np.uint8)}
+        self.assertEqual(controller.act(inputs).shape, (2, len(self.contract["actions"])))
+        restored = CheckpointController(self.path, self.contract, 2, bridge_observation=descriptor)
+        restored.load_state_dict(controller.state_dict())
+        np.testing.assert_array_equal(controller.act(inputs), restored.act(inputs))
+        self.saved["metadata"]["bridge_observation"] = {**descriptor, "version": True}
+        torch.save(self.saved, self.path)
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            CheckpointController(self.path, self.contract, 2, bridge_observation=descriptor)
+        self.saved["metadata"]["bridge_observation"] = descriptor
+        self.saved["metadata"]["scenario"] = {}
+        torch.save(self.saved, self.path)
+        with self.assertRaisesRegex(ValueError, "not a Bridge policy"):
+            CheckpointController(self.path, self.contract, 2, bridge_observation=descriptor)
+
     def test_rng_independence_and_checkpointable_sampling_roundtrip(self):
         learner_rng = torch.get_rng_state().clone()
         self.addCleanup(torch.set_rng_state, learner_rng)

@@ -5,6 +5,7 @@
 #include "minecraft_sim/cuda_backend.hpp"
 #include "minecraft_sim/terrain.hpp"
 #include "minecraft_sim/bridge_observation.hpp"
+#include "minecraft_sim/objective_progress.hpp"
 
 #include <algorithm>
 #include <array>
@@ -75,6 +76,11 @@ struct TrainingBatch {
     float bridge_score_reward = 0.0F;
     float bridge_win_reward = 0.0F;
     float bridge_loss_reward = 0.0F;
+    float bridge_opponent_score_reward = 0.0F;
+    float bridge_toward_reward = 0.0F;
+    float bridge_away_penalty = 0.0F;
+    std::vector<ObjectiveProgress> objective_progress;
+    std::vector<std::array<double, 4>> bridge_reward_terms;
     std::vector<std::uint8_t> dealt_damage;
     std::vector<std::uint64_t> episodes;
     std::vector<int> observed_opponent_disable;
@@ -576,9 +582,15 @@ struct TrainingBatch {
 #endif
         }
         const auto& task = config.at("task_rewards");
-        if (!task.is_object() || task.size() != 3 || !task.contains("score")
+        if (!task.is_object() || !task.contains("score")
             || !task.contains("win") || !task.contains("loss")) {
             throw std::invalid_argument("Bridge requires explicit score, win and loss rewards");
+        }
+        for (const auto& field : task.items()) {
+            if (field.key() != "score" && field.key() != "win" && field.key() != "loss"
+                && field.key() != "opponent_score" && field.key() != "toward" && field.key() != "away") {
+                throw std::invalid_argument("Unsupported Bridge reward field");
+            }
         }
         float task_weights[3]{};
         const char* names[3]{"score", "win", "loss"};
@@ -590,10 +602,35 @@ struct TrainingBatch {
             }
             task_weights[index] = static_cast<float>(value);
         }
-        for (int index = 1; index < 3; ++index) {
-            if (std::abs(double(task_weights[0]) + task_weights[index]) > (std::numeric_limits<float>::max)()) {
-                throw std::invalid_argument("Combined Bridge score and outcome rewards must be finite floats");
+        double opponent_score = 0.0;
+        if (task.contains("opponent_score")) {
+            if (!task["opponent_score"].is_number()) throw std::invalid_argument("Bridge reward weights must be finite");
+            opponent_score = task["opponent_score"].get<double>();
+            if (!std::isfinite(opponent_score) || std::abs(opponent_score) > (std::numeric_limits<float>::max)()) {
+                throw std::invalid_argument("Bridge reward weights must be finite floats");
             }
+        }
+        for (int scored = 0; scored < 2; ++scored) {
+            for (int opposed = 0; opposed < 2; ++opposed) {
+                for (int outcome = 0; outcome < 3; ++outcome) {
+                    const double total = scored * double(task_weights[0]) + opposed * opponent_score
+                        + (outcome == 0 ? 0.0 : double(task_weights[outcome]));
+                    if (std::abs(total) > (std::numeric_limits<float>::max)()) {
+                        throw std::invalid_argument("Combined Bridge score and outcome rewards must be finite floats");
+                    }
+                }
+            }
+        }
+        float progress_weights[2]{};
+        const char* progress_names[2]{"toward", "away"};
+        for (int index = 0; index < 2; ++index) {
+            if (!task.contains(progress_names[index])) continue;
+            if (!task[progress_names[index]].is_number()) throw std::invalid_argument("Invalid objective progress weight");
+            const double value = task[progress_names[index]].get<double>();
+            if (!std::isfinite(value) || value < 0.0 || value > 1000.0) {
+                throw std::invalid_argument("Objective progress weights must be in 0..1000");
+            }
+            progress_weights[index] = static_cast<float>(value);
         }
         validateBridgeKitObservations(rules);
         for (const auto& definitions : episode_players) {
@@ -619,10 +656,15 @@ struct TrainingBatch {
         bridge_initial.resize(worlds.size());
         bridge_states.resize(worlds.size());
         bridge_events.resize(worlds.size());
+        objective_progress.resize(players.size());
+        bridge_reward_terms.resize(players.size());
         bridge_rules = rules;
         bridge_score_reward = task_weights[0];
         bridge_win_reward = task_weights[1];
         bridge_loss_reward = task_weights[2];
+        bridge_opponent_score_reward = static_cast<float>(opponent_score);
+        bridge_toward_reward = progress_weights[0];
+        bridge_away_penalty = progress_weights[1];
         bridge_configuration = config;
         auto resolved = nlohmann::json::parse(scenario);
         resolved.erase("reward_weights");
@@ -670,6 +712,14 @@ struct TrainingBatch {
             for (int player = 0; player < 2; ++player) {
                 const auto index = std::size_t(environment) * 2 + player;
                 players[index] = episode_players[environment].players[player];
+                if (bridge_enabled) {
+                    const auto& goal = bridge_rules.goals[1 - player];
+                    const Vec3 target{(goal.lower.x + goal.upper.x) / 2.0,
+                                      (goal.lower.y + goal.upper.y) / 2.0,
+                                      (goal.lower.z + goal.upper.z) / 2.0};
+                    objective_progress[index].reset(players[index].position, target);
+                    bridge_reward_terms[index].fill(0.0);
+                }
                 players[index].random.setSeed(seed + index * 1000003ULL + episode * 1000033ULL);
                 projectile_states[environment].bows[player].ordinary_arrows = players[index].ordinary_arrow_count;
                 arrow_summaries[index] = summarizeArrowObservation(
@@ -950,7 +1000,15 @@ struct TrainingBatch {
                         if (observed_opponent_disable[index] > 0) --observed_opponent_disable[index];
                         if (players[index].last_attack.shield_disabled) observed_opponent_disable[index] = 99;
                     }
-                    rewards[index] = events.scored[player] ? bridge_score_reward : 0.0F;
+                    const bool teleported = events.round_reset || events.respawn[player];
+                    const auto progress = objective_progress[index].advance(players[index].position,
+                        teleported, events.round_reset && events.scored[player]);
+                    auto& terms = bridge_reward_terms[index];
+                    terms = {events.scored[player] ? double(bridge_score_reward) : 0.0,
+                             events.scored[1 - player] ? double(bridge_opponent_score_reward) : 0.0,
+                             progress.toward / 50.0 * bridge_toward_reward,
+                             -progress.away / 50.0 * bridge_away_penalty};
+                    rewards[index] = static_cast<float>(terms[0] + terms[1] + terms[2] + terms[3]);
                     const auto winner = player == 0 ? BridgeOutcome::team0 : BridgeOutcome::team1;
                     if (events.terminated && events.outcome != BridgeOutcome::draw) {
                         rewards[index] += events.outcome == winner ? bridge_win_reward : bridge_loss_reward;
@@ -1036,6 +1094,9 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"cuda_resident_episode_version", 1},
         {"bridge_host_batch_version", 3},
         {"bridge_local_voxels_version", 1},
+        {"bridge_opponent_score_version", 1},
+        {"bridge_objective_reward_version", 1},
+        {"actor_task_state_version", 1},
         {"behavior_events_version", 1},
         {"players_per_environment", 2},
         {"scalar_bytes", {{"observation", sizeof(float)}, {"action", sizeof(std::int32_t)},
@@ -1250,6 +1311,44 @@ MCSIM_EXPORT const char* mcsim_bridge_kits(void* handle, int player) {
         description = worlds.dump();
     });
     return result == 0 ? description.c_str() : nullptr;
+}
+MCSIM_EXPORT int mcsim_actor_task_state(void* handle, double* output, std::size_t count) {
+    return protect([&] {
+        if (!handle || !output) throw std::invalid_argument("Null actor task state argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        if (count != batch.players.size() * 9) throw std::invalid_argument("Invalid actor task state buffer size");
+        for (std::size_t index = 0; index < batch.players.size(); ++index) {
+            const auto& actor = batch.players[index];
+            const auto world = index / 2;
+            const auto player = index % 2;
+            double* row = output + index * 9;
+            row[0] = actor.position.x;
+            row[1] = actor.position.y;
+            row[2] = actor.position.z;
+            row[3] = actor.yaw;
+            row[4] = actor.pitch;
+            const ItemKitState empty_kit;
+            const auto progress = itemProgressState(actor, batch.bridge_enabled ? batch.bridge_states[world].kits[player] : empty_kit);
+            row[5] = progress.eating_remaining;
+            row[6] = progress.mining_progress;
+            row[7] = progress.use_delay;
+            row[8] = progress.mining_delay;
+        }
+    });
+}
+MCSIM_EXPORT int mcsim_bridge_reward_terms(void* handle, double* output, std::size_t count) {
+    return protect([&] {
+        if (!handle || !output) throw std::invalid_argument("Null Bridge reward terms argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        if (!batch.bridge_enabled || count != batch.players.size() * 4) {
+            throw std::invalid_argument("Invalid Bridge reward terms buffer");
+        }
+        for (std::size_t index = 0; index < batch.players.size(); ++index) {
+            std::copy(batch.bridge_reward_terms[index].begin(), batch.bridge_reward_terms[index].end(), output + index * 4);
+        }
+    });
 }
 MCSIM_EXPORT int mcsim_observe(void* handle, float* observations) {
     return protect([&] {

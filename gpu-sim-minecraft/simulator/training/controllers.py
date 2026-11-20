@@ -634,7 +634,7 @@ class _PolicyController(_BatchedController):
         scalar, indices = self._batch(observations["scalar"], indices)
         match, voxels = observations["match"], observations["voxels"]
         if (scalar.dtype != np.float32 or not isinstance(match, np.ndarray)
-                or match.dtype != np.float32 or match.shape != (len(scalar), 10)
+                or match.dtype != np.float32 or match.shape != (len(scalar), self.model.match_dim)
                 or not np.isfinite(match).all() or not isinstance(voxels, np.ndarray)
                 or voxels.dtype != np.uint8 or voxels.shape != (len(scalar), 5, 9, 9)
                 or (voxels >= 5).any()):
@@ -836,9 +836,10 @@ class FrozenSelfPlayController(SelfPlayController):
 
 class CheckpointController(_PolicyController):
     def __init__(self, path, contract, count, device="cpu", seed=1, deterministic=False,
-                 expected_sha256=None):
+                 expected_sha256=None, bridge_observation=None):
         import torch
-        from backend.fast_rl_model import ActorCritic
+        from backend.fast_rl_model import ActorCritic, BridgeActorCritic
+        from simulator.training.contract import validate_bridge_observation_descriptor
         from simulator.training.policies import fixed_indices
 
         super().__init__(contract, count, seed)
@@ -863,10 +864,21 @@ class CheckpointController(_PolicyController):
                 or type(saved.get("version")) is not int or saved["version"] != 1):
             raise ValueError("Checkpoint is not a compatible standalone PPO policy")
         metadata = saved.get("metadata")
-        reject_structured_bridge_checkpoint(metadata)
         if (not isinstance(metadata, dict) or metadata.get("players_per_environment") != 2
                 or metadata.get("learner") not in ("both_shared_policy", "opponent_pool")):
             raise ValueError("Checkpoint is not a compatible standalone PPO policy")
+        if bridge_observation is None:
+            reject_structured_bridge_checkpoint(metadata)
+        else:
+            descriptor = validate_bridge_observation_descriptor(bridge_observation)
+            if validate_bridge_observation_descriptor(metadata.get("bridge_observation")) != descriptor:
+                raise ValueError("Checkpoint Bridge observation descriptor differs")
+            scenario = metadata.get("scenario", {})
+            bridge = scenario.get("experimental_bridge") if isinstance(scenario, dict) else None
+            mode = bridge.get("mode") if isinstance(bridge, dict) else None
+            if not isinstance(mode, dict) or mode != {"name": "bridge", "version": 1} or type(mode["version"]) is not int:
+                raise ValueError("Checkpoint is not a Bridge policy")
+            self._description["bridge_observation"] = descriptor
         descriptors = [metadata[key] for key in ("schema", "contract") if key in metadata]
         if not descriptors or any(fingerprint(_contract(value)) != self.contract_hash
                                   for value in descriptors):
@@ -878,9 +890,10 @@ class CheckpointController(_PolicyController):
         hidden = _integer(metadata.get("hidden_dim"), "checkpoint hidden_dim", 1, 4096)
         # Initialization consumes global CPU RNG even though all weights are replaced.
         with torch.random.fork_rng(devices=[]):
-            self.model = ActorCritic(self.contract["observation_dim"], hidden,
-                                    action_sizes=dict(zip(self.contract["action_names"],
-                                                          self.contract["action_sizes"])))
+            sizes = dict(zip(self.contract["action_names"], self.contract["action_sizes"]))
+            self.model = (BridgeActorCritic(self.contract["observation_dim"], descriptor, hidden, sizes)
+                          if bridge_observation is not None else
+                          ActorCritic(self.contract["observation_dim"], hidden, action_sizes=sizes))
         try:
             self.model.load_state_dict(saved["model"], strict=True)
         except (KeyError, TypeError, RuntimeError) as error:
@@ -890,6 +903,10 @@ class CheckpointController(_PolicyController):
         self.model.to(self.device).eval().requires_grad_(False)
         self.deterministic = deterministic
         self._generator = torch.Generator(device=self.device).manual_seed(self.seed)
+        if bridge_observation is not None:
+            seeds = np.random.SeedSequence(self.seed).spawn(self.count)
+            self._actor_generators = [torch.Generator(device=self.device).manual_seed(
+                int(stream.generate_state(1, dtype=np.uint64)[0]) % 2**63) for stream in seeds]
         self._description.update(type="checkpoint", path=str(self.path), sha256=self.sha256,
                                  device=str(self.device), deterministic=deterministic,
                                  controls=deepcopy(controls))
@@ -945,7 +962,8 @@ def create_controller(definition, contract, count, device="cpu", seed=1, *, lear
         if not isinstance(path, (str, Path)) or not str(path):
             raise ValueError("Checkpoint controller requires a path")
         return CheckpointController(path, contract, count, device, seed,
-                                    definition.get("deterministic", False), definition.get("sha256"))
+                        definition.get("deterministic", False), definition.get("sha256"),
+                        getattr(learner, "descriptor", None))
     raise ValueError(f"Unknown controller type: {kind!r}")
 
 

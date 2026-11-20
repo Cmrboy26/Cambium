@@ -1,0 +1,79 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "bridge-gated-baseline",
+  "seed": 42,
+  "policy": "../../policies/bridge/building-items.json",
+  "environment": "../../environments/bridge/building-items.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
+  "bridge_observation": {
+    "format": "minecraft_sim_bridge_observation",
+    "version": 1,
+    "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1},
+    "voxel_shape": [5, 9, 9],
+    "voxel_dtype": "uint8",
+    "voxel_categories": 5,
+    "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
+      "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress",
+      "refill_enabled", "own_selected_slot"],
+    "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)",
+      "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8"],
+    "voxel_perspective": "actor_feet_yaw_v1",
+    "sampling": "current_host_state",
+    "model": "bridge_voxel_actor_critic_v1"
+  },
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "runner": {"type": "scripted", "controller": "bridge_fixed_lane"}
+  },
+  "mixtures": {
+    "target": [{"id": "target", "weight": 1}],
+    "runner": [{"id": "runner", "weight": 1}]
+  },
+  "snapshots": [{"name": "initial", "at_updates": 0}],
+  "stages": [
+    {
+      "name": "reach-goal",
+      "opponents": "target",
+      "controls": {"fixed": {"jump": false, "sprint": false, "sneak": false,
+                             "attack": false, "yaw": 0, "pitch": 0, "weapon": 0, "use_item": false}},
+      "evaluations": {
+        "reach-a": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
+        "reach-b": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
+      },
+      "advance": {"all": [
+        {"evaluation": {"suite": "reach-a", "metric": "goals_for_mean", "at_least": 0.25}},
+        {"evaluation": {"suite": "reach-b", "metric": "goals_for_mean", "at_least": 0.25}}
+      ]},
+      "snapshots": [{"name": "reach-goal", "on_completion": true}]
+    },
+    {
+      "name": "defeat-target",
+      "opponents": "target",
+      "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
+      "evaluations": {
+        "target-a": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
+        "target-b": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
+      },
+      "advance": {"all": [
+        {"evaluation": {"suite": "target-a", "metric": "win_rate", "at_least": 0.25}},
+        {"evaluation": {"suite": "target-b", "metric": "win_rate", "at_least": 0.25}}
+      ]},
+      "snapshots": [{"name": "defeat-target", "on_completion": true}]
+    },
+    {
+      "name": "defeat-runner",
+      "opponents": "runner",
+      "controls": {"fixed": {}},
+      "evaluations": {
+        "runner-a": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
+        "runner-b": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
+      },
+      "advance": {"all": [
+        {"evaluation": {"suite": "runner-a", "metric": "win_rate", "at_least": 0.125}},
+        {"evaluation": {"suite": "runner-b", "metric": "win_rate", "at_least": 0.125}}
+      ]},
+      "snapshots": [{"name": "bridge-baseline", "on_completion": true}]
+    }
+  ]
+}

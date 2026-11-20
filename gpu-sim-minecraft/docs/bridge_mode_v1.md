@@ -167,10 +167,11 @@ field. Unknown fields, versions and altered values are rejected.
 }
 ```
 
-All stages and evaluations must use fixed Bridge scenarios, with host collection
-and mixtures of `stationary_target`, `bridge_fixed_lane`, current-policy and
-frozen self-play opponents. Checkpoint opponents, mixed Bridge/duel plans,
-resident execution and live inference remain unsupported. The model's
+All stages and evaluations must use fixed Bridge scenarios with the same Bridge
+rules; fixed arenas may differ between stages. With host collection
+and mixtures of `stationary_target`, `bridge_fixed_lane`, compatible structured
+checkpoint, current-policy and frozen self-play opponents. Mixed Bridge/duel
+plans, resident execution and live inference remain unsupported. The model's
 descriptor is saved in checkpoint and snapshot metadata and v4 replay provenance.
 Resume restores the model, optimizer, RNG and sampler/pool/reset counters, then
 starts fresh episodes rather than restoring in-flight matches. Initialization and
@@ -208,6 +209,29 @@ ticks divided by `max(1,arrow_refill_ticks)`; 1 if arrow refill is enabled,
 otherwise 0; and own selected slot divided by 8. Values are not clipped. Only
 the actor's own inventory and refill progress are included. The scalar catalogue
 continues to govern separately configured visible opponent features.
+
+Version 2 retains those ten values and appends the actor's active golden-apple
+eating progress and mining progress, yaw and pitch error and distance to the
+center of the opposing goal, and use and mining cooldown fractions. Eating is
+elapsed ticks divided by 32 while active, otherwise zero; mining is the current
+breaking fraction. Angles are divided by 180 and 90 degrees respectively, and
+distance is clipped at 50 blocks and divided by 50. Use and mining delays are
+divided by four and five ticks. Only the actor's own item state is exposed.
+The v2 model has 17 match features and cannot load v1 weights. Its actor pose and
+item-state API and objective geometry encoder are task-neutral, and the shared
+native item tick can be called without Bridge match rules. Ordinary authored duel
+environments do not currently enable these item actions or automatically append
+the task features to their policies.
+
+Optional `task_rewards.opponent_score` pays when the opposing player scores.
+Nonnegative `toward` and `away` independently weight distance progress and
+retreat per 50 blocks; `away` is subtracted. Toward rewards only improvement
+beyond the actor's previous best distance to the current goal. Death and round
+teleports never pay progress, and a death does not reset that best distance;
+scoring starts a new progress budget for the scorer. Positive-only shaping is
+not potential-based and may change the optimal policy. Curriculum gates still
+use actual goal or match outcomes, not shaped return. The four per-rollout score,
+opponent-score, toward and away contributions are logged separately.
 
 ### Proposed Structured Terrain Observations
 

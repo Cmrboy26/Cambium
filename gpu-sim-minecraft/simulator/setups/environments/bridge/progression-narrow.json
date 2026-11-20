@@ -1,0 +1,29 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 2,
+  "minecraft": "26.3",
+  "name": "bridge-progression-narrow",
+  "arena": "../../arenas/bridge/narrow-lane-15.json",
+  "players": {
+    "shared": {"loadout": {"weapons": ["minecraft:diamond_sword", "minecraft:bow", "minecraft:air", "minecraft:air", "minecraft:air"],
+                            "selected": 0, "offhand": "minecraft:air", "arrows": 1}},
+    "overrides": [{"position": [0.5, 1, -9.5], "yaw": 0}, {"position": [0.5, 1, 9.5], "yaw": 180}]
+  },
+  "task": {"max_ticks": 1500, "rewards": {}},
+  "bridge": {
+    "mode": {"name": "bridge", "version": 1},
+    "goals": [{"min": [-2, 1, -11], "max": [2, 3, -10]},
+              {"min": [-2, 1, 10], "max": [2, 3, 11]}],
+    "void_y": -3,
+    "match": {"goals_to_win": 3, "max_ticks": 1200, "cage_ticks": 40,
+              "persist_blocks_on_goal": true, "arrow_refill_ticks": 80},
+    "task_rewards": {"score": 1, "win": 5, "loss": -5},
+    "kits": [
+      {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", "empty", "empty", "empty", "empty"], "blocks": 64, "golden_apples": 2},
+      {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", "empty", "empty", "empty", "empty"], "blocks": 64, "golden_apples": 2}
+    ],
+    "building": {"zones": [{"min": [-5, 0, -8], "max": [6, 4, 9]}],
+                 "block_range": 4.5, "entity_range": 3.0, "hardness": 0.8,
+                 "mining_speed": 1.0, "correct_tool": true}
+  }
+}

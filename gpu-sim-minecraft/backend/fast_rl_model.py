@@ -74,15 +74,16 @@ class BridgeActorCritic(nn.Module):
         from simulator.training.contract import validate_bridge_observation_descriptor
         self.descriptor = validate_bridge_observation_descriptor(descriptor)
         self.observation_dim = observation_dim
+        self.match_dim = len(self.descriptor["match_features"])
         self.voxel_encoder = nn.Sequential(nn.Conv3d(5, 8, 3, padding=1), nn.ReLU(),
                                            nn.AdaptiveAvgPool3d(1), nn.Flatten())
-        self.policy = ActorCritic(observation_dim + 10 + 8, hidden_dim, action_sizes=action_sizes)
+        self.policy = ActorCritic(observation_dim + self.match_dim + 8, hidden_dim, action_sizes=action_sizes)
         self.action_names = self.policy.action_names
 
     def forward(self, inputs):
         scalar, match, voxels = inputs["scalar"], inputs["match"], inputs["voxels"]
         if (scalar.ndim != 2 or scalar.shape[1] != self.observation_dim
-                or match.shape != (scalar.shape[0], 10)
+                or match.shape != (scalar.shape[0], self.match_dim)
                 or voxels.shape != (scalar.shape[0], 5, 9, 9)
                 or scalar.dtype != torch.float32 or match.dtype != torch.float32 or voxels.dtype != torch.uint8):
             raise ValueError("Invalid Bridge observation tensors")

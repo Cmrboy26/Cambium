@@ -18,9 +18,10 @@ import torch
 from backend.fast_rl_model import ActorCritic, BridgeActorCritic
 from simulator.training.compiler import LEARNER_DEFAULTS, _structured_opponents, _validate_bridge_opponents
 from simulator.training.contract import fingerprint, validate_bridge_observation_descriptor
-from simulator.training.controllers import (BridgeFixedLaneController, FrozenSelfPlayController, SelfPlayController,
+from simulator.training.controllers import (BridgeFixedLaneController, CheckpointController, FrozenSelfPlayController, SelfPlayController,
                                             StationaryTargetController, create_controller)
 from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, actor_lost as _lost
+from simulator.training.objectives import actor_task_observations
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
 from simulator.training.ppo import compute_gae, metadata, optimize
@@ -28,10 +29,17 @@ from simulator.training.timing import CollectionTimer, OptimizationTimer
 
 
 BRIDGE_REWARD_SEMANTICS = "bridge_score_win_loss_v1"
+BRIDGE_OBJECTIVE_REWARD_SEMANTICS = "bridge_score_opponent_objective_progress_v2"
 
 
-def bridge_observation_inputs(environment, scalar):
-    """Sample the experimental Bridge v1 inputs from the current host state."""
+def bridge_reward_semantics(configuration):
+    fields = configuration["task_rewards"]
+    return (BRIDGE_OBJECTIVE_REWARD_SEMANTICS if set(fields) & {"opponent_score", "toward", "away"}
+            else BRIDGE_REWARD_SEMANTICS)
+
+
+def bridge_observation_inputs(environment, scalar, descriptor=None):
+    """Sample versioned Bridge inputs from the current host state."""
     if environment.bridge is None:
         raise ValueError("Structured Bridge observations require a Bridge environment")
     scalar = np.asarray(scalar)
@@ -41,11 +49,12 @@ def bridge_observation_inputs(environment, scalar):
     states = environment.bridge_state()
     kits = [environment.bridge_kits(player) for player in (0, 1)]
     voxels = environment.bridge_local_voxels()
-    features = np.empty((environment.count, 2, 10), dtype=np.float32)
+    version = 1 if descriptor is None else validate_bridge_observation_descriptor(descriptor)["version"]
+    features = np.empty((environment.count, 2, 10 if version == 1 else 17), dtype=np.float32)
     for world, state in enumerate(states):
         for player in (0, 1):
             kit = kits[player][world]
-            features[world, player] = (
+            features[world, player, :10] = (
                 state["scores"][player] / match["goals_to_win"],
                 state["scores"][1 - player] / match["goals_to_win"],
                 max(0, match["max_ticks"] - state["ticks"]) / match["max_ticks"],
@@ -54,6 +63,12 @@ def bridge_observation_inputs(environment, scalar):
                 kit["arrow_refill_elapsed"] / max(1, match["arrow_refill_ticks"]),
                 float(match["arrow_refill_ticks"] > 0), kit["selected_slot"] / 8,
             )
+    if version == 2:
+        goals = environment.bridge["goals"]
+        targets = np.asarray([(np.asarray(goals[1 - player]["min"]) + goals[1 - player]["max"]) / 2
+                              for player in (0, 1)], dtype=np.float64)
+        targets = np.broadcast_to(targets, (environment.count, 2, 3))
+        features[..., 10:] = actor_task_observations(environment.actor_task_state(), targets)
     return {"scalar": scalar.copy(), "match": features, "voxels": voxels}
 
 
@@ -100,7 +115,7 @@ def research_metadata(environment, hidden_dim, learner):
     result = metadata(environment, hidden_dim, learner)
     if environment.bridge is not None:
         result.pop("reward_weights", None)
-        result["reward_semantics"] = BRIDGE_REWARD_SEMANTICS
+        result["reward_semantics"] = bridge_reward_semantics(environment.bridge)
     return result
 
 
@@ -288,17 +303,18 @@ class SampledWorlds:
             result[ids] = environment.observe()
         return result
 
-    def bridge_observations(self, scalar):
+    def bridge_observations(self, scalar, descriptor=None):
         if self.bridge_scenario is None:
             raise ValueError("Structured Bridge observations require Bridge worlds")
         if (not isinstance(scalar, np.ndarray) or scalar.dtype != np.float32
                 or scalar.shape != (self.count, 2, self.observation_dim)):
             raise ValueError("Bridge scalar observations have an invalid shape or dtype")
+        version = 1 if descriptor is None else validate_bridge_observation_descriptor(descriptor)["version"]
         result = {"scalar": np.empty((self.count, 2, self.observation_dim), dtype=np.float32),
-                  "match": np.empty((self.count, 2, 10), dtype=np.float32),
+                  "match": np.empty((self.count, 2, 10 if version == 1 else 17), dtype=np.float32),
                   "voxels": np.empty((self.count, 2, 5, 9, 9), dtype=np.uint8)}
         for ids, environment in self.groups:
-            inputs = bridge_observation_inputs(environment, scalar[ids])
+            inputs = bridge_observation_inputs(environment, scalar[ids], descriptor)
             for name in result:
                 result[name][ids] = inputs[name]
         return result
@@ -382,6 +398,16 @@ class SampledWorlds:
                 goals_for += int(state["scored"][player])
                 goals_against += int(state["scored"][1 - player])
         return goals_for, goals_against
+
+    def bridge_reward_totals(self, learner_slots):
+        if any(environment.build_info.get("bridge_objective_reward_version") != 1 for _, environment in self.groups):
+            return None
+        totals = np.zeros(4, dtype=np.float64)
+        for ids, environment in self.groups:
+            terms = environment.bridge_reward_terms()
+            totals += terms[np.arange(len(ids)), learner_slots[ids]].sum(axis=0)
+        return dict(zip(("bridge_reward_score", "bridge_reward_opponent_score",
+                         "bridge_reward_toward", "bridge_reward_away"), totals.tolist()))
 
     def bridge_states(self):
         if self.bridge_scenario is None:
@@ -493,7 +519,7 @@ class OpponentPool:
             if len(selected):
                 controller = self.controllers[name]
                 slots = 1 - self.learner_slots[selected]
-                if bridge_inputs is not None and isinstance(controller, SelfPlayController):
+                if bridge_inputs is not None and isinstance(controller, (SelfPlayController, CheckpointController)):
                     opponent_inputs = {key: value[selected, slots] for key, value in bridge_inputs.items()}
                 else:
                     opponent_inputs = observations[selected, slots]
@@ -752,13 +778,13 @@ def collect(model, worlds, pool, observations, steps, device, fixed, profile=Fal
             raise ValueError("Structured Bridge collection requires a compatible fixed Bridge model and stage")
         _validate_structured_bridge_model(model, worlds.contract)
         if any(type(controller) not in (StationaryTargetController, BridgeFixedLaneController,
-                                        SelfPlayController, FrozenSelfPlayController)
+                                        SelfPlayController, FrozenSelfPlayController, CheckpointController)
                for controller in pool.controllers.values()):
-            raise ValueError("Structured Bridge collection supports scripted and self-play opponents only")
+            raise ValueError("Structured Bridge collection supports scripted, checkpoint and self-play opponents only")
         if (pool.count != worlds.count or any(controller.contract_hash != fingerprint(worlds.contract)
                                               for controller in pool.controllers.values())):
             raise ValueError("Structured Bridge opponent pool differs from the world contract")
-        if any(isinstance(controller, SelfPlayController) and
+        if any(isinstance(controller, (SelfPlayController, CheckpointController)) and
                (controller.describe.get("bridge_observation") != model.descriptor
                 or not isinstance(controller.model, BridgeActorCritic)
                 or controller.model.descriptor != model.descriptor
@@ -791,9 +817,9 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
         if structured_bridge:
             rollout["observations"] = {
                 "scalar": torch.empty((*shape, worlds.observation_dim), device=device),
-                "match": torch.empty((*shape, 10), device=device),
+                "match": torch.empty((*shape, model.match_dim), device=device),
                 "voxels": torch.empty((*shape, 5, 9, 9), dtype=torch.uint8, device=device)}
-            bridge_inputs = worlds.bridge_observations(observations)
+            bridge_inputs = worlds.bridge_observations(observations, model.descriptor)
         else:
             rollout["observations"] = torch.empty((*shape, worlds.observation_dim), device=device)
         rollout["actions"] = torch.empty((*shape, worlds.action_count), dtype=torch.long, device=device)
@@ -804,6 +830,9 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
         bridge_events = (dict.fromkeys(("bridge_goals_for", "bridge_goals_against", "bridge_wins",
                                        "bridge_losses", "bridge_draws"), 0)
                          if worlds.bridge_scenario is not None else None)
+        bridge_rewards = worlds.bridge_reward_totals(pool.learner_slots) if bridge_events is not None else None
+        if bridge_rewards is not None:
+            bridge_rewards = dict.fromkeys(bridge_rewards, 0.0)
         endings = timeouts = 0
         ids = np.arange(worlds.count)
     for step in range(steps):
@@ -836,7 +865,7 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
                     reward_types[name] += amount
         with timer.phase("next_value", cuda=True):
             if structured_bridge:
-                final_inputs = worlds.bridge_observations(final)
+                final_inputs = worlds.bridge_observations(final, model.descriptor)
                 next_observation = {name: torch.as_tensor(value[ids, slots], device=device)
                                     for name, value in final_inputs.items()}
             else:
@@ -857,6 +886,9 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
                 goals_for, goals_against = worlds.bridge_goal_counts(slots)
                 bridge_events["bridge_goals_for"] += goals_for
                 bridge_events["bridge_goals_against"] += goals_against
+                if bridge_rewards is not None:
+                    for name, value in worlds.bridge_reward_totals(slots).items():
+                        bridge_rewards[name] += value
             done = terminated | truncated
             endings += int(terminated.sum())
             timeouts += int(truncated.sum())
@@ -877,7 +909,7 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
             with timer.phase("environment_reset"):
                 observations = worlds.reset(done, timer=timer)
                 if structured_bridge:
-                    bridge_inputs = worlds.bridge_observations(observations)
+                    bridge_inputs = worlds.bridge_observations(observations, model.descriptor)
             with timer.phase("opponent_reset"):
                 pool.reset(done)
             if trace:
@@ -895,6 +927,8 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
     if reward_types is not None:
         rollout["reward_types"] = reward_types
     if bridge_events is not None:
+        if bridge_rewards is not None:
+            bridge_events.update(bridge_rewards)
         rollout["bridge_events"] = bridge_events
     rollout["episode_metrics"] = {**worlds.episode_metrics.snapshot(),
                                   "training_rollout": worlds.episode_metrics.rollout_snapshot()}
@@ -1005,7 +1039,7 @@ def _evaluate_bridge(model, plan, suite, options, device, opponent_pool):
         while finished < suite["episodes"]:
             slots = pool.learner_slots.copy()
             if structured:
-                inputs = worlds.bridge_observations(observations)
+                inputs = worlds.bridge_observations(observations, model.descriptor)
                 current = {name: torch.as_tensor(value[ids, slots], device=device)
                            for name, value in inputs.items()}
             else:
@@ -1245,7 +1279,7 @@ def export_replay(model, plan, stage, options, scenario, provenance, device, rou
                     for _ in range(environment.max_ticks):
                         slot = pool.learner_slots[0]
                         if structured:
-                            inputs = bridge_observation_inputs(environment, observations)
+                            inputs = bridge_observation_inputs(environment, observations, model.descriptor)
                             current = {name: torch.as_tensor(value[:, slot], device=device)
                                        for name, value in inputs.items()}
                         else:
@@ -1371,7 +1405,8 @@ def run(options, checkpoint=None):
         if checkpoint is not None:
             if (checkpoint.get("format") != "minecraft_sim_ppo" or checkpoint.get("version") != 1
                     or checkpoint["metadata"].get("reward_semantics") != (
-                        BRIDGE_REWARD_SEMANTICS if worlds.bridge_scenario is not None else REWARD_SEMANTICS)
+                        bridge_reward_semantics(worlds.bridge_scenario["bridge"])
+                        if worlds.bridge_scenario is not None else REWARD_SEMANTICS)
                     or checkpoint["metadata"]["hidden_dim"] != options.hidden_dim
                     or saved.get("rollout_steps") != options.rollout_steps
                     or saved.get("max_ticks_override") != options.max_ticks):

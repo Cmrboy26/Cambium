@@ -27,10 +27,10 @@ is explicitly rejected. Normal duel batches are unchanged.
 
 Authored Bridge environments place this configuration in their `bridge` field;
 the resolved scenario retains it separately from the native scene. The supported
-research subset has one fixed arena and fixed spawns/loadouts, existing scalar
+research subset has one fixed arena per stage and fixed spawns/loadouts, existing scalar
 policy features or the opt-in local voxel model, and zero duel reward weights.
-Supported opponents are stationary targets, fixed-lane runners and current or
-frozen self-play. The fixed-lane runner follows its initial north/south heading;
+Supported opponents are stationary targets, fixed-lane runners, compatible
+structured Bridge checkpoints, and current or frozen self-play. The fixed-lane runner follows its initial north/south heading;
 it is not a general navigation controller. The [building/items plan](../setups/curricula/bridge/building-voxel-selfplay.json)
 uses the experimental kit, building and local-voxel subsets.
 Bridge `task_rewards` provide score, win and loss signals; match-clock endings
@@ -38,11 +38,26 @@ are terminal, while an external limit truncates and bootstraps the final
 observation. Training logs match outcomes rather than duel reward breakdowns.
 The per-rollout `bridge_goals_for`, `bridge_goals_against`, `bridge_wins`,
 `bridge_losses` and `bridge_draws` counters are relative to the learner's seat.
-Fixed-scenario evaluation and version-4 website replay are supported. Replay
+Fixed-scenario evaluation and version-4 website replay are supported. Stages
+may use different fixed arenas with the same Bridge rules; changing the arena
+recreates worlds at the stage boundary. Replay
 export runs a separate sampled match; it is not a recording of an in-progress
 training world. Sampling, task overrides, resident collection, Fabric Bridge
 replay and live serving are rejected. Bridge checkpoints preserve reset counters
 and resume with fresh episodes; checkpoints missing those counters cannot be resumed.
+
+The optional `opponent_score`, `toward` and `away` task reward fields and the
+version-2 structured observation are specified in
+[Bridge mode](../../docs/bridge_mode_v1.md). `toward` and `away` are nonnegative
+independent weights; zero disables either term. The version-2 input requires
+`actor_task_state_version: 1` and uses new, incompatible model weights. The
+native item tick and actor-state/geometry encoders can be reused by other task
+implementations, but ordinary authored duel plans do not yet enable those item
+mechanics or append the new features to their policy contract.
+`Environment.item_progress()` exposes the actor's current eating and mining
+fractions in any host-staged batch; `actor_task_state()` exposes pose, countdown,
+mining progress and item delays for `actor_task_observations()` with task-chosen
+targets. In ordinary duels the item actions are not enabled, so mining is zero.
 
 For a bounded CPU plumbing check, choose a new output directory and run:
 
@@ -630,6 +645,15 @@ semantic contracts and finite parameters are required. Their SHA256 identities
 are embedded in the plan; changed opponents reject resume. Different legacy or
 custom layouts require explicit adapters and are not implicitly remapped.
 Checkpoints do not import their optimizer or curriculum into the opponent.
+
+For host-staged structured Bridge plans, a completed
+`snapshots/bridge-baseline.pt` can be used as a `checkpoint` opponent by setting
+its `path` in the opponent definition. The learner plan must use the same scalar
+policy and Bridge observation descriptor. Checkpoint weights and saved fixed
+controls remain frozen; `deterministic: true` selects argmax actions. Use the
+completed snapshot rather than a changing `latest.pt`; replacing the file
+invalidates the recorded hash and prevents resume. Scalar Bridge and live
+serving do not accept these structured checkpoint opponents.
 
 Self-play binds to the current learner model, with weights fixed during each
 rollout and following subsequent PPO updates, including episodes spanning updates.

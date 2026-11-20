@@ -266,6 +266,13 @@ class Environment:
             raise RuntimeError("Rebuild minecraft_sim_training for Bridge kits and arrow refill")
         if bridge_version < 3 and "building" in configuration:
             raise RuntimeError("Rebuild minecraft_sim_training for Bridge building")
+        task_rewards = configuration.get("task_rewards")
+        if (isinstance(task_rewards, dict) and "opponent_score" in task_rewards
+                and self.build_info.get("bridge_opponent_score_version") != 1):
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge opponent score rewards")
+        if (isinstance(task_rewards, dict) and set(task_rewards) & {"toward", "away"}
+                and self.build_info.get("bridge_objective_reward_version") != 1):
+            raise RuntimeError("Rebuild minecraft_sim_training for objective progress rewards")
         encoded = json.dumps(configuration, allow_nan=False).encode("utf-8")
         configure = self.native.mcsim_configure_bridge
         configure.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
@@ -274,6 +281,40 @@ class Environment:
         self.bridge = json.loads(encoded)
         self.definition = json.loads(self.native.mcsim_environment(self._handle))
         self.scenario = json.loads(self.native.mcsim_scenario(self._handle))
+
+    def actor_task_state(self):
+        """Return host actor pose and actual supported item progress, in world/player order."""
+        self._require_open()
+        function = getattr(self.native, "mcsim_actor_task_state", None)
+        if function is None or self.build_info.get("actor_task_state_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for actor task state")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        result = np.empty((self.count, 2, 9), dtype=np.float64)
+        self._check(function(self._handle, result.ctypes.data, result.size))
+        return result
+
+    def item_progress(self):
+        """Return each actor's current eating and mining fractions, independent of task mode."""
+        from simulator.training.item_progress import item_progress_observations
+
+        state = self.actor_task_state()
+        ticks = state[..., 5]
+        if not np.isfinite(ticks).all() or np.any(ticks != np.floor(ticks)):
+            raise RuntimeError("Invalid native eating progress")
+        return item_progress_observations(ticks.astype(np.int64), 32, state[..., 6])
+
+    def bridge_reward_terms(self):
+        """Return score, opponent score, toward, and away contributions per actor."""
+        self._require_open()
+        function = getattr(self.native, "mcsim_bridge_reward_terms", None)
+        if function is None or self.build_info.get("bridge_objective_reward_version") != 1:
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge reward terms")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        result = np.empty((self.count, 2, 4), dtype=np.float64)
+        self._check(function(self._handle, result.ctypes.data, result.size))
+        return result
 
     def bridge_state(self):
         """Return the latest score, match outcome and per-tick events for each world."""

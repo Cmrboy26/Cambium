@@ -27,8 +27,10 @@ _ARMOR_ITEMS = {slot: frozenset({"minecraft:air", *(f"minecraft:{material}_{slot
     for slot in _ARMOR_SLOTS}
 
 
-def bridge_observation_descriptor():
-    return {"format": "minecraft_sim_bridge_observation", "version": 1,
+def bridge_observation_descriptor(version=1):
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("Unsupported Bridge observation/model descriptor")
+    descriptor = {"format": "minecraft_sim_bridge_observation", "version": version,
             "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1},
             "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
             "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
@@ -38,6 +40,15 @@ def bridge_observation_descriptor():
                              "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8"],
             "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_host_state",
             "model": "bridge_voxel_actor_critic_v1"}
+    if version == 2:
+        descriptor["native_capabilities"]["actor_task_state_version"] = 1
+        descriptor["match_features"].extend(["own_eating_progress", "own_mining_progress",
+                                             "objective_yaw_error", "objective_pitch_error", "objective_distance",
+                                             "own_use_cooldown", "own_mining_cooldown"])
+        descriptor["match_scales"].extend(["32_ticks", "1", "180_degrees", "90_degrees", "50_blocks_clipped",
+                                           "4_ticks", "5_ticks"])
+        descriptor["model"] = "bridge_voxel_actor_critic_v2"
+    return descriptor
 
 
 def validate_bridge_observation_descriptor(value):
@@ -45,8 +56,9 @@ def validate_bridge_observation_descriptor(value):
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError):
         raise ValueError("Unsupported Bridge observation/model descriptor") from None
-    expected = json.dumps(bridge_observation_descriptor(), sort_keys=True, separators=(",", ":"))
-    if encoded != expected:
+    expected = [json.dumps(bridge_observation_descriptor(version), sort_keys=True, separators=(",", ":"))
+                for version in (1, 2)]
+    if encoded not in expected:
         raise ValueError("Unsupported Bridge observation/model descriptor")
     return deepcopy(value)
 

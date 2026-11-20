@@ -283,11 +283,11 @@ def _opponents(value, base_dir):
 def _structured_opponents(value):
     if not isinstance(value, dict) or not value or any(
             not isinstance(opponent, dict) or (
-                opponent.get("type") not in ("self_play", "frozen_self_play") and
+                opponent.get("type") not in ("self_play", "frozen_self_play", "checkpoint") and
                 (opponent.get("type") != "scripted"
                  or opponent.get("controller") not in ("stationary_target", "bridge_fixed_lane")
                  or opponent.get("options", {}))) for opponent in value.values()):
-        raise ValueError("Structured Bridge supports self-play and scripted stationary_target or bridge_fixed_lane opponents only")
+        raise ValueError("Structured Bridge supports self-play, checkpoint and scripted stationary_target or bridge_fixed_lane opponents only")
 
 
 def _validate_bridge_opponents(policy, scenario, opponents):
@@ -312,7 +312,7 @@ def _validate_bridge_opponents(policy, scenario, opponents):
     if "weapon" in policy["action_names"] and any(player["loadout"].get("selected", 0) != 0 for player in players):
         raise ValueError("Bridge stationary opponent requires initial weapon slot 0")
     for opponent in opponents.values():
-        if opponent.get("type") in ("self_play", "frozen_self_play"):
+        if opponent.get("type") in ("self_play", "frozen_self_play", "checkpoint"):
             continue
         if (opponent.get("type") != "scripted"
                 or opponent.get("controller") not in ("stationary_target", "bridge_fixed_lane")
@@ -425,11 +425,15 @@ def _resolved(value, base_dir):
         raise ValueError("Experiment default scenario must equal its first stage")
     conditions = [*stages, *evaluations.values(),
                   *(suite for stage in stages for suite in stage.get("evaluations", {}).values())]
+    if ("bridge_observation" not in result and any("bridge" in condition["scenario"] for condition in conditions)
+            and any(opponent.get("type") == "checkpoint" for opponent in result["opponents"].values())):
+        raise ValueError("Scalar Bridge requires stationary_target, bridge_fixed_lane or self-play opponents; checkpoints require structured observations")
     if "bridge_observation" in result and any("bridge" not in condition["scenario"] for condition in conditions):
         raise ValueError("Structured Bridge requires Bridge stages and evaluations only")
     if any("bridge" in condition["scenario"] for condition in conditions):
-        if any(condition["scenario"] != stages[0]["scenario"] for condition in conditions):
-            raise ValueError("Bridge conditions must use the same fixed scenario in every stage and evaluation")
+        bridge = stages[0]["scenario"].get("bridge")
+        if bridge is None or any(condition["scenario"].get("bridge") != bridge for condition in conditions):
+            raise ValueError("Bridge conditions must use the same fixed scenario rules in every stage and evaluation")
     result["scenario"] = deepcopy(stages[0]["scenario"])
     return result
 

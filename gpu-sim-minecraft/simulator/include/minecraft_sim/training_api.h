@@ -22,6 +22,13 @@ void mcsim_destroy(void* handle);
 int mcsim_configure_bridge(void* handle, const char* json_utf8);
 const char* mcsim_bridge_state(void* handle);
 const char* mcsim_bridge_kits(void* handle, int player);
+/* Host actor state [worlds, 2, 9]: position xyz, yaw, pitch, remaining
+   golden-apple use ticks, active mining fraction, use and mining delays. Ordinary duel mode
+   implements no mining, and therefore reports zero for its mining fraction. */
+int mcsim_actor_task_state(void* handle, double* output, size_t count);
+/* Last tick's Bridge score, opponent score, toward and away contributions,
+   in world/player order. Outcome rewards are not included. */
+int mcsim_bridge_reward_terms(void* handle, double* output, size_t count);
 /* Host-staged Bridge batches only. Read next-reset counters, or restore them
    and immediately reset every world. Buffers contain exactly worlds entries;
    UINT64_MAX is invalid for restore because the reset increments each value. */

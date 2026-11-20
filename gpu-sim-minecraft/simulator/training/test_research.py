@@ -1,5 +1,6 @@
 import contextlib
 from copy import deepcopy
+import hashlib
 import io
 import json
 import os
@@ -41,6 +42,82 @@ def short_plan():
 
 
 class BridgeResearchChecks(unittest.TestCase):
+    def test_evaluation_gated_bridge_curriculum_resume_and_completion(self):
+        import simulator.training.research as research
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = json.loads((TEST_SETUPS / "environment.json").read_text())
+            environment["arena"] = str(TEST_SETUPS / "arena.json")
+            environment.pop("spawns")
+            environment.pop("equipment")
+            environment["task"] = {"max_ticks": 3, "rewards": {}}
+            environment["bridge"] = {"mode": {"name": "bridge", "version": 1},
+                "goals": [{"min": [-6, 1, -1], "max": [-5, 3, 1]},
+                          {"min": [5, 1, -1], "max": [6, 3, 1]}],
+                "void_y": 0, "match": {"goals_to_win": 2, "max_ticks": 3, "cage_ticks": 0,
+                    "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+            environment_path = root / "environment.json"
+            environment_path.write_text(json.dumps(environment))
+            second_arena = json.loads((TEST_SETUPS / "arena.json").read_text())
+            second_arena["blocks"].append({"from": [0, 3, 0], "to": [0, 3, 0], "block": "minecraft:stone"})
+            second_arena_path = root / "second-arena.json"
+            second_arena_path.write_text(json.dumps(second_arena))
+            second_environment = deepcopy(environment)
+            second_environment["arena"] = str(second_arena_path)
+            second_environment_path = root / "second-environment.json"
+            second_environment_path.write_text(json.dumps(second_environment))
+            stages = []
+            for name in ("first", "second"):
+                suites = {f"{name}-{suffix}": {"every_updates": 1, "episodes": 2, "worlds": 2, "seed": seed}
+                          for suffix, seed in (("a", 17), ("b", 19))}
+                stages.append({"name": name, "opponents": "target", "evaluations": suites,
+                    "advance": {"all": [{"evaluation": {"suite": suite, "metric": "win_rate", "at_least": 0.5}}
+                                        for suite in suites]},
+                        "snapshots": [{"name": name, "on_completion": True}]})
+            plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "gated-bridge-test", "seed": 42,
+                "policy": str(TEST_SETUPS / "policy.json"), "environment": str(environment_path),
+                "bridge_observation": bridge_observation_descriptor(),
+                "learner": {"hidden_dim": 8, "epochs": 1, "minibatch_size": 2},
+                "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
+                "mixtures": {"target": [{"id": "target", "weight": 1}]}, "stages": stages}
+            plan["stages"][1]["environment"] = str(second_environment_path)
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            output = root / "run"
+            common = ["--device", "cpu", "--threads", "1", "--library", self.library, "--updates", "1"]
+            rates = {17: 1.0, 19: 0.0}
+
+            def evaluation(model, resolved, suite, options, device, fixed, opponent_pool=None):
+                return {"episodes": suite["episodes"], "win_rate": rates[suite["seed"]]}
+
+            with patch.object(research, "evaluate", side_effect=evaluation), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(plan_path), "--output", str(output), "--envs", "2",
+                                       "--rollout-steps", "2", *common]), 0)
+                first = torch.load(output / "latest.pt", weights_only=True)
+                self.assertEqual(first["research"]["stage_index"], 0)
+                self.assertFalse((output / "snapshots/first.pt").exists())
+                rates[19] = 0.5
+                self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+                second = torch.load(output / "latest.pt", weights_only=True)
+                self.assertEqual(second["research"]["stage_index"], 1)
+                self.assertEqual(second["research"]["evaluations"], {})
+                self.assertEqual(second["metadata"]["scenario"]["blocks"], second_arena["blocks"])
+                self.assertTrue((output / "snapshots/first.pt").exists())
+                rates[19] = 0.0
+                self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+                third = torch.load(output / "latest.pt", weights_only=True)
+                self.assertEqual(third["research"]["stage_index"], 1)
+                self.assertFalse((output / "snapshots/second.pt").exists())
+                rates[19] = 0.5
+                self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+            rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([row["stage"] for row in rows], ["first", "first", "second", "second"])
+            self.assertEqual(rows[1]["curriculum_boundary"]["next_stage"], "second")
+            self.assertTrue(rows[-1]["completed_curriculum"])
+            self.assertTrue((output / "snapshots/second.pt").exists())
+
     def test_structured_plan_rejects_invalid_descriptor_and_duel(self):
         plan = short_plan()
         plan["opponents"] = {"stationary": plan["opponents"]["stationary"]}
@@ -48,6 +125,9 @@ class BridgeResearchChecks(unittest.TestCase):
         plan["stages"] = [plan["stages"][0]]
         plan["bridge_observation"] = {**bridge_observation_descriptor(), "version": 2}
         with self.assertRaisesRegex(ValueError, "descriptor"):
+            resolve_plan(plan)
+        plan["bridge_observation"] = bridge_observation_descriptor(2)
+        with self.assertRaisesRegex(ValueError, "Bridge stages"):
             resolve_plan(plan)
         plan["bridge_observation"] = bridge_observation_descriptor()
         with self.assertRaisesRegex(ValueError, "Bridge stages"):
@@ -68,12 +148,13 @@ class BridgeResearchChecks(unittest.TestCase):
                           {"min": [5, 1, -1], "max": [6, 3, 1]}],
                 "void_y": 0, "match": {"goals_to_win": 2, "max_ticks": 3, "cage_ticks": 0,
                     "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
-                "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+                "task_rewards": {"score": 2, "win": 5, "loss": -3,
+                                 "opponent_score": -1, "toward": 0.25, "away": 0}}
             environment_path = root / "environment.json"
             environment_path.write_text(json.dumps(environment))
             plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "structured-test", "seed": 42,
                 "policy": str(TEST_SETUPS / "policy.json"), "environment": str(environment_path),
-                "bridge_observation": bridge_observation_descriptor(),
+                "bridge_observation": bridge_observation_descriptor(2),
                 "learner": {"hidden_dim": 8, "epochs": 1, "minibatch_size": 2},
                 "opponents": {"target": {"type": "scripted", "controller": "stationary_target"}},
                 "mixtures": {"target": [{"id": "target", "weight": 1}]},
@@ -91,6 +172,7 @@ class BridgeResearchChecks(unittest.TestCase):
             first = torch.load(output / "latest.pt", weights_only=True)
             snapshot = torch.load(output / "snapshots/initial.pt", weights_only=True)
             self.assertEqual(first["metadata"]["bridge_observation"], plan["bridge_observation"])
+            self.assertEqual(first["metadata"]["reward_semantics"], "bridge_score_opponent_objective_progress_v2")
             self.assertEqual(snapshot["metadata"]["bridge_observation"], plan["bridge_observation"])
             self.assertFalse(torch.equal(first["model"]["voxel_encoder.0.weight"],
                                          snapshot["model"]["voxel_encoder.0.weight"]))
@@ -155,6 +237,30 @@ class BridgeResearchChecks(unittest.TestCase):
                 Policy(output / "latest.pt")
             with self.assertRaisesRegex(ValueError, "Structured Bridge checkpoints"):
                 CheckpointController(output / "latest.pt", resolved["policy"], 1)
+            checkpoint = root / "fixed-baseline.pt"
+            shutil.copyfile(output / "latest.pt", checkpoint)
+            checkpoint_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+            fixed_plan = deepcopy(plan)
+            fixed_plan["opponents"] = {"baseline": {"type": "checkpoint", "path": str(checkpoint),
+                                                     "deterministic": True}}
+            fixed_plan["mixtures"] = {"baseline": [{"id": "baseline", "weight": 1}]}
+            fixed_plan["stages"][0]["opponents"] = "baseline"
+            fixed_path = root / "fixed-plan.json"
+            fixed_path.write_text(json.dumps(fixed_plan))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(fixed_path), "--output", str(root / "fixed-run"),
+                                       "--envs", "2", "--rollout-steps", "2", *common]), 0)
+            fixed_metrics = json.loads((root / "fixed-run/metrics.jsonl").read_text().splitlines()[0])
+            self.assertEqual(fixed_metrics["evaluations"]["held"]["episodes"], 2)
+            fixed_replay = next((root / "fixed-run/replays").glob("*.jsonl"))
+            fixed_header = json.loads(fixed_replay.read_text().splitlines()[0])
+            self.assertEqual(fixed_header["training"]["opponent"]["controller"]["sha256"], checkpoint_hash)
+            self.assertEqual(hashlib.sha256(checkpoint.read_bytes()).hexdigest(), checkpoint_hash)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--resume", str(root / "fixed-run/latest.pt"), *common]), 0)
+            checkpoint.write_bytes(b"replaced checkpoint")
+            with self.assertRaisesRegex(ValueError, "checkpoint changed|SHA256|changed"), contextlib.redirect_stdout(io.StringIO()):
+                main(["--resume", str(root / "fixed-run/latest.pt"), *common])
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--plan", str(plan_path), "--initialize", str(output / "latest.pt"),
                                        "--output", str(root / "initialized"), "--envs", "2",
@@ -177,7 +283,7 @@ class BridgeResearchChecks(unittest.TestCase):
                          self.assertRaisesRegex(ValueError, "structured Bridge model descriptor"):
                         main(["--plan", str(selected_plan), flag, str(checkpoint_path),
                               "--output", str(root / "incompatible"), *common])
-            for invalid in (None, {**plan["bridge_observation"], "version": 2},
+            for invalid in (None, bridge_observation_descriptor(), {**plan["bridge_observation"], "version": 3},
                             {**plan["bridge_observation"], "old_field": True}):
                 broken = deepcopy(first)
                 broken["metadata"]["bridge_observation"] = invalid
@@ -291,6 +397,59 @@ class BridgeResearchChecks(unittest.TestCase):
         inputs = bridge_observation_inputs(worlds.groups[0][1], worlds.observe())
         np.testing.assert_allclose(inputs["match"][0, :, 4:6], [[16/64, 2/64], [48/64, 3/64]])
         np.testing.assert_array_equal(inputs["match"][0, :, 8], [0, 0])
+
+    def test_v2_samples_task_state_for_both_actors(self):
+        worlds = self.worlds()
+        environment = worlds.groups[0][1]
+        scalar = worlds.observe()
+        actor_state = np.array([[[0, 1, 0, 0, 0, 16, 0.25, 2, 1], [0, 1, 0, 180, 0, 8, 0.75, 4, 5]]], dtype=np.float64)
+        with patch.object(environment, "actor_task_state", return_value=actor_state):
+            inputs = worlds.bridge_observations(scalar, bridge_observation_descriptor(2))
+        self.assertEqual(inputs["match"].shape, (1, 2, 17))
+        np.testing.assert_allclose(inputs["match"][0, :, 10:12], [[0.5, 0.25], [0.75, 0.75]])
+        np.testing.assert_allclose(inputs["match"][0, :, 15:], [[0.5, 0.2], [1, 1]])
+        self.assertTrue(np.isfinite(inputs["match"]).all())
+
+    def test_v2_rollout_uses_task_state_for_both_seats(self):
+        self.scenario["bridge"]["task_rewards"].update(opponent_score=-1, toward=0.25, away=0)
+        worlds = self.worlds(count=2)
+        pool = self.pool(2)
+        pool.learner_slots[:] = [0, 1]
+        model = BridgeActorCritic(1, bridge_observation_descriptor(2), 8, {"movement": 3})
+        rollout, _, _, _ = collect(model, worlds, pool, worlds.observe(), 3, torch.device("cpu"),
+                                    {"movement": 1}, structured_bridge=True)
+        self.assertEqual(rollout["observations"]["match"].shape, (3, 2, 17))
+        self.assertTrue(torch.isfinite(rollout["observations"]["match"]).all())
+        self.assertGreater(rollout["bridge_events"]["bridge_reward_toward"], 0)
+        self.assertEqual(rollout["bridge_events"]["bridge_reward_away"], 0)
+
+    def test_objective_rewards_score_and_round_reset_for_both_sides(self):
+        self.scenario["bridge"]["task_rewards"].update(opponent_score=-1, toward=0.25, away=0)
+        for scorer in (0, 1):
+            with self.subTest(scorer=scorer):
+                self.scenario["arenas"][0]["environment"]["players"][1 - scorer]["position"][0] = -1.5
+                self.scenario["arenas"][0]["environment"]["players"][scorer]["position"][0] = 0.5
+                worlds = self.worlds(count=2)
+                environment = worlds.groups[0][1]
+                actions = np.zeros((2, 2, 1), dtype=np.int64)
+                actions[0, scorer, 0] = 1 if scorer == 0 else 2
+                goals = 0
+                for _ in range(80):
+                    _, rewards, terminated, truncated = worlds.step(actions)
+                    state = environment.bridge_state()[0]
+                    terms = environment.bridge_reward_terms()
+                    np.testing.assert_array_equal(terms[1], np.zeros((2, 4)))
+                    np.testing.assert_array_equal(terms[:, :, 3], np.zeros((2, 2)))
+                    if state["scored"][scorer]:
+                        goals += 1
+                        self.assertEqual(terms[0, scorer, 0], 2)
+                        self.assertEqual(terms[0, 1 - scorer, 1], -1)
+                        if state["round_reset"]:
+                            np.testing.assert_array_equal(terms[0, :, 2:], np.zeros((2, 2)))
+                        self.assertEqual(rewards[0, 1 - scorer], -1 if goals == 1 else -4)
+                    if terminated[0] or truncated[0]:
+                        break
+                self.assertEqual(goals, 2)
 
     def test_bridge_observation_reads_native_score_perspectives(self):
         worlds = self.worlds()
@@ -451,12 +610,11 @@ class BridgeResearchChecks(unittest.TestCase):
                                                learner=scalar_model)
                     unsupported.configure([{"id": "opponent", "weight": 1}])
                     unsupported.reset(np.ones(1, dtype=bool))
-                    message = "opponent model descriptor differs" if definition["type"] != "checkpoint" else "scripted and self-play"
-                    with self.assertRaisesRegex(ValueError, message):
+                    with self.assertRaisesRegex(ValueError, "opponent model descriptor differs"):
                         collect(model, worlds, unsupported, observations, 1, torch.device("cpu"), {},
                                 structured_bridge=True)
         pool.controllers["target"] = object()
-        with self.assertRaisesRegex(ValueError, "scripted and self-play"):
+        with self.assertRaisesRegex(ValueError, "supports scripted"):
             collect(model, worlds, pool, observations, 1, torch.device("cpu"), {}, structured_bridge=True)
 
     def test_structured_checkpoint_rejected_by_scalar_consumers(self):

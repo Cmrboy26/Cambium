@@ -339,8 +339,10 @@ class ExperimentChecks(unittest.TestCase):
         self.assertEqual({entry["id"] for entry in mixed["stages"][0]["opponents"]},
                          {"stationary", "current", "past"})
         self.assertEqual(resolve_plan(mixed), mixed)
-        for opponent in ({"type": "checkpoint", "path": "missing.pt"},
-                         {"type": "scripted", "controller": "basic_melee"},
+        with self.assertRaises(FileNotFoundError):
+            resolve_plan({**self.raw, "opponents": {"stationary": {"type": "checkpoint", "path": "missing.pt"}}},
+                         base_dir=self.plan_path.parent)
+        for opponent in ({"type": "scripted", "controller": "basic_melee"},
                          {"type": "scripted", "controller": "stationary_target", "options": {"x": 1}}):
             with self.subTest(opponent=opponent), self.assertRaisesRegex(ValueError, "supports self-play"):
                 resolve_plan({**self.raw, "opponents": {"stationary": opponent}}, base_dir=self.plan_path.parent)
@@ -503,7 +505,7 @@ class ExperimentChecks(unittest.TestCase):
         bridge["kits"] = [deepcopy(kit), deepcopy(kit)]
         bridge["building"] = {"zones": [{"min": [-6, 1, -6], "max": [7, 4, 7]}],
                               "block_range": 4.5, "entity_range": 3,
-                              "hardness": 1, "mining_speed": 30, "correct_tool": True}
+                              "hardness": 1, "mining_speed": 3, "correct_tool": True}
         self.arena["blocks"].append({"from": [0, 2, 0], "to": [0, 2, 0], "block": "minecraft:stone"})
         self.policy["observations"] = [{"feature": "self.health_fraction"}]
         next(action for action in self.policy["actions"] if action["name"] == "shield")["name"] = "use_item"
@@ -540,12 +542,25 @@ class ExperimentChecks(unittest.TestCase):
             actions[0, 0, weapon] = weapon_values.index(2)
             actions[0, 0, use] = use_values.index(False)
             actions[0, 0, attack] = attack_values.index(True)
-            environment.step(actions)
+            mining_seen = False
+            for _ in range(20):
+                environment.step(actions)
+                state = environment.actor_task_state()[0, 0]
+                self.assertAlmostEqual(state[6], environment.bridge_kits(0)[0]["break_progress"])
+                self.assertAlmostEqual(environment.item_progress()[0, 0, 1], state[6])
+                mining_seen |= state[6] > 0
+                if environment.bridge_state()[0]["broke"][0]:
+                    break
+            self.assertTrue(mining_seen)
             self.assertEqual(environment.bridge_state()[0]["broke"], [True, False])
+            self.assertEqual(environment.actor_task_state()[0, 0, 8], 5)
             actions[:, :, weapon] = weapon_values.index(4)
             actions[:, :, use] = use_values.index(True)
             actions[:, :, attack] = attack_values.index(False)
-            for _ in range(40):
+            environment.step(actions)
+            np.testing.assert_array_equal(environment.actor_task_state()[0, :, 5], [31, 31])
+            np.testing.assert_allclose(environment.item_progress()[0, :, 0], [1/32, 1/32])
+            for _ in range(39):
                 environment.step(actions)
             for player in range(2):
                 state = environment.bridge_kits(player)[0]
@@ -763,6 +778,13 @@ class ExperimentChecks(unittest.TestCase):
         with_evaluation["stages"][0]["advance"]["evaluation"]["metric"] = "mace_smash_rate"
         with self.assertRaisesRegex(ValueError, "metric"):
             resolve_plan(with_evaluation)
+        different_arena = deepcopy(resolved["stages"][0])
+        different_arena["name"] = "different-arena"
+        different_arena["scenario"]["arenas"][0]["environment"]["blocks"].append(
+            {"from": [0, 3, 0], "to": [0, 3, 0], "block": "minecraft:stone"})
+        multi_arena = deepcopy(resolved)
+        multi_arena["stages"].append(different_arena)
+        self.assertEqual(resolve_plan(multi_arena)["stages"][1]["scenario"], different_arena["scenario"])
         changed = deepcopy(resolved["stages"][0])
         changed["name"] = "different"
         changed["scenario"]["bridge"]["match"]["cage_ticks"] = 1
