@@ -52,6 +52,7 @@ final class ControlPanel extends Screen {
 	private String selectedRun = "";
 	private String syncScope = "policy";
 	private String status = "";
+	private String bridgePort = Integer.toString(LivePolicy.DEFAULT_PORT);
 	private boolean helperBusy;
 	private boolean helperServing;
 	private final boolean[] markedSpawns = {false, false};
@@ -377,6 +378,17 @@ final class ControlPanel extends Screen {
 		button("Leave", left + 2 * (actionWidth + 4), 92, actionWidth, () -> LiveDuel.command(minecraft, "leave"));
 		button("Sidebar: " + (DuelHud.enabled() ? "On" : "Off"), left + 3 * (actionWidth + 4), 92, actionWidth,
 				() -> { DuelHud.toggle(minecraft); rebuildWidgets(); });
+		EditBox port = addRenderableWidget(new EditBox(font, left, 118, actionWidth, 20, Component.literal("Bridge port")));
+		port.setMaxLength(5);
+		port.setValue(bridgePort);
+		port.setResponder(value -> bridgePort = value);
+		button("Connect Bridge", left + actionWidth + 4, 118, actionWidth * 2 + 4, () -> {
+			try {
+				int selectedPort = Integer.parseInt(bridgePort);
+				if (selectedPort < 1 || selectedPort > 65535) throw new NumberFormatException();
+				LiveDuel.connectBridge(minecraft, selectedPort);
+			} catch (NumberFormatException error) { status = "Bridge port must be between 1 and 65535."; }
+		});
 		button("Return to game", left, height - 30, (contentWidth - 4) / 2, () -> minecraft.gui.setScreen(null));
 		button("Shutdown inference", left + (contentWidth + 4) / 2, height - 30, (contentWidth - 4) / 2,
 				() -> { RosieLauncher.stopOwned(minecraft); rebuildWidgets(); }).active = RosieLauncher.hasInference();

@@ -11,7 +11,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 final class ReplayTrace {
 
@@ -86,8 +90,8 @@ final class ReplayTrace {
 			this(owner, position, velocity, age, leftOwner, inGround, inGroundTicks, critical, "arrow");
 		}
 	}
-	record Frame(int tick, List<Actor> actors, List<Projectile> projectiles) {
-		Frame(int tick, List<Actor> actors) { this(tick, actors, List.of()); }
+	record Frame(int tick, List<Actor> actors, List<Projectile> projectiles, JsonObject bridge) {
+		Frame(int tick, List<Actor> actors) { this(tick, actors, List.of(), null); }
 	}
 
 	static final class Environment {
@@ -224,7 +228,7 @@ final class ReplayTrace {
 			}
 		}
 
-		private static int[] integerVector(JsonElement element) throws IOException {
+		static int[] integerVector(JsonElement element) throws IOException {
 			var values = element.getAsJsonArray();
 			if (values.size() != 3) throw new IOException("Environment coordinates need three integers");
 			int[] result = new int[3];
@@ -262,13 +266,33 @@ final class ReplayTrace {
 		try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
 			JsonObject header = JsonParser.parseString(reader.readLine()).getAsJsonObject();
 			if (!header.get("format").getAsString().equals("minecraft_sim_replay")
-					|| (header.get("version").getAsInt() != 2 && header.get("version").getAsInt() != 3)
+					|| (header.get("version").getAsInt() != 2 && header.get("version").getAsInt() != 3
+							&& header.get("version").getAsInt() != 4)
 					|| !header.get("minecraft").getAsString().equals("26.3")
 					|| header.get("players").getAsInt() != 2
 					|| header.get("ticks_per_second").getAsInt() != 20) {
 				throw new IOException("Replay needs a supported envelope with an embedded environment");
 			}
 			Environment environment = new Environment(header.getAsJsonObject("environment"));
+			boolean bridgeReplay = header.get("version").getAsInt() == 4;
+			JsonObject match = null;
+			if (bridgeReplay) {
+				JsonObject bridge = header.getAsJsonObject("bridge");
+				if (!bridge.getAsJsonObject("mode").get("name").getAsString().equals("bridge")
+						|| SimulationContract.integer(bridge.getAsJsonObject("mode").get("version")) != 1) {
+					throw new IOException("Unsupported Bridge replay mode");
+				}
+				match = bridge.getAsJsonObject("match");
+				if (SimulationContract.integer(match.get("goals_to_win")) < 1
+						|| SimulationContract.integer(match.get("goals_to_win")) > 1000000
+						|| SimulationContract.integer(match.get("max_ticks")) < 1
+						|| SimulationContract.integer(match.get("max_ticks")) > 1000000
+						|| SimulationContract.integer(match.get("cage_ticks")) < 0
+						|| SimulationContract.integer(match.get("cage_ticks")) > 1000000) {
+					throw new IOException("Invalid Bridge replay match settings");
+				}
+			}
+			Set<Integer> bridgeOverlay = new HashSet<>();
 			List<Frame> frames = new ArrayList<>();
 			String line;
 			while ((line = reader.readLine()) != null) {
@@ -310,7 +334,7 @@ final class ReplayTrace {
 						projectiles.add(projectile);
 					}
 				}
-			Frame frame = decoded == null ? null : new Frame(decoded.tick(), decoded.actors(), projectiles);
+				Frame frame = decoded == null ? null : new Frame(decoded.tick(), decoded.actors(), projectiles, bridgeReplay ? decoded.bridge() : null);
 				if (frame == null || frame.tick() != frames.size() || frame.actors() == null
 						|| frame.actors().size() != 2 || frames.size() > 100000) {
 					throw new IOException("Replay needs consecutive ticks from zero and exactly two actors per tick");
@@ -348,7 +372,7 @@ final class ReplayTrace {
 							|| !Float.isFinite(actor.controls().pitch_delta())) {
 						throw new IOException("Invalid actor state at tick " + frame.tick());
 					}
-					if (header.get("version").getAsInt() == 3) {
+					if (header.get("version").getAsInt() >= 3) {
 						if (actorJson.has("weapon_slot")) SimulationContract.integer(actorJson.get("weapon_slot"));
 						if (actorJson.getAsJsonObject("controls").has("select_slot")) {
 							SimulationContract.integer(actorJson.getAsJsonObject("controls").get("select_slot"));
@@ -394,6 +418,7 @@ final class ReplayTrace {
 						}
 					}
 				}
+				if (bridgeReplay) validateBridgeFrame(frame, environment, match, bridgeOverlay);
 				frames.add(frame);
 			}
 			if (frames.size() < 2) {
@@ -403,6 +428,118 @@ final class ReplayTrace {
 			return new ReplayTrace(path, frames, header.get("backend").getAsString(), environment, header);
 		} catch (RuntimeException error) {
 			throw new IOException("Malformed replay JSON: " + error.getMessage(), error);
+		}
+	}
+
+	private static void validateBridgeFrame(Frame frame, Environment environment, JsonObject match, Set<Integer> overlay) throws IOException {
+		JsonObject bridge = frame.bridge();
+		if (bridge == null || bridge.getAsJsonArray("scores").size() != 2
+				|| SimulationContract.integer(bridge.get("ticks")) != frame.tick()
+				|| frame.tick() > SimulationContract.integer(match.get("max_ticks"))
+				|| SimulationContract.integer(bridge.get("cage_remaining")) < 0
+				|| SimulationContract.integer(bridge.get("cage_remaining")) > SimulationContract.integer(match.get("cage_ticks"))
+				|| !List.of("ongoing", "team0", "team1", "draw").contains(bridge.get("outcome").getAsString())) {
+			throw new IOException("Invalid Bridge match state");
+		}
+		for (JsonElement score : bridge.getAsJsonArray("scores")) {
+			int value = SimulationContract.integer(score);
+			if (value < 0 || value > SimulationContract.integer(match.get("goals_to_win"))) throw new IOException("Invalid Bridge score");
+		}
+		for (String field : List.of("terminated", "truncated", "round_reset", "clear_overlay")) {
+			if (!bridge.has(field) || !bridge.get(field).isJsonPrimitive() || !bridge.get(field).getAsJsonPrimitive().isBoolean()) {
+				throw new IOException("Invalid Bridge event: " + field);
+			}
+		}
+		for (String field : List.of("scored", "died", "placed", "broke", "respawn")) {
+			if (!bridge.has(field) || !bridge.get(field).isJsonArray() || bridge.getAsJsonArray(field).size() != 2) {
+				throw new IOException("Invalid Bridge event flags: " + field);
+			}
+			for (JsonElement flag : bridge.getAsJsonArray(field)) {
+				if (!flag.isJsonPrimitive() || !flag.getAsJsonPrimitive().isBoolean()) throw new IOException("Invalid Bridge event flag: " + field);
+			}
+		}
+		if (bridge.get("terminated").getAsBoolean() && bridge.get("truncated").getAsBoolean()
+				|| bridge.get("terminated").getAsBoolean() != !bridge.get("outcome").getAsString().equals("ongoing")
+				|| bridge.get("clear_overlay").getAsBoolean() && !bridge.get("round_reset").getAsBoolean()) {
+			throw new IOException("Invalid Bridge outcome or reset");
+		}
+		if (bridge.has("initial_terrain")) {
+			if (frame.tick() != 0 || !bridge.get("initial_terrain").isJsonArray() || bridge.getAsJsonArray("initial_terrain").size() > 240) {
+				throw new IOException("Invalid initial Bridge terrain");
+			}
+			for (JsonElement element : bridge.getAsJsonArray("initial_terrain")) {
+				JsonObject block = element.getAsJsonObject();
+				int player = SimulationContract.integer(block.get("player"));
+				int cell = bridgeCell(block.get("position"), environment);
+				if (player < 0 || player > 1 || environment.cells[cell] != 0 || !overlay.add(cell)) throw new IOException("Invalid initial Bridge block");
+			}
+		}
+		if (!bridge.has("terrain_edits") || !bridge.get("terrain_edits").isJsonArray()
+				|| bridge.getAsJsonArray("terrain_edits").size() > 2
+				|| frame.tick() == 0 && (!bridge.getAsJsonArray("terrain_edits").isEmpty() || bridge.get("clear_overlay").getAsBoolean())) {
+			throw new IOException("Invalid Bridge terrain edits");
+		}
+		int previousPlayer = -1;
+		for (JsonElement element : bridge.getAsJsonArray("terrain_edits")) {
+			JsonObject edit = element.getAsJsonObject();
+			int player = SimulationContract.integer(edit.get("player"));
+			String action = edit.get("action").getAsString();
+			int cell = bridgeCell(edit.get("position"), environment);
+			if (player < 0 || player > 1 || player <= previousPlayer || !List.of("place", "remove").contains(action)
+					|| !bridge.getAsJsonArray(action.equals("place") ? "placed" : "broke").get(player).getAsBoolean()
+					|| environment.cells[cell] != 0 || (action.equals("place") ? !overlay.add(cell) : !overlay.remove(cell))) {
+				throw new IOException("Invalid Bridge terrain edit");
+			}
+			previousPlayer = player;
+		}
+		if (bridge.get("clear_overlay").getAsBoolean()) overlay.clear();
+	}
+
+	static int bridgeCell(JsonElement element, Environment environment) throws IOException {
+		if (element == null || !element.isJsonArray() || element.getAsJsonArray().size() != 3) {
+			throw new IOException("Bridge coordinates need three integers");
+		}
+		int[] position = new int[3];
+		for (int axis = 0; axis < 3; axis++) {
+			position[axis] = SimulationContract.integer(element.getAsJsonArray().get(axis));
+			if (position[axis] < environment.min[axis] || position[axis] >= environment.min[axis] + environment.size[axis]) {
+				throw new IOException("Bridge block is outside environment bounds");
+			}
+		}
+		return ((position[2] - environment.min[2]) * environment.size[1] + position[1] - environment.min[1])
+				* environment.size[0] + position[0] - environment.min[0];
+	}
+
+	static final class BridgeTerrain {
+		private final Environment environment;
+		private final Map<Integer, Integer> overlay = new HashMap<>();
+
+		BridgeTerrain(Environment environment) { this.environment = environment; }
+
+		Map<Integer, Integer> apply(Frame frame) throws IOException {
+			Map<Integer, Integer> changes = new HashMap<>();
+			JsonObject bridge = frame.bridge();
+			if (bridge.has("initial_terrain")) {
+				for (JsonElement element : bridge.getAsJsonArray("initial_terrain")) {
+					JsonObject block = element.getAsJsonObject();
+					int cell = bridgeCell(block.get("position"), environment);
+					int owner = block.get("player").getAsInt() + 1;
+					overlay.put(cell, owner);
+					changes.put(cell, owner);
+				}
+			}
+			for (JsonElement element : bridge.getAsJsonArray("terrain_edits")) {
+				JsonObject edit = element.getAsJsonObject();
+				int cell = bridgeCell(edit.get("position"), environment);
+				int owner = edit.get("action").getAsString().equals("place") ? edit.get("player").getAsInt() + 1 : 0;
+				if (owner == 0) overlay.remove(cell); else overlay.put(cell, owner);
+				changes.put(cell, owner);
+			}
+			if (bridge.get("clear_overlay").getAsBoolean()) {
+				for (int cell : overlay.keySet()) changes.put(cell, 0);
+				overlay.clear();
+			}
+			return changes;
 		}
 	}
 

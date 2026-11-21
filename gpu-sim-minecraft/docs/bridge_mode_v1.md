@@ -241,6 +241,35 @@ penalties apply only when the match clock or external cutoff expires. The
 no-damage flag spans the entire match. Shaping uses the external tick limit as
 its budget and is skipped on terminal, truncation, respawn and goal-reset ticks.
 
+### Initial Bridge Terrain
+
+An authored Bridge environment may opt in to `terrain_generation`, for example:
+
+```json
+"terrain_generation": {"center_x": 0, "floor_y": 0, "start_z": -7, "end_z": 8, "segments": 4}
+```
+
+See `simulator/setups/environments/bridge/progression-narrow-generated.json` for
+a complete example. This rule requires Bridge `building` and its explicit kits.
+It supports a straight, one-block-wide protected center lane along the Z axis,
+from `start_z` inclusive to `end_z` exclusive. Both side columns out to two
+blocks from the center must be empty at `floor_y` and the level above, inside
+build zones and arena bounds, and clear of both goals and player spawns.
+`segments` is an integer from 1 to 16. The other fields are bounded integers;
+the Z span must be 1 to 10000 blocks.
+
+Each match reset creates short, connected side extensions, sometimes two blocks
+wide with a rail. The original center lane stays clear. Blocks are ordinary
+team-owned overlays and can be mined; players do not pay for them from their
+kits. Generation uses a separate deterministic random stream derived from the
+batch seed, world and reset counter. Selective resets affect only selected
+worlds, and restored reset counters reproduce the next terrain. Player respawns
+preserve the overlay. A nonterminal goal clears generated and player-placed
+blocks when `persist_blocks_on_goal` is false; it does not regenerate them.
+Full match resets regenerate the terrain. CPU and host-staged CUDA use the same
+generator; CUDA-resident Bridge remains unsupported. Native libraries advertise
+`bridge_terrain_generation_version: 1`.
+
 ### Proposed Structured Terrain Observations
 
 The two observations below are independently optional. Each actor receives its
@@ -445,7 +474,10 @@ tick in player order, each with `player` (0 or 1), `action` (`place` or
 `remove`) and integer `position` `[x, y, z]`. `clear_overlay` indicates a
 completed goal reset that clears placed blocks. Apply the edits in order, then
 clear the overlay when this flag is true. The initial frame has no edits and
-no clear operation. Simultaneous goals are valid. A terminal or truncated
+no clear operation. When generated terrain is enabled, it contains an
+`initial_terrain` array of `{player, position}` team-owned blocks; apply this
+snapshot before subsequent edits. Older replays omit this optional field.
+Simultaneous goals are valid. A terminal or truncated
 frame preserves the final pre-full-reset state; playback ends there.
 
 Frame ticks increase by one; recorders must not discard intermediate events

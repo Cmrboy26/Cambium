@@ -606,6 +606,12 @@ assert.deepEqual(terrain(4),[{position:[1,1,1],player:0}]);
 assert.deepEqual(terrain(2),[{position:[2,1,1],player:1}]);
 assert.deepEqual(terrain(0),[]);
 assert.deepEqual(terrain(4),[{position:[1,1,1],player:0}]);
+const generated = bridgeTerrain([{bridge:{...bridge([]),initial_terrain:[{player:1,position:[1,1,1]}]}},
+    {bridge:bridge([remove(0,[1,1,1])])}, {bridge:bridge([],true)}]);
+assert.deepEqual(generated(0),[{player:1,position:[1,1,1]}]);
+assert.deepEqual(generated(1),[]);
+assert.deepEqual(generated(0),[{player:1,position:[1,1,1]}]);
+assert.deepEqual(generated(2),[]);
 """, str(script)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1418,7 +1424,8 @@ assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[1].data.map(p
         row.update(evaluation_seconds=0.125, evaluation_episodes=4, replay_seconds=0.25,
                iteration_seconds=1.0, cuda_peak_allocated_bytes=1024, cuda_peak_reserved_bytes=2048)
         row["evaluations"]["held"].update(worlds=4, seconds=0.125, snapshot_update=2, stage="aim", stage_index=0,
-                           self_launch_rate=0.5, mace_smash_rate=0.25, launch_smash_rate=0.125)
+                           self_launch_rate=0.5, mace_smash_rate=0.25, launch_smash_rate=0.125,
+                           min_seat_win_rate=0.625)
         row.update(update=3, next_stage_index=None, completed_curriculum=True)
         row["curriculum_boundary"]["next_stage"] = None
         with self.metrics.open("a", encoding="utf-8") as output:
@@ -1440,6 +1447,7 @@ assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[1].data.map(p
               for value in (float("nan"), float("inf"), -0.1, 1.1, True, None)),
             {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": float("inf"), "episodes": 2}}},
             {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 0, "episodes": 2, "launch_smash_rate": 1.1}}},
+            {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 0, "episodes": 2, "min_seat_win_rate": -0.1}}},
             {"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 1, "episodes": 2.5}}},
                         *({"evaluations": {"held": {"win_rate": 0.5, "reward_mean": 1, "episodes": 2, **extra}}}
                             for extra in ({"worlds": True}, {"seconds": -1}, {"seconds": float("inf")},
@@ -1577,6 +1585,16 @@ assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[1].data.map(p
             change(candidate)
             with self.subTest(candidate=candidate):
                 verify(candidate[0], candidate[1:])
+        candidate = json.loads(json.dumps(original))
+        candidate[1]["bridge"]["initial_terrain"] = [{"player": 1, "position": [1, 1, 1]}]
+        candidate[2]["bridge"].update(broke=[True, False], terrain_edits=[
+            {"player": 0, "action": "remove", "position": [1, 1, 1]}])
+        verify(candidate[0], candidate[1:], valid=True)
+        candidate[1]["bridge"]["initial_terrain"].append({"player": 0, "position": [1, 1, 1]})
+        verify(candidate[0], candidate[1:])
+        candidate = json.loads(json.dumps(original))
+        candidate[2]["bridge"]["initial_terrain"] = []
+        verify(candidate[0], candidate[1:])
         candidate = json.loads(json.dumps(original))
         candidate[2]["bridge"].update(placed=[True, False], broke=[False, True], terrain_edits=[
             {"player": 0, "action": "place", "position": [1, 1, 1]},

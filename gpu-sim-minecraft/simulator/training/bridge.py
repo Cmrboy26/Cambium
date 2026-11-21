@@ -44,7 +44,8 @@ def _solid(scene, cell):
 
 def validate_bridge(configuration, scene):
     required = {"mode", "goals", "void_y", "match", "task_rewards"}
-    if not isinstance(configuration, dict) or not required <= set(configuration) or set(configuration) - required - {"kits", "building"}:
+    if (not isinstance(configuration, dict) or not required <= set(configuration)
+            or set(configuration) - required - {"kits", "building", "terrain_generation"}):
         raise ValueError("Invalid Bridge configuration fields")
     bridge = configuration
     mode = _object(bridge["mode"], ("name", "version"), "mode")
@@ -166,3 +167,30 @@ def validate_bridge(configuration, scene):
             if any(lower >= upper or lower < start or upper > start + extent
                    for lower, upper, start, extent in zip(zone["min"], zone["max"], origin, size)):
                 raise ValueError("Bridge build zone must be nonempty and inside arena bounds")
+    if "terrain_generation" in bridge:
+        if "building" not in bridge:
+            raise ValueError("Bridge terrain generation requires building rules")
+        generation = _object(bridge["terrain_generation"], ("center_x", "floor_y", "start_z", "end_z", "segments"),
+                             "terrain generation")
+        if (any(type(value) is not int or abs(value) > 1000000000 for value in generation.values())
+                or not 1 <= generation["segments"] <= 16
+                or not 1 <= generation["end_z"] - generation["start_z"] <= 10000):
+            raise ValueError("Invalid Bridge terrain generation values")
+        center, floor = generation["center_x"], generation["floor_y"]
+        start, end = generation["start_z"], generation["end_z"]
+        areas = [([center - 2, floor, start], [center, floor + 2, end]),
+                 ([center + 1, floor, start], [center + 3, floor + 2, end])]
+        for lower, upper in areas:
+            if (any(lo < base or hi > base + extent for lo, hi, base, extent in zip(lower, upper, origin, size))
+                    or any(_intersects(lower, upper, goal["min"], goal["max"]) for goal in goals)
+                    or any(_intersects(lower, upper, *_player_bounds(player["position"])) for player in scene["players"])):
+                raise ValueError("Generated Bridge terrain must be in bounds and clear of spawns and goals")
+        for z_coord in range(start, end):
+            if not _solid(scene, (center, floor, z_coord)):
+                raise ValueError("Bridge terrain generation requires a protected center lane")
+            for offset in (-2, -1, 1, 2):
+                for height in (0, 1):
+                    cell = (center + offset, floor + height, z_coord)
+                    if (_solid(scene, cell) or not any(all(lo <= value and value + 1 <= hi
+                            for lo, value, hi in zip(zone["min"], cell, zone["max"])) for zone in zones)):
+                        raise ValueError("Generated Bridge terrain requires clear cells inside build zones")

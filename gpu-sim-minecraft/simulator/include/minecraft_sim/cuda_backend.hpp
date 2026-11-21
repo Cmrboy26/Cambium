@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minecraft_sim/bridge_match.hpp"
+#include "minecraft_sim/bridge_terrain_generation.hpp"
 #include "minecraft_sim/terrain_budget.hpp"
 
 #include <cstddef>
@@ -36,7 +37,8 @@ public:
     void downloadBridge(BridgeMatchState* states, BridgeTickEvents* events, std::size_t count) const;
     void resetEnvironments(const int* ids, std::size_t count, const PlayerState* players,
                            const ProjectileWorldState* projectile_states = nullptr,
-                           const app::ObservationActorMetadata* observation_metadata = nullptr);
+                           const app::ObservationActorMetadata* observation_metadata = nullptr,
+                           const BridgeTerrainGeneration* terrain_generation = nullptr);
     void configureObservations(const app::ObservationProjection* projection, std::size_t features,
                                const app::ObservationActorMetadata* actors, std::size_t count);
     void configureActions(const app::ActionHead* heads, std::size_t count);

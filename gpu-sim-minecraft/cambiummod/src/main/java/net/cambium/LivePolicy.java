@@ -50,6 +50,9 @@ final class LivePolicy implements AutoCloseable {
 
 	CompletableFuture<JsonObject> info() {
 		return request("/info", null).thenApply(info -> {
+			if (info.has("protocol") && integer(info.get("protocol")) != 1) {
+				throw new IllegalArgumentException("This mod does not yet support the service's live Bridge protocol");
+			}
 			if (info.has("catalogue_hash") && !PolicyCatalogue.HASH.equals(info.get("catalogue_hash").getAsString())) {
 				throw new IllegalArgumentException("Policy catalogue differs from mod; rebuild/reinstall mod and restart inference service");
 			}
@@ -150,6 +153,10 @@ final class LivePolicy implements AutoCloseable {
 	}
 
 	float[] encode(ServerPlayer source, ServerPlayer target, float[] rays, int sourceIndex) {
+		return encode(source, target, rays, contract);
+	}
+
+	static float[] encode(ServerPlayer source, ServerPlayer target, float[] rays, SimulationContract contract) {
 		var ownVelocity = source.getDeltaMovement();
 		var targetVelocity = target.getDeltaMovement();
 		var own = new ObservationEncoder.State(source.getX(), source.getY(), source.getZ(), source.getHealth(), source.getYRot(), source.getXRot(),
@@ -263,7 +270,7 @@ final class LivePolicy implements AutoCloseable {
 						+ response.body().substring(0, Math.min(200, response.body().length())));
 			}
 			JsonObject result = JsonParser.parseString(response.body()).getAsJsonObject();
-			if (integer(result.get("protocol")) != 1) throw new IllegalArgumentException("Unsupported inference protocol");
+			if (!path.equals("/info") && integer(result.get("protocol")) != 1) throw new IllegalArgumentException("Unsupported inference protocol");
 			return result;
 		});
 	}

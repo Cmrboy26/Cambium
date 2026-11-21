@@ -155,6 +155,21 @@ def validate_bridge_frame(frame, minimum, maximum, base, overlay, match, initial
             or bridge["terminated"] != (bridge["outcome"] != "ongoing")
             or bridge["clear_overlay"] and not bridge["round_reset"]):
         raise ValueError("Invalid Bridge outcome or reset")
+    initial_terrain = bridge.get("initial_terrain", [])
+    if not isinstance(initial_terrain, list) or len(initial_terrain) > 240 or (not initial and "initial_terrain" in bridge):
+        raise ValueError("Invalid initial Bridge terrain")
+    for block in initial_terrain:
+        if not isinstance(block, dict):
+            raise ValueError("Invalid initial Bridge terrain")
+        player, position = block.get("player"), block.get("position")
+        if (type(player) is not int or player not in (0, 1) or not isinstance(position, list) or len(position) != 3
+                or any(type(value) is not int or not minimum[axis] <= value < maximum[axis]
+                       for axis, value in enumerate(position))):
+            raise ValueError("Invalid initial Bridge terrain")
+        cell = tuple(position)
+        if cell in base or cell in overlay:
+            raise ValueError("Invalid initial Bridge terrain")
+        overlay.add(cell)
     edits = bridge.get("terrain_edits")
     if not isinstance(edits, list) or len(edits) > 2 or (initial and (edits or bridge["clear_overlay"])):
         raise ValueError("Invalid Bridge terrain edits")
@@ -250,7 +265,7 @@ def metric_metadata(record):
                 raise ValueError("Expected win rate between zero and one")
             evaluations[label] = {"win_rate": win_rate, "reward_mean": finite(evaluation.get("reward_mean")),
                                   "episodes": count(evaluation.get("episodes"))}
-            for name in ("self_launch_rate", "mace_smash_rate", "launch_smash_rate"):
+            for name in ("self_launch_rate", "mace_smash_rate", "launch_smash_rate", "min_seat_win_rate"):
                 if name in evaluation:
                     value = finite(evaluation[name])
                     if not 0 <= value <= 1:

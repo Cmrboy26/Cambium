@@ -1114,6 +1114,8 @@ def _evaluate_bridge(model, plan, suite, options, device, opponent_pool):
             result[rate] = totals[name] / finished
         for name in ("goals_for", "goals_against"):
             result[name + "_mean"] = totals[name] / finished
+        result["min_seat_win_rate"] = min(seat["wins"] / seat["episodes"] if seat["episodes"] else 0.0
+                                          for seat in seats)
         return result
     finally:
         model.train(was_training)

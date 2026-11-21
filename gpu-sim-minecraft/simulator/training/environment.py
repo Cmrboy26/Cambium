@@ -279,6 +279,9 @@ class Environment:
             raise RuntimeError("Rebuild minecraft_sim_training for Bridge kits and arrow refill")
         if bridge_version < 3 and "building" in configuration:
             raise RuntimeError("Rebuild minecraft_sim_training for Bridge building")
+        if ("terrain_generation" in configuration
+                and self.build_info.get("bridge_terrain_generation_version") != 1):
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge terrain generation")
         task_rewards = configuration.get("task_rewards")
         if (isinstance(task_rewards, dict) and "opponent_score" in task_rewards
                 and self.build_info.get("bridge_opponent_score_version") != 1):

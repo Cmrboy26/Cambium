@@ -48,6 +48,10 @@ export function bridgeTerrain(frames) {
         if (target < index) { overlay.clear(); index = -1; changed = true; }
         while (index < target) {
             const state = frames[++index].bridge;
+            for (const block of state.initial_terrain ?? []) {
+                overlay.set(block.position.join(","), block);
+                changed = true;
+            }
             if (state.terrain_edits.length || state.clear_overlay) changed = true;
             for (const edit of state.terrain_edits) {
                 const key = edit.position.join(",");

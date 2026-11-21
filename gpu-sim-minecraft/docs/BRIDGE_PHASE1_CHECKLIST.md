@@ -23,8 +23,9 @@ conformance and H100 validation remain open.
 The progressive curriculum uses a 15-block, one-wide final lane and gates based
 on goals and wins. Positive-only progress shaping is not potential-based and may
 change the optimal policy. Ordinary authored duels do not enable item actions
-or task observations. Trainer replay export runs a fresh match; Fabric replay
-and live inference remain unsupported.
+or task observations. Trainer replay export runs a fresh match. Fabric has
+experimental absolute replay and checkpoint-arena live inference paths, neither
+yet validated in an actual Minecraft client.
 
 ## Agent Handoff Rules
 
@@ -349,14 +350,19 @@ validation requires the applicable mechanics, observations and resident path.
 - [ ] P1-07-02: Update the dashboard and Fabric replay consumers to reconstruct
   terrain and match state deterministically, including pause, restart, cleanup
   and legacy replay compatibility. Test place/break, goals and deaths. The
-  dashboard supports Bridge replay; Fabric does not.
+  dashboard supports Bridge replay; Fabric has experimental absolute playback,
+  but kit visualization and in-game validation are still missing.
 - [ ] P1-07-03: Extend the Python service and Java policy contract, encoder,
   control application and [live adapter](../cambiummod/AGENTS.md) for the same
   Bridge observations, actions and model descriptors. Reject unsupported modes
-  or features explicitly instead of fabricating observations.
+  or features explicitly instead of fabricating observations. Experimental
+  structured HTTP inference, headless Java encoders and a live controller are
+  wired in source; in-game behavior and mixin loading remain unverified.
 - [ ] P1-07-04: Implement or explicitly integrate a private-singleplayer Bridge
   rule controller for live scores, cages, respawns, protected blocks, kits and
-  arrow refill. Vanilla Minecraft alone does not provide these custom rules.
+  arrow refill. An experimental controller exists in source; in-game rule and
+  participant restoration checks remain open. Vanilla alone does not provide
+  these custom rules.
 - [ ] P1-07-05: Run shared Java fixtures, the actual Python/Java inference
   bridge and JDK 25 mod checks/build. Install only into an explicitly authorized
   disposable instance; record JAR/service identities and restart verification.

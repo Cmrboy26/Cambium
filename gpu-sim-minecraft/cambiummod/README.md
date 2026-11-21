@@ -85,6 +85,27 @@ to match nondefault inference ports, e.g. `/simduel arena 8768`.
 Default inference is CPU at **127.0.0.1:8766**, including GPU-trained checkpoints.
 Restart the service to load newer weights. [Full commands and limits](AGENTS.md#live-policy-duels).
 
+### Experimental Bridge
+
+Bridge live play is wired in source but has not been validated in a Minecraft
+client. Use only a disposable private singleplayer world without containers or
+block entities in the arena. From the repository root, start the separate
+structured service with a trusted Bridge checkpoint:
+
+```bash
+python -m simulator.training.serve simulator/training/runs/BDuel4/snapshots/building-generated.pt --bridge-protocol
+```
+
+Use `/simduel bridge` (or `/simduel bridge 8766`) to build the checkpoint arena
+and start two bots. The Live tab also has a Bridge port and connect button.
+`/simduel join` and `/simduel join 2` take either seat; `/simduel leave` restores
+the participant and returns to bots. The usual pause, resume, reset, status and
+stop commands apply. Bridge requires its checkpoint arena; existing-world mode
+does not accept its protocol. Inference is asynchronous, and repeated stale or
+failed requests pause the match. Normal cleanup restores the snapshotted arena
+and participant state, but crashes and external world side effects are not a
+backup or guaranteed recoverable.
+
 ## Rosie Outputs
 
 After [one-time local setup](../rosie/README.md#local-replays-and-duels), use
@@ -111,6 +132,12 @@ This exports a scripted duel. For learned-policy samples use training's
 `input` runs controls through vanilla mechanics; `absolute` displays recorded
 states. `analyze` writes comparison reports under the game's `sim-replays/analysis`.
 Share the summary JSON and detailed JSONL together. [Playback reference](AGENTS.md#simulation-playback).
+
+Bridge version-4 replays support absolute playback, including generated terrain,
+recorded block edits, scores and cage timing. Bridge kit items are not yet
+reconstructed, and Bridge input playback and analysis are unavailable. Bridge
+playback and the experimental live path have not yet been validated in an
+actual Minecraft client.
 
 ## Recording
 

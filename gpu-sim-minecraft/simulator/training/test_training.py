@@ -1,6 +1,8 @@
 import contextlib
+from copy import deepcopy
 import io
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -52,6 +54,101 @@ class InferenceChecks(unittest.TestCase):
                                    "environment": json.loads((ROOT / "simulator/environments/duel.json").read_text())},
                       "model": ActorCritic(22, 16, 9).state_dict()}
         torch.save(self.saved, self.path)
+
+    def test_structured_bridge_inference_supports_both_seats(self):
+        from backend.fast_rl_model import BridgeActorCritic
+        from simulator.training.contract import bridge_observation_descriptor
+        from simulator.training.serve import BridgePolicy
+
+        descriptor = bridge_observation_descriptor(2)
+        contract = from_legacy(SCHEMA)
+        scenario = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text())
+        scenario["experimental_bridge"] = {
+            "mode": {"name": "bridge", "version": 1},
+            "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                      {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+            "void_y": -2,
+            "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                      "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+            "task_rewards": {"score": 2.0, "win": 5.0, "loss": -3.0},
+        }
+        self.saved["metadata"].update(schema=contract, contract=contract, scenario=scenario,
+                                      bridge_observation=descriptor)
+        self.saved["model"] = BridgeActorCritic(contract["observation_dim"], descriptor, 16,
+            dict(zip(contract["action_names"], contract["action_sizes"]))).state_dict()
+        torch.save(self.saved, self.path)
+        with self.assertRaisesRegex(ValueError, "Structured Bridge"):
+            Policy(self.path)
+        policy = BridgePolicy(self.path, deterministic=True)
+        self.assertEqual(policy.info["environment"]["experimental_bridge"], scenario["experimental_bridge"])
+        self.assertEqual(policy.info["max_ticks"], 300)
+        self.assertEqual(policy.info["environment"]["experimental_bridge"]["match"]["max_ticks"], 100)
+        invalid_scenarios = [deepcopy(scenario) for _ in range(3)]
+        del invalid_scenarios[0]["experimental_bridge"]
+        del invalid_scenarios[1]["experimental_bridge"]["goals"]
+        invalid_scenarios[2]["experimental_bridge"]["match"]["goals_to_win"] = 0
+        for invalid_scenario in invalid_scenarios:
+            self.saved["metadata"]["scenario"] = invalid_scenario
+            torch.save(self.saved, self.path)
+            with self.assertRaises(ValueError):
+                BridgePolicy(self.path, deterministic=True)
+        self.saved["metadata"]["scenario"] = scenario
+        torch.save(self.saved, self.path)
+        observations = {"scalar": np.zeros((2, contract["observation_dim"])).tolist(),
+                        "match": np.zeros((2, 17)).tolist(),
+                        "voxels": np.zeros((2, 5, 9, 9), dtype=np.uint8).tolist()}
+        request = {"protocol": 2, "session": "bridge", "tick": 0, "players": [0, 1],
+                   "contract_hash": policy.info["contract_hash"],
+                   "bridge_observation_hash": policy.info["bridge_observation_hash"],
+                   "observations": observations}
+        actions = policy.act(request)["actions"]
+        self.assertEqual(len(actions), 2)
+        for seat in (0, 1):
+            single = {**request, "players": [seat],
+                      "observations": {name: [values[seat]] for name, values in observations.items()}}
+            self.assertEqual(policy.act(single)["actions"], [actions[seat]])
+        self.assertFalse(policy.info["minecraft_bridge_supported"])
+        invalid_observations = {**observations, "voxels": np.full((2, 5, 9, 9), 5).tolist()}
+        invalid_shape = {**observations, "match": [[0.0] * 16] * 2}
+        invalid_finite = {**observations, "match": [[float("nan")] * 17] * 2}
+        invalid_voxel_type = {**observations, "voxels": np.zeros((2, 5, 9, 9), dtype=float).tolist()}
+        for invalid in ({**request, "protocol": 1}, {**request, "contract_hash": "0" * 64},
+                        {**request, "bridge_observation_hash": "0" * 64}, {**request, "players": [0, 0]},
+                        {**request, "players": [True, 1]}, {**request, "observations": invalid_observations},
+                {**request, "observations": invalid_shape}, {**request, "observations": invalid_finite},
+                {**request, "observations": invalid_voxel_type}):
+            with self.assertRaises(ValueError):
+                policy.act(invalid)
+        with make_server(policy, 0) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                with urlopen(base + "/info", timeout=3) as response:
+                    self.assertEqual(json.load(response)["bridge_observation"], descriptor)
+                with urlopen(Request(base + "/act", json.dumps(request).encode(),
+                                     {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual(json.load(response)["actions"], actions)
+                with self.assertRaises(HTTPError) as failure:
+                    urlopen(Request(base + "/act", json.dumps({**request, "players": [0, 0]}).encode(),
+                                   {"Content-Type": "application/json"}), timeout=3)
+                self.assertEqual(failure.exception.code, 400)
+                failure.exception.close()
+            finally:
+                server.shutdown()
+                worker.join(timeout=3)
+
+        descriptor = bridge_observation_descriptor(1)
+        self.saved["metadata"]["bridge_observation"] = descriptor
+        self.saved["model"] = BridgeActorCritic(contract["observation_dim"], descriptor, 16,
+            dict(zip(contract["action_names"], contract["action_sizes"]))).state_dict()
+        torch.save(self.saved, self.path)
+        version_one = BridgePolicy(self.path, deterministic=True)
+        version_one_request = {**request, "bridge_observation_hash": version_one.info["bridge_observation_hash"],
+                               "observations": {**observations, "match": [[0.0] * 10] * 2}}
+        self.assertEqual(len(version_one.act(version_one_request)["actions"]), 2)
+        with self.assertRaises(ValueError):
+            version_one.act(request)
 
     def test_single_player_inference_keeps_duel_protocol_and_fixed_controls(self):
         self.saved["metadata"]["controls"] = {"fixed": {"attack": False}}
@@ -509,6 +606,24 @@ class InferenceChecks(unittest.TestCase):
                 process.stdout.close()
                 reader.join(timeout=3)
 
+    @unittest.skipUnless(os.environ.get("MCSIM_BRIDGE_CHECKPOINT"), "No Bridge checkpoint selected")
+    def test_java_structured_bridge(self):
+        from simulator.training.serve import BridgePolicy
+
+        policy = BridgePolicy(os.environ["MCSIM_BRIDGE_CHECKPOINT"], deterministic=True)
+        with make_server(policy, 0) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                wrapper = ROOT / "cambiummod" / ("gradlew.bat" if os.name == "nt" else "gradlew")
+                command = [str(wrapper)] if os.name == "nt" else ["bash", str(wrapper)]
+                subprocess.run([*command, "-p", str(ROOT / "cambiummod"), "replayAnalysisChecks",
+                                f"-PbridgePolicyPort={server.server_port}", "--console=plain", "--no-daemon"],
+                               cwd=ROOT, check=True)
+            finally:
+                server.shutdown()
+                worker.join(timeout=3)
+
     @unittest.skipUnless(os.environ.get("MCSIM_LIVE_JAVA_CHECK") == "1", "Explicit Java/Python integration check")
     def test_java_bridge(self):
         for configured in (False, True, "encoded", "bow"):
@@ -883,6 +998,146 @@ class TrainingChecks(unittest.TestCase):
                 self.assertEqual(environment.bridge_kits(0)[1]["selected_slot"], 2)
                 with self.assertRaises(ValueError):
                     environment.bridge_kits(2)
+
+    def test_bridge_generated_terrain_resets_and_mining(self):
+        from simulator.training.bridge import validate_bridge
+        from simulator.training.compiler import _Authoring
+
+        setup = _Authoring(ROOT).environment("simulator/setups/environments/bridge/progression-narrow-generated.json")
+        scenario = setup["scenario"]
+        scene, bridge = scenario["arenas"][0]["environment"], scenario["bridge"]
+        bridge["match"]["cage_ticks"] = 0
+        bridge["building"]["mining_speed"] = 30
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "weapon", "values": list(range(9))},
+                                {"name": "attack", "values": [False, True]}]}
+        for field, value in (("segments", 0), ("segments", True), ("start_z", -8), ("floor_y", 3)):
+            invalid = json.loads(json.dumps(bridge))
+            invalid["terrain_generation"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                validate_bridge(invalid, scene)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "generated.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            options = {"environment": path, "contract": contract, "bridge": bridge, "seed": 31,
+                       "library": os.environ.get("MCSIM_TEST_CPU_LIBRARY")}
+            with Environment(2, **options) as environment, Environment(2, **options) as duplicate:
+                def terrain(env, world):
+                    return env.replay_frame(world)["bridge"]["initial_terrain"]
+
+                initial = [terrain(environment, world) for world in range(2)]
+                self.assertTrue(all(initial))
+                self.assertNotEqual(initial[0], initial[1])
+                self.assertEqual(initial, [terrain(duplicate, world) for world in range(2)])
+                self.assertTrue(np.isin(environment.bridge_local_voxels(), [2, 3]).any())
+                counters = environment.bridge_reset_episodes()
+                environment.reset([False, True])
+                self.assertEqual(terrain(environment, 0), initial[0])
+                next_terrain = terrain(environment, 1)
+                self.assertNotEqual(next_terrain, initial[1])
+                duplicate.restore_bridge_reset_episodes(counters)
+                self.assertEqual(terrain(duplicate, 1), next_terrain)
+
+                before = environment.bridge_reset_episodes()
+                environment.reset([True, False])
+                snapshot = terrain(environment, 0)
+                floor = next(block for block in snapshot if abs(block["position"][0]) == 1
+                             and block["position"][1] == 0
+                             and not any(other["position"] == [block["position"][0], 1, block["position"][2]]
+                                         for other in snapshot))
+                x_coord, _, z_coord = floor["position"]
+                players = environment.episode_scenario(0)["players"]
+                players[0]["position"] = [0.5, 1, z_coord + 0.5]
+                players[0]["yaw"] = -90 if x_coord > 0 else 90
+                players[0]["pitch"] = math.degrees(math.atan2(2.62 - 0.5, 1))
+                players[0]["loadout"]["selected"] = 2
+                environment.reset_players([players, None], [True, False])
+                environment.restore_bridge_reset_episodes(before)
+                self.assertEqual(terrain(environment, 0), snapshot)
+                actions = np.zeros((2, 2, 2), dtype=np.int32)
+                actions[0, 0] = [2, 1]
+                environment.step(actions)
+                edits = environment.replay_frame(0)["bridge"]["terrain_edits"]
+                self.assertEqual(edits, [{"player": 0, "action": "remove", "position": floor["position"]}])
+
+            invalid = json.loads(json.dumps(bridge))
+            invalid["terrain_generation"]["start_z"] = -8
+            with self.assertRaisesRegex(RuntimeError, "center lane"):
+                Environment(1, **{**options, "bridge": invalid})
+
+            for persist in (False, True):
+                config = json.loads(json.dumps(bridge))
+                config["match"]["persist_blocks_on_goal"] = persist
+                with self.subTest(persist=persist), Environment(1, **{**options, "bridge": config}) as environment:
+                    players = environment.episode_scenario(0)["players"]
+                    players[0]["position"] = [0.5, 1, 9.5]
+                    players[0]["velocity"][2] = 0.3
+                    players[1]["position"] = [0.5, 1, 0.5]
+                    environment.reset_players([players], [True])
+                    initial_voxels = environment.bridge_local_voxels()[0, 1].copy()
+                    self.assertTrue(np.isin(initial_voxels, [2, 3]).any())
+                    environment.step(np.zeros((1, 2, 2), dtype=np.int32))
+                    frame = environment.replay_frame(0)["bridge"]
+                    self.assertTrue(frame["round_reset"])
+                    self.assertEqual(frame["clear_overlay"], not persist)
+                    resulting_voxels = environment.bridge_local_voxels()[0, 1]
+                    if persist:
+                        np.testing.assert_array_equal(resulting_voxels, initial_voxels)
+                    else:
+                        self.assertFalse(np.isin(resulting_voxels, [2, 3]).any())
+
+    @unittest.skipUnless(os.getenv("MCSIM_TEST_CUDA") == "1", "Set MCSIM_TEST_CUDA=1 on a CUDA build")
+    def test_bridge_generated_terrain_cuda_parity(self):
+        from simulator.training.compiler import _Authoring
+
+        scenario = _Authoring(ROOT).environment(
+            "simulator/setups/environments/bridge/progression-narrow-generated.json")["scenario"]
+        scenario["bridge"]["match"]["cage_ticks"] = 0
+        scenario["bridge"]["building"]["mining_speed"] = 30
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "weapon", "values": list(range(9))},
+                                {"name": "attack", "values": [False, True]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "generated.json"
+            path.write_text(json.dumps(scenario["arenas"][0]["environment"]), encoding="utf-8")
+            options = {"environment": path, "contract": contract, "bridge": scenario["bridge"], "seed": 31,
+                       "library": os.environ.get("MCSIM_TEST_CUDA_LIBRARY")}
+            with Environment(3, "cpu", **options) as cpu, Environment(3, "cuda", **options) as gpu:
+                for mask in ([False, False, False], [True, False, True], [False, True, False]):
+                    if any(mask):
+                        cpu.reset(mask)
+                        gpu.reset(mask)
+                    np.testing.assert_array_equal(cpu.bridge_local_voxels(), gpu.bridge_local_voxels())
+                    for world in range(3):
+                        self.assertEqual(cpu.replay_frame(world)["bridge"].get("initial_terrain"),
+                                         gpu.replay_frame(world)["bridge"].get("initial_terrain"))
+                    actions = np.zeros((3, 2, 2), dtype=np.int32)
+                    cpu.step(actions)
+                    gpu.step(actions)
+                    np.testing.assert_array_equal(cpu.bridge_local_voxels(), gpu.bridge_local_voxels())
+                counters = cpu.bridge_reset_episodes()
+                cpu.reset([True, False, False])
+                snapshot = cpu.replay_frame(0)["bridge"]["initial_terrain"]
+                floor = next(block for block in snapshot if abs(block["position"][0]) == 1
+                             and block["position"][1] == 0
+                             and not any(other["position"] == [block["position"][0], 1, block["position"][2]]
+                                         for other in snapshot))
+                x_coord, _, z_coord = floor["position"]
+                players = cpu.episode_scenario(0)["players"]
+                players[0]["position"] = [0.5, 1, z_coord + 0.5]
+                players[0]["yaw"] = -90 if x_coord > 0 else 90
+                players[0]["pitch"] = math.degrees(math.atan2(2.62 - 0.5, 1))
+                players[0]["loadout"]["selected"] = 2
+                for environment in (cpu, gpu):
+                    environment.reset_players([players, None, None], [True, False, False])
+                    environment.restore_bridge_reset_episodes(counters)
+                    actions = np.zeros((3, 2, 2), dtype=np.int32)
+                    actions[0, 0] = [2, 1]
+                    environment.step(actions)
+                    self.assertEqual(environment.replay_frame(0)["bridge"]["terrain_edits"],
+                                     [{"player": 0, "action": "remove", "position": floor["position"]}])
 
     def test_experimental_bridge_building_updates_world_observations(self):
         scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))

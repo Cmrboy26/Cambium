@@ -311,7 +311,8 @@ final class RosieLauncher {
 				}
 				operation = "serving " + event.get("run").getAsString() + " locally";
 				if (event.has("startup_seconds")) operation += String.format(java.util.Locale.ROOT, " / cold start %.1f s", event.get("startup_seconds").getAsDouble());
-				LiveDuel.connect(client, arenaMode, event.get("port").getAsInt());
+				if (event.has("protocol") && event.get("protocol").getAsInt() == 2) LiveDuel.connectBridge(client, event.get("port").getAsInt());
+				else LiveDuel.connect(client, arenaMode, event.get("port").getAsInt());
 			}
 			case "synced" -> {
 				if (progress != null) progress.addProperty("phase", "complete");

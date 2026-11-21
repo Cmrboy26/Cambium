@@ -1,5 +1,6 @@
 #include "minecraft_sim/core.hpp"
 #include "minecraft_sim/bridge_observation.hpp"
+#include "minecraft_sim/bridge_terrain_generation.hpp"
 #include "minecraft_sim/comparison.hpp"
 #include "minecraft_sim/constants_mace.hpp"
 #include "minecraft_sim/terrain.hpp"
@@ -67,6 +68,39 @@ void checkObjectiveProgress() {
     near(delta.toward, 0, 1e-12, "objective completion teleport");
     delta = progress.advance({0, 0, 2}, false, false);
     near(delta.toward, 2, 1e-12, "new objective progress");
+}
+
+void checkBridgeTerrainGeneration() {
+    using namespace minecraft_sim;
+    std::array<Block, 7 * 3 * 12> base{};
+    BlockWorldView view{base.data(), 7, 3, 12, -3, 0, -6};
+    for (int z = -6; z < 6; ++z) base[view.cellIndex(0, 0, z)] = Block::solid;
+    TerrainOverlays terrain(view, 3);
+    const BridgeTerrainGeneration config{0, 0, -5, 5, 4};
+    require(generateBridgeTerrain(terrain.view(0), config, 42), "generate bridge terrain");
+    require(generateBridgeTerrain(terrain.view(1), config, 42), "repeat bridge terrain");
+    require(generateBridgeTerrain(terrain.view(2), config, 43), "alternate bridge terrain");
+    int placed = 0;
+    bool differs = false;
+    for (int z = -6; z < 6; ++z) {
+        for (int x = -3; x <= 3; ++x) {
+            for (int y = 0; y < 3; ++y) {
+                const auto index = view.cellIndex(x, y, z);
+                const auto value = terrain.view(0).overlay[index];
+                require(value == terrain.view(1).overlay[index], "bridge terrain seed repeatability");
+                differs |= value != terrain.view(2).overlay[index];
+                if (value == PlacedBlock::empty) continue;
+                ++placed;
+                require(z >= -5 && z < 5 && x != 0 && x >= -2 && x <= 2 && y <= 1,
+                        "bridge terrain stays within side structures");
+                if (y == 1) require(terrain.view(0).solid(x, 0, z), "bridge rail has floor support");
+                if (x == -2 || x == 2) require(terrain.view(0).solid(x / 2, 0, z), "bridge extension is connected");
+            }
+        }
+    }
+    require(placed > 0 && differs, "bridge terrain varies across seeds");
+    const BridgeTerrainGeneration invalid{0, 0, -7, 5, 4};
+    require(!generateBridgeTerrain(terrain.view(0), invalid, 42), "reject invalid bridge terrain region");
 }
 
 void checkBridgeLocalVoxels() {
@@ -2417,6 +2451,7 @@ int main(int argc, char** argv) {
         require(terrain_checks::blockTargeting(), "full-cube block target faces and boundaries");
         checkMutableTerrain();
         checkBridgeLocalVoxels();
+        checkBridgeTerrainGeneration();
         checkObjectiveProgress();
         checkCompositeWorldConsumers();
         checkPolicyFixtures();

@@ -26,6 +26,18 @@ CONFIG_NAME = "cambium-rosie.json"
 DEFAULT_RUNS = "~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs"
 MAX_FILE = 512 * 1024 * 1024
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
+
+
+def checkpoint_policy(checkpoint):
+    import torch
+    from simulator.training.serve import BridgePolicy, Policy
+
+    saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    metadata = saved.get("metadata", {}) if isinstance(saved, dict) else {}
+    return (BridgePolicy(checkpoint) if isinstance(metadata, dict) and "bridge_observation" in metadata
+            else Policy(checkpoint))
+
+
 REMOTE_SCRIPT = r'''
 import base64, hashlib, json, pathlib, re, sys
 request = json.loads(base64.b64decode(sys.argv[1]))
@@ -635,8 +647,6 @@ class Rosie:
             raise
 
     def index_run(self, run, imported_name=None):
-        from simulator.training.serve import Policy
-
         path = self.cache / "library.json"
         previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"policies": [], "environments": []}
         aliases = {entry["id"]: entry["name"] for entry in previous["policies"]}
@@ -652,16 +662,18 @@ class Rosie:
         for checkpoint in checkpoints:
             if not checkpoint.is_file():
                 continue
-            policy = Policy(checkpoint)
+            policy = checkpoint_policy(checkpoint)
+            contract = policy.info["contract"]
             identity = run + ":" + checkpoint.relative_to(folder).as_posix()
             if imported_name is not None:
                 aliases[identity] = imported_name
             policies.append({"id": identity, "name": aliases.get(identity, run + " / " + checkpoint.stem),
                              "run": run, "path": str(checkpoint), "update": policy.info["update"],
                              "stage": policy.info.get("experiment", {}).get("stage", ""),
-                             "contract_hash": policy.info["contract_hash"], "policy": policy.contract})
+                             "contract_hash": policy.info["contract_hash"], "policy": contract,
+                             "protocol": policy.info["protocol"]})
             environments.append({"id": identity, "name": run + " / " + checkpoint.stem + " environment",
-                                 "run": run, "policy": policy.contract, "contract_hash": policy.info["contract_hash"],
+                                 "run": run, "policy": contract, "contract_hash": policy.info["contract_hash"],
                                  "environment": policy.info["environment"]})
         config = folder / "config.json"
         if config.is_file():
@@ -809,12 +821,14 @@ def main(argv=None):
                 checkpoint = rosie.checkpoint(run, manifest)
                 emit("startup", phase="Importing PyTorch", seconds=time.monotonic() - started)
                 import torch
-                from simulator.training.serve import Policy, make_server
+                from simulator.training.serve import make_server
 
                 torch.set_num_threads(1)
                 emit("startup", phase="Loading checkpoint", seconds=time.monotonic() - started)
-                with make_server(Policy(checkpoint), 0) as server:
-                    emit("policy", run=run, checkpoint=str(checkpoint), port=server.server_address[1], startup_seconds=time.monotonic() - started)
+                policy = checkpoint_policy(checkpoint)
+                with make_server(policy, 0) as server:
+                    emit("policy", run=run, checkpoint=str(checkpoint), port=server.server_address[1],
+                         protocol=policy.info["protocol"], startup_seconds=time.monotonic() - started)
                     server.serve_forever()
         return 0
     except ImportError as error:

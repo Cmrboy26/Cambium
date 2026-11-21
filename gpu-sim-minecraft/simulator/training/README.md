@@ -43,6 +43,10 @@ Configuration lives in [setups](../setups/): reusable [arenas](../setups/arenas/
 into one resolved experiment. See the [experiment contract](../../docs/simulation_contract.md) and the
 [training-plan reference](AGENTS.md#research-training-plans) for custom bots,
 checkpoint pools, sampling frequencies and advancement rules.
+
+Bridge evaluations expose `min_seat_win_rate`, the lower win rate across the two
+learner seats. It can be used as an evaluation advancement metric, requires at
+least two evaluation episodes, and counts a seat with no episodes as zero.
 The [shield/axe curriculum](../setups/curricula/shield-axe-curriculum.json) trains aiming,
 attack timing, pursuit and equipment combat for 150/250/350/750 updates.
 Set `-Updates 1500` to allow the entire four-stage schedule to run.

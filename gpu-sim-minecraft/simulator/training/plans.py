@@ -182,7 +182,7 @@ def advance_rule(rule, evaluations):
         fields(value, ("suite", "metric", "at_least"), "evaluation advancement")
         suite = evaluations.get(value.get("suite"))
         bridge = suite is not None and suite.get("scenario", {}).get("bridge") is not None
-        rate_metrics = (("win_rate", "loss_rate", "draw_rate", "truncation_rate") if bridge else
+        rate_metrics = (("win_rate", "loss_rate", "draw_rate", "truncation_rate", "min_seat_win_rate") if bridge else
                         ("win_rate", "self_launch_rate", "mace_smash_rate", "launch_smash_rate"))
         other_metrics = ("reward_mean", "goals_for_mean", "goals_against_mean") if bridge else ("reward_mean",)
         if (suite is None or value.get("metric") not in (*rate_metrics, *other_metrics)
@@ -191,6 +191,8 @@ def advance_rule(rule, evaluations):
         finite(value["at_least"], "evaluation threshold")
         if value["metric"] in rate_metrics and not 0 <= value["at_least"] <= 1:
             raise ValueError("Rate threshold must be in [0,1]")
+        if value["metric"] == "min_seat_win_rate" and suite.get("episodes", 0) < 2:
+            raise ValueError("Seat-specific Bridge advancement requires at least two evaluation episodes")
     else:
         positive(value, key)
 

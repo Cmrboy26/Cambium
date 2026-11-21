@@ -29,18 +29,18 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.food.FoodData;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
-final class LiveDuel implements AutoCloseable {
+final class LiveDuel implements LiveSession {
 
 	private static final Placement[] placements = new Placement[2];
 	private static long connectionGeneration;
@@ -62,7 +62,7 @@ final class LiveDuel implements AutoCloseable {
 	private double inferenceMillis;
 	private final ServerPlayer[] fighters = new ServerPlayer[2];
 	private int humanSlot = -1;
-	private HumanState savedHuman;
+	private ParticipantState savedHuman;
 	private boolean humanDefeated;
 
 	private record Placement(UUID owner, ServerLevel level, Vec3 position, float yaw, float pitch) {}
@@ -84,7 +84,7 @@ final class LiveDuel implements AutoCloseable {
 	static void initialize() {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
 			var root = ClientCommands.literal("simduel").executes(context -> dispatch(context.getSource().getClient(),
-					(server, viewer) -> tell(viewer, "/simduel arena|world [port], pos1|pos2 [x y z], join [1|2], leave, pause, resume, reset, status, stop")));
+					(server, viewer) -> tell(viewer, "/simduel arena|world|bridge [port], pos1|pos2 [x y z], join [1|2], leave, pause, resume, reset, status, stop")));
 			root.then(ClientCommands.literal("menu").executes(context -> ControlPanel.open(context.getSource().getClient())));
 			root.then(ClientCommands.literal("hud").executes(context -> { DuelHud.toggle(context.getSource().getClient()); return 1; }));
 			for (boolean arena : new boolean[]{true, false}) {
@@ -93,6 +93,10 @@ final class LiveDuel implements AutoCloseable {
 						.then(ClientCommands.argument("port", IntegerArgumentType.integer(1, 65535))
 								.executes(context -> connect(context.getSource().getClient(), arena, IntegerArgumentType.getInteger(context, "port")))));
 			}
+			root.then(ClientCommands.literal("bridge")
+					.executes(context -> connectBridge(context.getSource().getClient(), LivePolicy.DEFAULT_PORT))
+					.then(ClientCommands.argument("port", IntegerArgumentType.integer(1, 65535))
+							.executes(context -> connectBridge(context.getSource().getClient(), IntegerArgumentType.getInteger(context, "port")))));
 			for (int index = 0; index < 2; index++) {
 				final int player = index;
 				root.then(ClientCommands.literal(index == 0 ? "pos1" : "pos2")
@@ -120,19 +124,11 @@ final class LiveDuel implements AutoCloseable {
 		});
 		ServerLivingEntityEvents.ALLOW_DEATH.register((entity, source, amount) -> {
 			SimulationReplay.Session active = SimulationReplay.active;
-			if (active == null || active.live == null) return true;
-			LiveDuel live = active.live;
-			if (live.humanSlot < 0 || entity != live.fighters[live.humanSlot]) return true;
-			live.humanDefeated = true;
-			entity.setHealth(1);
-			return false;
+			return active == null || active.live == null || active.live.allowDeath(entity);
 		});
 		ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
 			SimulationReplay.Session active = SimulationReplay.active;
-			if (active == null || active.live == null) return true;
-			LiveDuel live = active.live;
-			return live.humanSlot < 0 || entity != live.fighters[live.humanSlot]
-					|| !active.paused && live.restartDelay == 0 && !live.humanDefeated;
+			return active == null || active.live == null || active.live.allowDamage(entity, source);
 		});
 		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
 			SimulationReplay.Session active = SimulationReplay.active;
@@ -237,7 +233,7 @@ final class LiveDuel implements AutoCloseable {
 					SimulationReplay.active = candidate;
 					tell(current, "Live duel started: " + (arena ? "checkpoint arena" : "existing world; no arena edits")
 							+ ". Policy: " + info.get("checkpoint").getAsString());
-					tell(current, candidate.live.deploymentSummary);
+					tell(current, candidate.live.deploymentSummary());
 					candidate.warnFallDamageMismatch();
 					if (!arena) tell(current, "World mode is experimental: terrain, fluids and hazards may be outside this policy's training distribution.");
 					tell(current, "Use /simduel join [1|2] to fight, or hit either bot while they duel. Spectator mode gives an undisturbed match.");
@@ -248,6 +244,50 @@ final class LiveDuel implements AutoCloseable {
 					if (candidate != null) candidate.close(); else policy.close();
 					tell(current, "Could not start live duel: " + errorMessage(error));
 					CambiumFabric.LOGGER.error("Live duel initialization failed", error);
+				}
+			}));
+		});
+	}
+
+	static int connectBridge(Minecraft client, int port) {
+		return dispatch(client, (server, viewer) -> {
+			long generation = ++connectionGeneration;
+			UUID owner = viewer.getUUID();
+			ServerLevel level = viewer.level();
+			BridgePolicyClient policy = new BridgePolicyClient(port);
+			tell(viewer, "Connecting to experimental Bridge policy on loopback port " + port + "...");
+			policy.info().whenComplete((info, failure) -> server.execute(() -> {
+				ServerPlayer current = server.getPlayerList().getPlayer(owner);
+				if (generation != connectionGeneration || current == null || current.level() != level || server.isPublished()) {
+					policy.close();
+					return;
+				}
+				if (failure != null) {
+					policy.close();
+					tell(current, "Bridge policy connection failed: " + errorMessage(failure));
+					return;
+				}
+				SimulationReplay.Session candidate = null;
+				try {
+					ReplayTrace trace = ReplayTrace.forLive(info.getAsJsonObject("environment"));
+					Vec3 origin = new Vec3(Math.floor(current.getX()), Math.floor(current.getY()) - 1, Math.floor(current.getZ()));
+					candidate = new SimulationReplay.Session(server, level, owner, trace, origin, Path.of("."));
+					candidate.absolute = false;
+					candidate.live = new LiveBridge(candidate, policy, info);
+					candidate.validateArena();
+					if (SimulationReplay.active != null) SimulationReplay.active.close();
+					SimulationReplay.active = null;
+					candidate.reset();
+					candidate.paused = false;
+					SimulationReplay.active = candidate;
+					tell(current, "Experimental live Bridge started in the checkpoint arena. Use /simduel join [1|2] to participate.");
+					tell(current, candidate.live.deploymentSummary());
+					candidate.warnFallDamageMismatch();
+				} catch (IOException | RuntimeException error) {
+					if (candidate != null) candidate.close();
+					policy.close();
+					tell(current, "Could not start Bridge: " + errorMessage(error));
+					CambiumFabric.LOGGER.error("Bridge initialization failed", error);
 				}
 			}));
 		});
@@ -289,14 +329,14 @@ final class LiveDuel implements AutoCloseable {
 			case "stop" -> { active.close(); SimulationReplay.active = null; tell(viewer, "Live duel stopped."); }
 			case "status" -> {
 				tell(viewer, active.live.status());
-				tell(viewer, active.live.deploymentSummary);
+				tell(viewer, active.live.deploymentSummary());
 				tell(viewer, "Mod " + CambiumFabric.BUILD_ID + "; catalogue=" + PolicyCatalogue.HASH);
 			}
 			default -> throw new IllegalArgumentException("Unknown live command");
 		}
 	}
 
-	void reset() {
+	public void reset() {
 		cancelRequest();
 		cancelUses();
 		tick = 0;
@@ -313,7 +353,7 @@ final class LiveDuel implements AutoCloseable {
 	}
 
 	// Replay adapter invariant: pause/reset/stop cancel held item use and remove only entities tracked by this Session.
-	void cancelForLifecycle() {
+	public void cancelForLifecycle() {
 		cancelRequest();
 		cancelUses();
 		session.clearProjectiles();
@@ -329,29 +369,48 @@ final class LiveDuel implements AutoCloseable {
 			tell(viewer, "Respawn before joining a duel.");
 			return;
 		}
-		LiveDuel live = active.live;
-		if (live.savedHuman == null) {
-			viewer.closeContainer();
-			live.savedHuman = new HumanState(viewer);
-		}
-		live.humanSlot = slot;
+		active.live.selectHuman(viewer, slot);
 		control(viewer, "reset");
 		if (SimulationReplay.active == active) tell(viewer, "You are player " + (slot + 1) + ". /simduel leave restores your player and resumes bot versus bot.");
 	}
 
-	boolean isHumanSlot(int index) { return index == humanSlot; }
+	public void selectHuman(ServerPlayer viewer, int slot) {
+		if (savedHuman == null) {
+			viewer.closeContainer();
+			savedHuman = new ParticipantState(viewer);
+		}
+		humanSlot = slot;
+	}
 
-	void setBot(ReplayPlayer bot) { fighters[bot.replayIndex] = bot; }
+	public boolean isHumanSlot(int index) { return index == humanSlot; }
+
+	public void setBot(ReplayPlayer bot) { fighters[bot.replayIndex] = bot; }
 
 	// Vanilla reference: minecraft-26.3-src/net/minecraft/world/entity/projectile/Projectile.java, getOwner (88-89).
-	boolean ownsProjectile(Entity owner) { return owner != null && (owner == fighters[0] || owner == fighters[1]); }
+	public boolean ownsProjectile(Entity owner) { return owner != null && (owner == fighters[0] || owner == fighters[1]); }
 
-	void updateTargets() {
+	public boolean allowDeath(LivingEntity entity) {
+		if (humanSlot < 0 || entity != fighters[humanSlot]) return true;
+		humanDefeated = true;
+		entity.setHealth(1);
+		return false;
+	}
+
+	public boolean allowDamage(LivingEntity entity, net.minecraft.world.damagesource.DamageSource source) {
+		return humanSlot < 0 || entity != fighters[humanSlot]
+				|| !session.paused && restartDelay == 0 && !humanDefeated;
+	}
+
+	public void updateTargets() {
 		for (ReplayPlayer bot : session.actors) bot.setLiveTarget(fighters[1 - bot.replayIndex]);
 	}
 
-	void spawnHuman() {
+	public void spawnHuman() {
 		if (humanSlot < 0) return;
+		fighters[humanSlot] = spawnHuman(session, humanSlot);
+	}
+
+	static ServerPlayer spawnHuman(SimulationReplay.Session session, int humanSlot) {
 		ServerPlayer player = session.server.getPlayerList().getPlayer(session.owner);
 		if (player == null || player.level() != session.level) throw new IllegalStateException("Duel player is no longer in this dimension");
 		ReplayTrace.Actor initial = session.initialActors.get(humanSlot);
@@ -413,7 +472,7 @@ final class LiveDuel implements AutoCloseable {
 		player.inventoryMenu.broadcastChanges();
 		player.connection.send(new ClientboundSetHeldSlotPacket(player.getInventory().getSelectedSlot()));
 		player.connection.send(new ClientboundSetEntityMotionPacket(player));
-		fighters[humanSlot] = player;
+		return player;
 	}
 
 	private static ItemStack item(String name) {
@@ -422,26 +481,26 @@ final class LiveDuel implements AutoCloseable {
 		return stack;
 	}
 
-	private void restoreHuman() {
+	public void restoreHuman() {
 		if (savedHuman == null) return;
 		ServerPlayer player = session.server.getPlayerList().getPlayer(session.owner);
 		if (player != null) restoreHuman(player);
 	}
 
-	private void restoreHuman(ServerPlayer player) {
+	public void restoreHuman(ServerPlayer player) {
 		if (savedHuman == null) return;
 		savedHuman.restore(player);
 		savedHuman = null;
 		humanSlot = -1;
 	}
 
-	private void cancelRequest() {
+	public void cancelRequest() {
 		if (pending != null) pending.cancel(true);
 		pending = null;
 		epoch = UUID.randomUUID().toString();
 	}
 
-	void tick(ServerPlayer viewer) {
+	public void tick(ServerPlayer viewer) {
 		if (humanSlot >= 0) {
 			viewer.getFoodData().setFoodLevel(20);
 			viewer.getFoodData().setSaturation(0);
@@ -563,12 +622,14 @@ final class LiveDuel implements AutoCloseable {
 				|| position.y < environment.min[1] - 4;
 	}
 
-	private String status() {
+	public String status() {
 		return String.format(Locale.ROOT, "LIVE %s%s%s round %d tick %d/%d | A %.1f B %.1f | wins %d:%d draws %d | response %.0fms",
 				session.buildArena ? "ARENA " : "WORLD ", session.paused ? "PAUSED" : restartDelay > 0 ? "RESETTING" : pending != null && !pending.isDone() ? "WAITING" : "",
 				humanSlot < 0 ? "" : " YOU=" + (humanSlot == 0 ? "A" : "B"),
 				round, tick, maxTicks, fighters[0].getHealth(), fighters[1].getHealth(), winsA, winsB, draws, inferenceMillis);
 	}
+
+	public String deploymentSummary() { return deploymentSummary; }
 
 	private static void tell(ServerPlayer viewer, String message) {
 		viewer.sendSystemMessage(Component.literal(message));
@@ -588,56 +649,4 @@ final class LiveDuel implements AutoCloseable {
 		restoreHuman();
 	}
 
-	private static final class HumanState {
-		private final ServerLevel level;
-		private final Vec3 position;
-		private final Vec3 velocity;
-		private final float yaw;
-		private final float pitch;
-		private final GameType gameMode;
-		private final List<ItemStack> inventory = new ArrayList<>();
-		private final int selected;
-		private final float health;
-		private final float absorption;
-		private final double maxAbsorption;
-		private final FoodData food;
-
-		HumanState(ServerPlayer player) {
-			level = player.level();
-			position = player.position();
-			velocity = player.getDeltaMovement();
-			yaw = player.getYRot();
-			pitch = player.getXRot();
-			gameMode = player.gameMode.getGameModeForPlayer();
-			for (int index = 0; index < player.getInventory().getContainerSize(); index++) inventory.add(player.getInventory().getItem(index).copy());
-			selected = player.getInventory().getSelectedSlot();
-			health = player.getHealth();
-			absorption = player.getAbsorptionAmount();
-			maxAbsorption = player.getAttribute(Attributes.MAX_ABSORPTION).getBaseValue();
-			food = player.getFoodData();
-		}
-
-		void restore(ServerPlayer player) {
-			player.closeContainer();
-			player.stopUsingItem();
-			player.getInventory().clearContent();
-			for (int index = 0; index < inventory.size(); index++) player.getInventory().setItem(index, inventory.get(index).copy());
-			player.getInventory().setSelectedSlot(selected);
-			((LivingEntityRecordingAccessor) (Object) player).cambium$refreshEquipment();
-			player.setGameMode(gameMode);
-			player.teleportTo(level, position.x, position.y, position.z, java.util.Set.of(), yaw, pitch, true);
-			player.setDeltaMovement(velocity);
-			player.setHealth(health);
-			player.getAttribute(Attributes.MAX_ABSORPTION).setBaseValue(maxAbsorption);
-			player.setAbsorptionAmount(absorption);
-			((PlayerEquipmentAccess) (Object) player).cambium$setFoodData(food);
-			player.damageCooldownTime = 0;
-			player.hurtTime = 0;
-			player.fallDistance = 0;
-			player.clearFire();
-			player.inventoryMenu.broadcastChanges();
-			player.connection.send(new ClientboundSetHeldSlotPacket(selected));
-			player.connection.send(new ClientboundSetEntityMotionPacket(player));
-		}
-	}
 }

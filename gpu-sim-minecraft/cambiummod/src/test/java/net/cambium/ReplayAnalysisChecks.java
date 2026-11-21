@@ -11,6 +11,73 @@ import net.minecraft.world.phys.Vec3;
 public final class ReplayAnalysisChecks {
 
 	public static void main(String[] args) throws Exception {
+		if (args.length == 2 && args[0].equals("--bridge")) {
+			try (BridgePolicyClient policy = new BridgePolicyClient(Integer.parseInt(args[1]))) {
+				JsonObject info = policy.info().get(5, java.util.concurrent.TimeUnit.SECONDS);
+				policy.requireLiveSupport();
+				try (BridgePolicyClient invalid = new BridgePolicyClient(Integer.parseInt(args[1]))) {
+					JsonObject broken = info.deepCopy();
+					broken.getAsJsonObject("environment").getAsJsonObject("experimental_bridge")
+							.getAsJsonObject("match").addProperty("cage_ticks", -1);
+					boolean rejected = false;
+					try { invalid.negotiate(broken); } catch (IllegalArgumentException error) { rejected = true; }
+					require(rejected, "Invalid checkpoint match rules must fail negotiation");
+					rejected = false;
+					try { invalid.newMatch(Vec3.ZERO); } catch (IllegalStateException error) { rejected = true; }
+					require(rejected, "Failed negotiation must not publish a Bridge match");
+					rejected = false;
+					try { invalid.act("failed", 0, new int[]{0}, new float[1][0], new float[1][0], new byte[1][5][9][9]); }
+					catch (IllegalArgumentException error) { rejected = true; }
+					require(rejected, "Failed negotiation must not permit inference");
+					JsonObject invalidTerrain = info.deepCopy();
+					JsonObject bridge = invalidTerrain.getAsJsonObject("environment").getAsJsonObject("experimental_bridge");
+					if (bridge.has("terrain_generation")) {
+						bridge.getAsJsonObject("terrain_generation").addProperty("segments", 0);
+						rejected = false;
+						try { invalid.negotiate(invalidTerrain); } catch (IllegalArgumentException error) { rejected = true; }
+						require(rejected, "Invalid generated terrain must fail negotiation before a match is created");
+					}
+					JsonObject unsupported = info.deepCopy();
+					unsupported.getAsJsonObject("contract").getAsJsonArray("observations").get(0).getAsJsonObject()
+							.addProperty("feature", "opponent.weapon_slot");
+					invalid.negotiate(unsupported);
+					rejected = false;
+					try { invalid.requireLiveSupport(); } catch (IllegalArgumentException error) { rejected = true; }
+					require(rejected, "Live Bridge must reject observations that are not implemented for its runtime");
+				}
+				BridgeMatch match = policy.newMatch(new Vec3(100, 50, -20));
+				require(match.ticks() == 0 && match.cageRemaining() == info.getAsJsonObject("environment")
+						.getAsJsonObject("experimental_bridge").getAsJsonObject("match").get("cage_ticks").getAsInt(),
+						"Bridge client must construct a fresh match from the checkpoint rules");
+				if (info.getAsJsonObject("environment").getAsJsonObject("experimental_bridge").has("terrain_generation")) {
+					var terrain = policy.initialTerrain(42);
+					require(!terrain.isEmpty() && terrain.equals(policy.initialTerrain(42)),
+							"Bridge client must generate the negotiated starting terrain deterministically");
+				}
+				for (int[] seats : new int[][]{{0, 1}, {0}, {1}}) {
+					var response = policy.act("java-bridge-check", 42, seats, new float[seats.length][policy.observationCount()],
+							new float[seats.length][policy.matchFeatureCount()], new byte[seats.length][5][9][9])
+							.get(5, java.util.concurrent.TimeUnit.SECONDS);
+					require(policy.actions(response, "java-bridge-check", 42, seats).length == seats.length,
+							"Structured Python inference must return valid controls for each seat");
+					boolean rejected = false;
+					try { policy.actions(response, "java-bridge-check", 43, seats); }
+					catch (IllegalArgumentException error) { rejected = true; }
+					require(rejected, "Bridge responses from stale ticks must be rejected");
+				}
+			}
+			try (LivePolicy legacy = new LivePolicy(Integer.parseInt(args[1]))) {
+				boolean rejected = false;
+				try { legacy.info().get(5, java.util.concurrent.TimeUnit.SECONDS); }
+				catch (java.util.concurrent.ExecutionException error) {
+					rejected = error.getCause() instanceof IllegalArgumentException
+							&& error.getCause().getMessage().contains("does not yet support");
+				}
+				require(rejected, "Ordinary duel connections must reject the Bridge protocol before starting");
+			}
+			System.out.println("PASS: Java structured HTTP -> Python Bridge checkpoint -> both seat actions");
+			return;
+		}
 		if (args.length == 2 && args[0].equals("--replay")) {
 			checkReplay(Path.of(args[1]));
 			return;
@@ -75,6 +142,13 @@ public final class ReplayAnalysisChecks {
 		checkDescriptiveContract();
 		checkBowContract();
 		checkArenaLimits();
+		checkBridgeVoxels();
+		checkBridgeTerrainGeneration();
+		checkBridgeArena();
+		checkBridgeKit();
+		checkBridgeFeatures();
+		checkBridgeMatch();
+		checkBridgeInferenceTiming();
 		checkBowReplay();
 		BoundaryContractChecks.check();
 		checkPolicyFixtures();
@@ -125,6 +199,41 @@ public final class ReplayAnalysisChecks {
 				for (Path path : files.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
 			}
 		}
+	}
+
+	private static void checkBridgeInferenceTiming() {
+		BridgeInference<String> inference = new BridgeInference<>();
+		String initialEpoch = inference.epoch();
+		var first = new java.util.concurrent.CompletableFuture<String>();
+		inference.submit(first, 10, 1_000_000_000L);
+		require(inference.poll(11, 1_050_000_000L) == null && inference.pending(), "Pending inference must not block or repeat an action");
+		first.complete("action");
+		var accepted = inference.poll(12, 1_250_000_000L);
+		require(accepted != null && accepted.value().equals("action") && accepted.tick() == 10
+				&& accepted.epoch().equals(initialEpoch) && inference.poll(12, 1_250_000_000L) == null,
+				"A response at the latency limits must be applied at most once");
+		for (int index = 0; index < 5; index++) {
+			inference.submit(java.util.concurrent.CompletableFuture.completedFuture("old"), index, 0);
+			boolean rejected = false;
+			try { require(inference.poll(index + 3, 0) == null, "Stale response must be discarded"); }
+			catch (IllegalStateException error) { rejected = true; }
+			require(rejected == (index == 4), "Five consecutive stale responses must fail safely");
+		}
+		inference.cancel();
+		require(!inference.epoch().equals(initialEpoch) && inference.stale() == 0, "Lifecycle cancellation must change epoch and clear stale count");
+		inference.submit(java.util.concurrent.CompletableFuture.completedFuture("late"), 0, 0);
+		require(inference.poll(1, 250_000_001L) == null, "Responses older than 250 ms must be discarded");
+		var pending = new java.util.concurrent.CompletableFuture<String>();
+		inference.submit(pending, 2, 300_000_000L);
+		inference.cancel();
+		require(pending.isCancelled() && inference.poll(3, 350_000_000L) == null, "Cancelled requests must never produce actions");
+		var failed = new java.util.concurrent.CompletableFuture<String>();
+		failed.completeExceptionally(new IllegalStateException("HTTP failed"));
+		inference.submit(failed, 4, 400_000_000L);
+		boolean rejected = false;
+		try { inference.poll(4, 400_000_000L); } catch (java.util.concurrent.CompletionException error) { rejected = true; }
+		require(rejected, "Inference failures must be surfaced to the controller");
+		System.out.println("PASS: Bridge inference latency, lifecycle and failure handling");
 	}
 
 	private static void checkRosieLauncher() throws Exception {
@@ -906,6 +1015,217 @@ public final class ReplayAnalysisChecks {
 		System.out.println("PASS: live arena dimensions, fill limit and terrain budget");
 	}
 
+	private static void checkBridgeVoxels() throws Exception {
+		JsonObject definition = JsonParser.parseString("""
+			{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3",
+			 "bounds":{"min":[-2,-1,-2],"size":[5,3,5]},
+			 "blocks":[{"from":[0,0,0],"to":[0,0,0],"block":"minecraft:stone"},
+			           {"from":[-2,-1,-2],"to":[-2,-1,-2],"block":"minecraft:stone"}],
+			 "players":[{"position":[0,0,0],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false},
+			            {"position":[1,0,0],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false}]}
+			""").getAsJsonObject();
+		ReplayTrace.Environment environment = new ReplayTrace.Environment(definition);
+		int own = ReplayTrace.bridgeCell(JsonParser.parseString("[1,0,2]"), environment);
+		int other = ReplayTrace.bridgeCell(JsonParser.parseString("[-1,1,-2]"), environment);
+		var overlay = java.util.Map.of(own, 1, other, 2);
+		double[] feet = {0.5, 0.5, 0.5};
+		byte[][][] grid = BridgeObservationEncoder.voxels(environment, overlay, feet, 0, 0);
+		require(grid[2][4][4] == 1 && grid[1][2][2] == 1 && grid[2][5][6] == 2
+				&& grid[3][3][2] == 3 && grid[0][4][4] == 4, "Bridge voxels must match native team-zero geometry");
+		grid = BridgeObservationEncoder.voxels(environment, overlay, feet, 0, 1);
+		require(grid[2][5][6] == 3 && grid[3][3][2] == 2, "Bridge voxels must reverse team ownership by seat");
+		grid = BridgeObservationEncoder.voxels(environment, overlay, feet, 45, 0);
+		require(grid[2][6][3] == 2 && grid[3][2][5] == 3 && grid[1][2][6] == 1,
+				"Bridge voxels must use the native positive yaw tie");
+		grid = BridgeObservationEncoder.voxels(environment, overlay, feet, -45, 0);
+		require(grid[2][5][6] == 2 && grid[3][3][2] == 3, "Bridge voxels must use the native negative yaw tie");
+		grid = BridgeObservationEncoder.voxels(environment, overlay, new double[]{-0.01, -0.01, -0.01}, 0, 0);
+		require(grid[3][5][5] == 1 && grid[2][3][3] == 1 && grid[3][6][7] == 2 && grid[4][4][3] == 3,
+				"Bridge voxel origins must floor negative coordinates");
+		boolean rejected = false;
+		try { BridgeObservationEncoder.voxels(environment, overlay, feet, Float.NaN, 0); }
+		catch (IllegalArgumentException expected) { rejected = true; }
+		require(rejected, "Nonfinite Bridge observation inputs must fail");
+		System.out.println("PASS: native-compatible Bridge voxel geometry and both perspectives");
+	}
+
+	private static void checkBridgeTerrainGeneration() throws Exception {
+		JsonObject definition = JsonParser.parseString("""
+			{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3",
+			 "bounds":{"min":[-3,0,-6],"size":[7,3,12]},
+			 "blocks":[{"from":[0,0,-6],"to":[0,0,5],"block":"minecraft:stone"}],
+			 "players":[{"position":[0,1,-1],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":true},
+			            {"position":[0,1,1],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":true}]}
+			""").getAsJsonObject();
+		var environment = new ReplayTrace.Environment(definition);
+		JsonObject generation = JsonParser.parseString("""
+			{"center_x":0,"floor_y":0,"start_z":-5,"end_z":5,"segments":4}
+			""").getAsJsonObject();
+		var generated = BridgeTerrainGenerator.generate(environment, generation, 42);
+		require(BridgeTerrainGenerator.initialPlayerState(1) == 0x5deece66cL,
+				"Initial player RNG state must use the native LegacyRandom seed transform");
+		var expected = java.util.Map.ofEntries(
+				java.util.Map.entry(25, 2), java.util.Map.entry(46, 2), java.util.Map.entry(67, 1),
+				java.util.Map.entry(88, 1), java.util.Map.entry(106, 2), java.util.Map.entry(107, 2),
+				java.util.Map.entry(109, 1), java.util.Map.entry(127, 2), java.util.Map.entry(128, 2),
+				java.util.Map.entry(130, 1), java.util.Map.entry(148, 2), java.util.Map.entry(149, 2),
+				java.util.Map.entry(151, 1), java.util.Map.entry(156, 1), java.util.Map.entry(170, 1),
+				java.util.Map.entry(177, 1), java.util.Map.entry(191, 1), java.util.Map.entry(198, 1),
+				java.util.Map.entry(212, 1), java.util.Map.entry(219, 1));
+		require(generated.equals(expected), "Generated Bridge cells and ownership must match the native seed-42 fixture");
+		require(!generated.isEmpty() && generated.equals(BridgeTerrainGenerator.generate(environment, generation, 42))
+				&& !generated.equals(BridgeTerrainGenerator.generate(environment, generation, 43)),
+				"Bridge terrain must be deterministic and vary by seed");
+		for (var entry : generated.entrySet()) {
+			int index = entry.getKey();
+			int x = index % 7 - 3;
+			int y = index / 7 % 3;
+			int z = index / 21 - 6;
+			require(x != 0 && Math.abs(x) <= 2 && y <= 1 && z >= -5 && z < 5
+					&& (entry.getValue() == 1 || entry.getValue() == 2), "Generated Bridge cells must be valid team overlays");
+		}
+		generation.addProperty("start_z", -7);
+		boolean rejected = false;
+		try { BridgeTerrainGenerator.generate(environment, generation, 42); }
+		catch (IllegalArgumentException error) { rejected = true; }
+		require(rejected, "Generated Bridge terrain must stay inside the arena");
+		System.out.println("PASS: deterministic bounded Bridge terrain generation");
+	}
+
+	private static void checkBridgeArena() throws Exception {
+		JsonObject definition = JsonParser.parseString("""
+			{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3",
+			 "bounds":{"min":[-2,0,-2],"size":[5,3,5]},
+			 "blocks":[{"from":[0,0,0],"to":[0,0,0],"block":"minecraft:stone"}],
+			 "players":[{"position":[0,1,-1],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":true},
+			            {"position":[0,1,1],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":true}]}
+			""").getAsJsonObject();
+		var environment = new ReplayTrace.Environment(definition);
+		JsonObject rules = JsonParser.parseString("""
+			{"zones":[{"min":[-1,0,-1],"max":[2,2,2]}],"block_range":4.5,"entity_range":3,
+			 "hardness":1,"mining_speed":15,"correct_tool":true}
+			""").getAsJsonObject();
+		var arena = new BridgeArena(environment, rules, java.util.Map.of());
+		var players = new net.minecraft.world.phys.AABB[]{new net.minecraft.world.phys.AABB(0, 1, -1, 0.6, 2.8, -0.4),
+				new net.minecraft.world.phys.AABB(0, 1, 1, 0.6, 2.8, 1.6)};
+		require(arena.place(0, 0, 0, 0, 1, 0, 0, 1, players), "Place adjacent to protected base inside the zone");
+		require(arena.overlay().get(arena.cell(1, 0, 0)) == 1, "Placement records team ownership");
+		require(!arena.place(1, 0, 0, 0, 1, 0, 0, 1, players)
+				&& !arena.place(1, 1, 0, 0, 2, 0, 0, 1, players)
+				&& !arena.place(1, 0, 0, 0, 0, 1, 0, 1, new net.minecraft.world.phys.AABB[]{players[0], new net.minecraft.world.phys.AABB(0, 1, 0, 1, 2, 1)})
+				&& !arena.place(1, 1, 0, 0, 0, 0, 0, 1, players), "Occupied, out-of-zone, player-intersecting and base placements must fail");
+		require(!arena.mine(0, 0, 0, 0, true), "Protected base blocks must not be mined");
+		require(!arena.mine(0, 1, 0, 0, true) && arena.miningProgress(0) == 0
+				&& !arena.mine(0, 1, 0, 0, true) && arena.miningProgress(0) == 0.5F
+				&& arena.mine(0, 1, 0, 0, true) && arena.miningDelay(0) == 5,
+				"Mining begins without progress, completes after two increments, and starts a five-tick delay");
+		require(arena.overlay().isEmpty() && arena.place(1, 0, 0, 0, 1, 0, 0, 1, players), "Mined space can be placed by the other team");
+		for (int count = 0; count < 5; count++) require(!arena.mine(0, 1, 0, 0, true), "Mining delay must suppress five attempts");
+		require(!arena.mine(0, 1, 0, 0, false) && !arena.mine(0, 1, 0, 0, false)
+				&& Math.abs(arena.miningProgress(0) - 0.1F) < 0.00001F, "Airborne mining must advance at one-fifth speed");
+		arena.cancelMining(0);
+		require(arena.miningProgress(0) == 0 && arena.overlay().get(arena.cell(1, 0, 0)) == 2, "Cancellation clears progress without changing blocks");
+		System.out.println("PASS: Bridge base protection, ownership, placement and mining rules");
+	}
+
+	private static void checkBridgeKit() {
+		JsonObject loadout = JsonParser.parseString("""
+			{"weapons":["minecraft:diamond_sword","minecraft:bow","minecraft:air","minecraft:air","minecraft:air","minecraft:air"]}
+			""").getAsJsonObject();
+		JsonObject definition = JsonParser.parseString("""
+			{"slots":["sword","bow","pickaxe","blocks","golden_apple","empty"],"blocks":64,"golden_apples":2}
+			""").getAsJsonObject();
+		BridgeKit kit = new BridgeKit(definition, loadout);
+		require(kit.slot(2).equals("pickaxe") && kit.slot(3).equals("blocks") && kit.index("golden_apple") == 4
+				&& kit.slot(9).equals("empty"), "Bridge semantic slots must preserve distinct air-backed items");
+		definition.getAsJsonArray("slots").set(3, ReplayAnalysis.JSON.toJsonTree("pickaxe"));
+		boolean rejected = false;
+		try { new BridgeKit(definition, loadout); } catch (IllegalArgumentException error) { rejected = true; }
+		require(rejected, "Duplicate nonempty kit slots must be rejected");
+		System.out.println("PASS: Bridge semantic kit slots and validation");
+	}
+
+	private static void checkBridgeFeatures() {
+		var rules = new BridgeObservationEncoder.MatchRules(5, 1000, 20, 80);
+		var match = new BridgeObservationEncoder.MatchState(new int[]{1, 3}, 250, 5);
+		var actor = new BridgeObservationEncoder.ActorState(32, 2, 1, 40, 3, 16, 0.25, 2, 1,
+				new double[]{0, 1, 0}, 0, 0);
+		float[] encoded = BridgeObservationEncoder.features(2, 0, rules, match, actor, new double[]{0, 1, 10});
+		float[] expected = {0.2F, 0.6F, 0.75F, 0.25F, 0.5F, 0.03125F, 0.015625F, 0.5F, 1, 0.375F,
+				0.5F, 0.25F, 0, 0, 0.2F, 0.5F, 0.2F};
+		for (int index = 0; index < expected.length; index++) {
+			require(Math.abs(encoded[index] - expected[index]) < 0.000001F, "Bridge task features must match trainer normalization");
+		}
+		var other = new BridgeObservationEncoder.ActorState(0, 0, 0, 0, 0, 0, 0, 0, 0,
+				new double[]{0, 1, 10}, 180, 0);
+		encoded = BridgeObservationEncoder.features(2, 1, rules, match, other, new double[]{0, 1, 0});
+		require(encoded[0] == 0.6F && encoded[1] == 0.2F && encoded[12] == 0 && encoded[14] == 0.2F,
+				"Bridge score and objective features must use the actor's perspective");
+		require(BridgeObservationEncoder.features(1, 1, rules, match, other, null).length == 10,
+				"Version-one Bridge models must retain their ten-feature layout");
+		boolean rejected = false;
+		try { BridgeObservationEncoder.features(2, 0, rules, match, actor, new double[]{Double.NaN, 0, 0}); }
+		catch (IllegalArgumentException error) { rejected = true; }
+		require(rejected, "Nonfinite Bridge objective state must fail");
+		System.out.println("PASS: Bridge match, kit and objective features for both seats");
+	}
+
+	private static void checkBridgeMatch() throws Exception {
+		var goals = new net.minecraft.world.phys.AABB[]{new net.minecraft.world.phys.AABB(0, 0, 0, 1, 2, 1),
+				new net.minecraft.world.phys.AABB(10, 0, 0, 11, 2, 1)};
+		var inFirstGoal = new BridgeMatch.Player(true, 0, new net.minecraft.world.phys.AABB(0.1, 0, 0.1, 0.9, 1.8, 0.9));
+		var inSecondGoal = new BridgeMatch.Player(true, 0, new net.minecraft.world.phys.AABB(10.1, 0, 0.1, 10.9, 1.8, 0.9));
+		var outside = new BridgeMatch.Player(true, 0, new net.minecraft.world.phys.AABB(5, 0, 0, 5.6, 1.8, 0.6));
+		var fallen = new BridgeMatch.Player(true, -4, inSecondGoal.bounds());
+		BridgeMatch match = new BridgeMatch(goals, -3, 2, 10, 2);
+		var controls = new ReplayTrace.Controls(true, false, false, false, true, true, true, true, 5, -2);
+		require(!match.controls(controls).forward() && !match.controls(controls).attack()
+				&& match.controls(controls).yaw_delta() == 5, "Cages must filter controls but preserve look");
+		var event = match.advance(new BridgeMatch.Player[]{fallen, outside});
+		require(event.died()[0] && event.respawn()[0] && !event.scored()[0] && !event.roundReset()
+				&& match.cageRemaining() == 1, "A void death must respawn only that actor without scoring");
+		event = match.advance(new BridgeMatch.Player[]{inSecondGoal, outside});
+		require(event.scored()[0] && event.roundReset() && match.score(0) == 1 && match.cageRemaining() == 2,
+				"A nonwinning goal must reset both actors and restart the cage");
+		event = match.advance(new BridgeMatch.Player[]{inSecondGoal, outside});
+		require(event.outcome() == BridgeMatch.Outcome.TEAM0 && !event.roundReset() && match.score(0) == 2,
+				"A winning goal must end the match before respawning");
+		require(!match.advance(new BridgeMatch.Player[]{outside, outside}).advanced(), "Terminal matches must not advance");
+		BridgeMatch simultaneous = new BridgeMatch(goals, -3, 1, 10, 0);
+		require(simultaneous.advance(new BridgeMatch.Player[]{inSecondGoal, inFirstGoal}).outcome() == BridgeMatch.Outcome.DRAW,
+				"Simultaneous winning goals must draw");
+		BridgeMatch timeout = new BridgeMatch(goals, -3, 5, 1, 0);
+		require(timeout.advance(new BridgeMatch.Player[]{outside, outside}).outcome() == BridgeMatch.Outcome.DRAW,
+				"Tied clock expiry must draw");
+		require(BridgeMatch.refill(1, 0, 0, 2).equals(new BridgeMatch.Refill(0, 0))
+				&& BridgeMatch.refill(0, 0, 0, 2).equals(new BridgeMatch.Refill(0, 1))
+				&& BridgeMatch.refill(0, 0, 1, 2).equals(new BridgeMatch.Refill(1, 0)),
+				"Arrow refill must start after the shot tick and complete at the configured delay");
+		JsonObject definition = JsonParser.parseString("""
+			{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3",
+			 "bounds":{"min":[-3,0,-3],"size":[7,4,7]},"blocks":[],
+			 "players":[{"position":[0,1,-1],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false},
+			            {"position":[0,1,1],"velocity":[0,0,0],"yaw":0,"pitch":0,"on_ground":false}],
+			 "experimental_bridge":{"mode":{"name":"bridge","version":1},"void_y":-2,
+			   "goals":[{"min":[0,1,-3],"max":[1,3,-2]},{"min":[0,1,2],"max":[1,3,3]}],
+			   "match":{"goals_to_win":2,"max_ticks":100,"cage_ticks":2}}}
+			""").getAsJsonObject();
+		var environment = new ReplayTrace.Environment(definition);
+		BridgeMatch translated = BridgeMatch.fromEnvironment(environment, new Vec3(100, 50, -20));
+		var translatedGoal = new BridgeMatch.Player(true, 51, new net.minecraft.world.phys.AABB(100.1, 51, -17.9, 100.9, 52.8, -17.1));
+		var translatedVoid = new BridgeMatch.Player(true, 47, new net.minecraft.world.phys.AABB(100.1, 51, -22.9, 100.9, 52.8, -22.1));
+		var translatedEvent = translated.advance(new BridgeMatch.Player[]{translatedGoal, translatedVoid});
+		require(translatedEvent.scored()[0] && translatedEvent.died()[1] && !translatedEvent.scored()[1],
+				"Bridge goals and void must translate from arena-local to world coordinates");
+		definition.getAsJsonObject("experimental_bridge").getAsJsonArray("goals").get(0).getAsJsonObject()
+				.add("max", JsonParser.parseString("[0,3,-2]"));
+		boolean rejected = false;
+		try { BridgeMatch.fromEnvironment(environment, Vec3.ZERO); }
+		catch (IllegalArgumentException error) { rejected = true; }
+		require(rejected, "Invalid Bridge goal geometry must be rejected before starting a match");
+		System.out.println("PASS: Bridge death, goals, cage, simultaneous outcome and arrow refill ordering");
+	}
+
 	private static void checkBowReplay() throws Exception {
 		Path folder = Files.createTempDirectory("cambium-bow-replay-");
 		try {
@@ -952,6 +1272,62 @@ public final class ReplayAnalysisChecks {
 					&& trace.frames.get(1).actors().getFirst().bow_using()
 					&& trace.frames.get(1).actors().getFirst().bow_draw_ticks() == 5,
 				"Envelope-3 reader must preserve projectile ownership and actual bow draw state");
+			JsonObject bridgeHeader = header.deepCopy();
+			bridgeHeader.addProperty("version", 4);
+			bridgeHeader.add("bridge", JsonParser.parseString("""
+				{"mode":{"name":"bridge","version":1},"goals":[{"min":[0,1,0],"max":[1,3,1]},
+				 {"min":[14,1,14],"max":[15,3,15]}],"void_y":-3,
+				 "match":{"goals_to_win":3,"max_ticks":100,"cage_ticks":0,"persist_blocks_on_goal":true,"arrow_refill_ticks":0}}
+				"""));
+			JsonObject bridgeFirst = first.deepCopy();
+			JsonObject bridgeSecond = second.deepCopy();
+			bridgeFirst.add("bridge", JsonParser.parseString("""
+				{"scores":[0,0],"ticks":0,"cage_remaining":0,"outcome":"ongoing","terminated":false,"truncated":false,
+				 "scored":[false,false],"died":[false,false],"placed":[false,false],"broke":[false,false],
+				 "respawn":[false,false],"round_reset":false,"clear_overlay":false,"terrain_edits":[],
+				 "initial_terrain":[{"player":0,"position":[1,1,1]}]}
+				"""));
+			bridgeSecond.add("bridge", JsonParser.parseString("""
+				{"scores":[0,0],"ticks":1,"cage_remaining":0,"outcome":"ongoing","terminated":false,"truncated":false,
+				 "scored":[false,false],"died":[false,false],"placed":[true,false],"broke":[false,false],
+				 "respawn":[false,false],"round_reset":false,"clear_overlay":false,
+				 "terrain_edits":[{"player":0,"action":"place","position":[1,1,2]}]}
+				"""));
+			JsonObject bridgeThird = bowReplayFrame(2, false, false, new JsonArray());
+			bridgeThird.add("bridge", JsonParser.parseString("""
+				{"scores":[1,0],"ticks":2,"cage_remaining":0,"outcome":"ongoing","terminated":false,"truncated":false,
+				 "scored":[true,false],"died":[false,false],"placed":[false,false],"broke":[false,true],
+				 "respawn":[true,true],"round_reset":true,"clear_overlay":true,
+				 "terrain_edits":[{"player":1,"action":"remove","position":[1,1,1]}]}
+				"""));
+			Path bridgeReplay = folder.resolve("bridge.jsonl");
+			Files.writeString(bridgeReplay, ReplayAnalysis.JSON.toJson(bridgeHeader) + "\n" + ReplayAnalysis.JSON.toJson(bridgeFirst)
+					+ "\n" + ReplayAnalysis.JSON.toJson(bridgeSecond) + "\n" + ReplayAnalysis.JSON.toJson(bridgeThird) + "\n");
+			ReplayTrace bridgeTrace = ReplayTrace.read(bridgeReplay);
+			ReplayTrace.BridgeTerrain terrain = new ReplayTrace.BridgeTerrain(bridgeTrace.environment);
+			int initialCell = ReplayTrace.bridgeCell(JsonParser.parseString("[1,1,1]"), bridgeTrace.environment);
+			int placedCell = ReplayTrace.bridgeCell(JsonParser.parseString("[1,1,2]"), bridgeTrace.environment);
+			require(terrain.apply(bridgeTrace.frames.get(0)).equals(java.util.Map.of(initialCell, 1)), "Initial terrain must be applied");
+			require(terrain.apply(bridgeTrace.frames.get(1)).equals(java.util.Map.of(placedCell, 1)), "Placement must be applied");
+			require(terrain.apply(bridgeTrace.frames.get(2)).equals(java.util.Map.of(initialCell, 0, placedCell, 0)),
+					"Removal and round clearing must both restore air");
+			require(new ReplayTrace.BridgeTerrain(bridgeTrace.environment).apply(bridgeTrace.frames.getFirst()).equals(java.util.Map.of(initialCell, 1)),
+					"Restart must rebuild initial terrain");
+			net.minecraft.SharedConstants.tryDetectVersion();
+			net.minecraft.server.Bootstrap.bootStrap();
+			for (String color : java.util.List.of("blue", "red")) {
+				var block = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getValue(net.minecraft.resources.Identifier.parse("minecraft:" + color + "_wool"));
+				require(block != null && block != net.minecraft.world.level.block.Blocks.AIR, "Bridge terrain color must exist in the block registry");
+			}
+			JsonObject invalidBridge = bridgeSecond.deepCopy();
+			invalidBridge.getAsJsonObject("bridge").getAsJsonArray("terrain_edits").get(0).getAsJsonObject()
+					.add("position", JsonParser.parseString("[16,1,2]"));
+			Files.writeString(bridgeReplay, ReplayAnalysis.JSON.toJson(bridgeHeader) + "\n" + ReplayAnalysis.JSON.toJson(bridgeFirst)
+					+ "\n" + ReplayAnalysis.JSON.toJson(invalidBridge) + "\n");
+			boolean invalidBridgeRejected = false;
+			try { ReplayTrace.read(bridgeReplay); } catch (java.io.IOException expected) { invalidBridgeRejected = true; }
+			require(invalidBridgeRejected, "Bridge edits outside the arena must be rejected");
+			System.out.println("PASS: Bridge initial terrain, edits, reset, restart and bounds validation");
 			JsonObject thrownHeader = header.deepCopy();
 			thrownHeader.getAsJsonObject("environment").getAsJsonArray("players").get(0).getAsJsonObject().add("loadout",
 					JsonParser.parseString("{\"weapons\":[\"minecraft:snowball\",\"minecraft:egg\"],\"snowballs\":1,\"eggs\":2}"));

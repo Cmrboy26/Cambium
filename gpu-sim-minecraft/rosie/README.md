@@ -41,6 +41,9 @@ with initialization or stage selection.
 Use `--line-mode` for the original sequential prompts and `multiple` entry.
 Use `--shared-gpu` for one job and an overlaid PNG; `--max-parallel N` caps concurrency. [Details](AGENTS.md#shared-gpu-sweeps).
 For a one-update CUDA smoke test, use `sbatch rosie/train.sbatch` instead.
+Set `SIM_VERIFY_GENERATED_TERRAIN=1` when submitting `rosie/train.sbatch` to
+run the generated Bridge terrain CPU/CUDA parity test against the job's freshly
+built library before training. A failed test stops the job.
 
 ## Train Locally in WSL2
 

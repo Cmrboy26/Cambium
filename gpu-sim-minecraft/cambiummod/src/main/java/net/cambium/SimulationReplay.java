@@ -21,6 +21,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.HoverEvent;
@@ -30,6 +31,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.Display.ItemDisplay;
@@ -114,6 +116,10 @@ final class SimulationReplay {
 			for (String mode : List.of("absolute", "input")) {
 				root.then(ClientCommands.literal(mode)
 						.executes(context -> control(context.getSource().getClient(), session -> {
+							if (mode.equals("input") && session.trace.frames.getFirst().bridge() != null) {
+								session.tell("Bridge replays only support absolute playback; input simulation is not implemented.");
+								return;
+							}
 							session.absolute = mode.equals("absolute");
 							session.reset();
 						})));
@@ -261,6 +267,7 @@ final class SimulationReplay {
 		final Set<net.minecraft.world.entity.projectile.hurtingprojectile.windcharge.WindCharge> ownedWind = new HashSet<>();
 		final List<RenderedProjectile> renderedProjectiles = new ArrayList<>();
 		BlockState[] originalBlocks;
+		ReplayTrace.BridgeTerrain bridgeTerrain;
 		int frame;
 		boolean paused = true;
 		double speed = 1.0;
@@ -270,7 +277,7 @@ final class SimulationReplay {
 		ReplayAnalysis analysis;
 		boolean buildArena = true;
 		List<ReplayTrace.Actor> initialActors;
-		LiveDuel live;
+		LiveSession live;
 		private record RenderedProjectile(ReplayTrace.Projectile sample, ItemDisplay entity) {}
 
 		void warnFallDamageMismatch() {
@@ -305,44 +312,100 @@ final class SimulationReplay {
 			firstStateDivergence = -1;
 			targetingDiverged = false;
 			if (buildArena) rebuildEnvironment();
+			if (live != null) live.afterEnvironmentBuilt();
+			bridgeTerrain = trace.frames.getFirst().bridge() == null ? null : new ReplayTrace.BridgeTerrain(trace.environment);
+			if (bridgeTerrain != null) applyBridgeTerrain(trace.frames.getFirst());
 			if (live != null) live.spawnHuman();
 			for (ReplayTrace.Actor initial : initialActors) {
 				if (live != null && live.isHumanSlot(initial.id())) continue;
-				if (live != null) {
-					Vec3 position = origin.add(initial.position()[0], initial.position()[1], initial.position()[2]);
-					BlockPos feet = BlockPos.containing(position);
-					BlockPos head = BlockPos.containing(position.add(0, 1.8, 0));
-					if (!level.hasChunksAt(feet.offset(-1, 0, -1), head.offset(1, 0, 1))
-							|| level.isOutsideBuildHeight(feet) || level.isOutsideBuildHeight(head)
-							|| !level.getWorldBorder().isWithinBounds(feet) || !level.getWorldBorder().isWithinBounds(head)) {
-						throw new IllegalStateException("Live spawn must fit inside loaded chunks, world height and border.");
-					}
-				}
-				ReplayPlayer player = new ReplayPlayer(server, level, initial, origin, absolute);
-				player.setLoadout(trace.environment.loadouts.get(initial.id()));
-				if (live != null) {
-					player.setLiveControlled();
-					BlockPos feet = BlockPos.containing(player.position());
-					BlockPos head = BlockPos.containing(player.getX(), player.getY() + player.getBbHeight(), player.getZ());
-					if (!level.hasChunkAt(feet) || level.isOutsideBuildHeight(feet) || level.isOutsideBuildHeight(head)
-							|| !level.getWorldBorder().isWithinBounds(feet) || !level.getWorldBorder().isWithinBounds(head)
-							|| !level.noCollision(player, player.getBoundingBox())) {
-						throw new IllegalStateException("Live spawn must be clear, loaded and inside world height/border. Move away or use spectator mode.");
-					}
-				}
-				actors.add(player);
-				if (live != null) live.setBot(player);
-				server.getPlayerList().broadcastAll(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(player)));
-				level.addNewPlayer(player);
+				spawnBot(initial);
 			}
 			for (int index = 0; index < actors.size(); index++) {
 				ReplayPlayer player = actors.get(index);
 				player.applyState(initialActors.get(player.replayIndex), origin);
 				if (live != null && !buildArena) player.setOnGround(!level.noCollision(player, player.getBoundingBox().move(0, -0.001, 0)));
 			}
+			if (live != null) for (int index = 0; index < initialActors.size(); index++) live.afterActorSpawned(index);
 			if (live != null) live.updateTargets();
 			else if (absolute) renderRecordedProjectiles(trace.frames.getFirst().projectiles());
+			if (bridgeTerrain != null) tell("Bridge absolute replay: block terrain and match state are shown; kit items are not reconstructed.");
 			tell("Replay origin: " + origin.x + ", " + origin.y + ", " + origin.z);
+		}
+
+		private ReplayPlayer spawnBot(ReplayTrace.Actor initial) {
+			if (live != null) {
+				Vec3 position = origin.add(initial.position()[0], initial.position()[1], initial.position()[2]);
+				BlockPos feet = BlockPos.containing(position);
+				BlockPos head = BlockPos.containing(position.add(0, 1.8, 0));
+				if (!level.hasChunksAt(feet.offset(-1, 0, -1), head.offset(1, 0, 1))
+						|| level.isOutsideBuildHeight(feet) || level.isOutsideBuildHeight(head)
+						|| !level.getWorldBorder().isWithinBounds(feet) || !level.getWorldBorder().isWithinBounds(head)) {
+					throw new IllegalStateException("Live spawn must fit inside loaded chunks, world height and border.");
+				}
+			}
+			ReplayPlayer player = new ReplayPlayer(server, level, initial, origin, absolute);
+			player.setLoadout(trace.environment.loadouts.get(initial.id()));
+			if (live != null) {
+				player.setLiveControlled();
+				BlockPos feet = BlockPos.containing(player.position());
+				BlockPos head = BlockPos.containing(player.getX(), player.getY() + player.getBbHeight(), player.getZ());
+				if (!level.hasChunkAt(feet) || level.isOutsideBuildHeight(feet) || level.isOutsideBuildHeight(head)
+						|| !level.getWorldBorder().isWithinBounds(feet) || !level.getWorldBorder().isWithinBounds(head)
+						|| !level.noCollision(player, player.getBoundingBox())) {
+					throw new IllegalStateException("Live spawn must be clear, loaded and inside world height/border. Move away or use spectator mode.");
+				}
+			}
+			actors.add(player);
+			actors.sort(java.util.Comparator.comparingInt(actor -> actor.replayIndex));
+			if (live != null) live.setBot(player);
+			server.getPlayerList().broadcastAll(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(player)));
+			level.addNewPlayer(player);
+			return player;
+		}
+
+		void respawnActor(int index) {
+			if (live == null || index < 0 || index >= initialActors.size()) throw new IllegalArgumentException("Invalid live actor");
+			if (live.isHumanSlot(index)) {
+				live.spawnHuman();
+			} else {
+				ReplayPlayer old = actors.stream().filter(actor -> actor.replayIndex == index).findFirst().orElseThrow();
+				level.removePlayerImmediately(old, Entity.RemovalReason.DISCARDED);
+				old.getTextFilter().leave();
+				server.getPlayerList().broadcastAll(new ClientboundPlayerInfoRemovePacket(List.of(old.getUUID())));
+				actors.remove(old);
+				ReplayPlayer replacement = spawnBot(initialActors.get(index));
+				replacement.applyState(initialActors.get(index), origin);
+			}
+			live.afterActorSpawned(index);
+			live.updateTargets();
+		}
+
+		void respawnActors() {
+			if (live == null) throw new IllegalStateException("No live session");
+			removeActors();
+			live.spawnHuman();
+			for (ReplayTrace.Actor initial : initialActors) {
+				if (live.isHumanSlot(initial.id())) continue;
+				ReplayPlayer player = spawnBot(initial);
+				player.applyState(initial, origin);
+			}
+			for (int index = 0; index < initialActors.size(); index++) live.afterActorSpawned(index);
+			live.updateTargets();
+		}
+
+		void applyBridgeTerrain(ReplayTrace.Frame sample) {
+			try {
+				for (var change : bridgeTerrain.apply(sample).entrySet()) {
+					BlockState state = switch (change.getValue()) {
+						case 1 -> BuiltInRegistries.BLOCK.getValue(Identifier.parse("minecraft:blue_wool")).defaultBlockState();
+						case 2 -> BuiltInRegistries.BLOCK.getValue(Identifier.parse("minecraft:red_wool")).defaultBlockState();
+						default -> Blocks.AIR.defaultBlockState();
+					};
+					level.setBlock(environmentPosition(change.getKey()), state, Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+				}
+			} catch (IOException error) {
+				throw new IllegalStateException("Invalid validated Bridge terrain", error);
+			}
 		}
 
 		// Replay adapter invariant: discard only vanilla arrows captured from these actors and ItemDisplays created below.
@@ -359,6 +422,20 @@ final class SimulationReplay {
 			ownedWind.clear();
 			for (RenderedProjectile rendered : renderedProjectiles) if (!rendered.entity().isRemoved()) rendered.entity().discard();
 			renderedProjectiles.clear();
+		}
+
+		void clearProjectiles(Entity owner) {
+			ownedArrows.removeIf(projectile -> discardOwned(projectile, owner));
+			ownedEggs.removeIf(projectile -> discardOwned(projectile, owner));
+			ownedSnowballs.removeIf(projectile -> discardOwned(projectile, owner));
+			ownedPearls.removeIf(projectile -> discardOwned(projectile, owner));
+			ownedWind.removeIf(projectile -> discardOwned(projectile, owner));
+		}
+
+		private boolean discardOwned(net.minecraft.world.entity.projectile.Projectile projectile, Entity owner) {
+			if (projectile.getOwner() != owner) return false;
+			if (!projectile.isRemoved()) projectile.discard();
+			return true;
 		}
 
 		// Visual-only replay adapter: Display's constructor sets noPhysics (minecraft-26.3-src/net/minecraft/world/entity/Display.java:129-132),
@@ -402,16 +479,10 @@ final class SimulationReplay {
 
 		void rebuildEnvironment() {
 			if (originalBlocks == null) {
+				validateArena();
 				BlockState[] snapshot = new BlockState[trace.environment.cells.length];
 				for (int index = 0; index < snapshot.length; index++) {
 					BlockPos position = environmentPosition(index);
-					if (level.isOutsideBuildHeight(position) || !level.getWorldBorder().isWithinBounds(position)
-							|| !level.hasChunkAt(position)) {
-						throw new IllegalStateException("Arena must fit inside loaded chunks, build height and world border.");
-					}
-					if (level.getBlockEntity(position) != null) {
-						throw new IllegalStateException("Arena contains a block entity/container; choose an empty test area.");
-					}
 					snapshot[index] = level.getBlockState(position);
 				}
 				originalBlocks = snapshot;
@@ -419,6 +490,17 @@ final class SimulationReplay {
 			for (int index = 0; index < trace.environment.cells.length; index++) {
 				BlockState state = trace.environment.cells[index] == 0 ? Blocks.AIR.defaultBlockState() : Blocks.STONE.defaultBlockState();
 				level.setBlock(environmentPosition(index), state, Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+			}
+		}
+
+		void validateArena() {
+			for (int index = 0; index < trace.environment.cells.length; index++) {
+				BlockPos position = environmentPosition(index);
+				if (level.isOutsideBuildHeight(position) || !level.getWorldBorder().isWithinBounds(position)
+						|| !level.hasChunkAt(position)) {
+					throw new IllegalStateException("Arena must fit inside loaded chunks, build height and world border.");
+				}
+				if (level.getBlockEntity(position) != null) throw new IllegalStateException("Arena contains a block entity/container; choose an empty test area.");
 			}
 		}
 
@@ -457,8 +539,15 @@ final class SimulationReplay {
 					lines.add(reference.outcome().accepted() ? "Hit accepted" : "Hit rejected");
 				}
 			}
-			DuelHud.publishMatch(new DuelHud.Match("REPLAY", paused ? "Paused" : "Playing", (absolute ? "Absolute" : "Input") + " " + speed + "x",
-					frame, trace.frames.size() - 1, 0, 0, 0, 0, 0),
+			JsonObject bridge = sample.bridge();
+			String state = paused ? "Paused" : "Playing";
+			if (bridge != null && bridge.get("cage_remaining").getAsInt() > 0) state += " / Cage " + DuelHud.time(bridge.get("cage_remaining").getAsInt());
+			if (bridge != null && bridge.get("terminated").getAsBoolean()) state = bridge.get("outcome").getAsString();
+			if (bridge != null && bridge.get("truncated").getAsBoolean()) state = "Time limit";
+			int maxTicks = bridge == null ? trace.frames.size() - 1 : trace.header.getAsJsonObject("bridge").getAsJsonObject("match").get("max_ticks").getAsInt();
+			DuelHud.publishMatch(new DuelHud.Match(bridge == null ? "REPLAY" : "BRIDGE REPLAY", state, (absolute ? "Absolute" : "Input") + " " + speed + "x",
+					frame, maxTicks, 0, bridge == null ? 0 : bridge.getAsJsonArray("scores").get(0).getAsInt(),
+					bridge == null ? 0 : bridge.getAsJsonArray("scores").get(1).getAsInt(), 0, 0),
 					DuelHud.fighter(actors.get(0), "Replay A", buttons(sample.actors().get(0).controls())),
 					DuelHud.fighter(actors.get(1), "Replay B", buttons(sample.actors().get(1).controls())), lines);
 		}
@@ -469,6 +558,7 @@ final class SimulationReplay {
 				return;
 			}
 			ReplayTrace.Frame sample = trace.frames.get(++frame);
+			if (bridgeTerrain != null) applyBridgeTerrain(sample);
 			if (absolute) {
 				for (int index = 0; index < 2; index++) {
 					actors.get(index).applyState(sample.actors().get(index), origin);
@@ -549,6 +639,10 @@ final class SimulationReplay {
 		}
 
 		void startAnalysis() {
+			if (trace.frames.getFirst().bridge() != null) {
+				tell("Bridge input analysis is not implemented.");
+				return;
+			}
 			absolute = false;
 			reset();
 			JsonObject metadata = new JsonObject();
@@ -669,15 +763,22 @@ final class SimulationReplay {
 		}
 
 		void close() {
-			DuelHud.clear();
+			if (active == null || active == this) DuelHud.clear();
 			finishAnalysis("partial", "session_closed");
 			clearProjectiles();
 			if (live != null) live.close();
 			removeActors();
 			if (originalBlocks != null) {
+				int skipped = 0;
 				for (int index = 0; index < originalBlocks.length; index++) {
-					level.setBlock(environmentPosition(index), originalBlocks[index], Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+					BlockPos position = environmentPosition(index);
+					if (live instanceof LiveBridge && (!level.hasChunkAt(position) || level.getBlockEntity(position) != null)) {
+						skipped++;
+						continue;
+					}
+					level.setBlock(position, originalBlocks[index], Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
 				}
+				if (skipped > 0) tell("Bridge cleanup skipped " + skipped + " unloaded or block-entity cells; arena restoration is incomplete.");
 				originalBlocks = null;
 			}
 		}

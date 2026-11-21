@@ -312,13 +312,18 @@ __global__ void resetSelected(BatchView batch, const int* ids, int count, const 
                               ArrowObservationSummary* arrow_summaries,
                               app::ObservationActorMetadata* observation_actors,
                               const app::ObservationActorMetadata* reset_observation_actors,
-                              app::DuelRewardState* reward_states, std::uint8_t* finished) {
+                              app::DuelRewardState* reward_states, std::uint8_t* finished,
+                              bool generate_terrain, BridgeTerrainGeneration terrain_generation) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(count)) {
         return;
     }
     const int destination = ids[index];
     if (batch.block_worlds) batch.block_worlds[destination].resetPlacedBlocks(TerrainReset::match);
+    if (generate_terrain && batch.block_worlds) {
+        generateBridgeTerrain(batch.block_worlds[destination], terrain_generation,
+                              bridgeTerrainSeed(players[index * batch.players_per_environment].random.state));
+    }
     const bool simulate_fall_damage = batch.worlds[destination].simulate_fall_damage;
     batch.worlds[destination] = {};
     batch.worlds[destination].simulate_fall_damage = simulate_fall_damage;
@@ -1107,7 +1112,8 @@ void CudaBatch::synchronize() const {
 
 void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const PlayerState* players,
                                   const ProjectileWorldState* projectile_states,
-                                  const app::ObservationActorMetadata* observation_metadata) {
+                                  const app::ObservationActorMetadata* observation_metadata,
+                                  const BridgeTerrainGeneration* terrain_generation) {
     if (count == 0) {
         return;
     }
@@ -1142,7 +1148,8 @@ void CudaBatch::resetEnvironments(const int* ids, std::size_t count, const Playe
                                             ? storage_->reset_projectile_states.data : nullptr,
                                         storage_->arrow_summaries.data, storage_->observation_actors.data,
                                         storage_->reset_observation_actors.data, storage_->reward_states.data,
-                                        storage_->reward_finished.data);
+                                        storage_->reward_finished.data, terrain_generation != nullptr,
+                                        terrain_generation ? *terrain_generation : BridgeTerrainGeneration{});
     checkCuda(cudaGetLastError());
     if (storage_->observation_state_ready) checkCuda(cudaEventRecord(storage_->observation_state_ready, nullptr));
 }

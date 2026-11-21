@@ -170,6 +170,12 @@ flock --unlock "$BUILD_LOCK_FD"
 exec {BUILD_LOCK_FD}>&-
 echo "Released build lock; training uses private library: $LIBRARY"
 
+if [[ "${SIM_VERIFY_GENERATED_TERRAIN:-0}" == 1 ]]; then
+    echo "Verifying generated Bridge terrain on CPU and CUDA"
+    MCSIM_TEST_CUDA=1 MCSIM_TEST_CUDA_LIBRARY="$LIBRARY" "$PYTHON" -B -m unittest \
+        simulator.training.test_training.TrainingChecks.test_bridge_generated_terrain_cuda_parity
+fi
+
 if [[ -n "$SIM_SWEEP" ]]; then
     echo "Running shared-GPU sweep: $SIM_SWEEP"
     "$PYTHON" -B -m simulator.training.sweep run "$SIM_SWEEP" --library "$LIBRARY" \

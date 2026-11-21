@@ -1478,6 +1478,46 @@ class RosieTests(unittest.TestCase):
         self.assertTrue(any(str(ROOT / "simulator/training/reward_weights.json") in item for item in command))
         self.assertRegex(platform_name(), r"^(windows|linux|macos)-(x86_64|arm64)$")
 
+    def test_structured_bridge_sync_indexes_checkpoint_and_snapshot(self):
+        import torch
+        from backend.fast_rl_model import BridgeActorCritic
+        from simulator.training.contract import bridge_observation_descriptor, from_legacy
+        from simulator.training.environment import ROOT, SCHEMA
+
+        contract = from_legacy(SCHEMA)
+        descriptor = bridge_observation_descriptor(2)
+        scenario = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text())
+        scenario["experimental_bridge"] = {
+            "mode": {"name": "bridge", "version": 1},
+            "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                      {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+            "void_y": -2,
+            "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                      "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+            "task_rewards": {"score": 2.0, "win": 5.0, "loss": -3.0},
+        }
+        saved = {"format": "minecraft_sim_ppo", "version": 1, "update": 42,
+                 "metadata": {"schema": contract, "contract": contract, "hidden_dim": 8, "max_ticks": 300,
+                              "players_per_environment": 2, "learner": "opponent_pool", "scenario": scenario,
+                              "bridge_observation": descriptor},
+                 "model": BridgeActorCritic(contract["observation_dim"], descriptor, 8,
+                          dict(zip(contract["action_names"], contract["action_sizes"]))).state_dict()}
+        torch.save(saved, self.run / "latest.pt")
+        (self.run / "snapshots").mkdir()
+        torch.save({**saved, "update": 21}, self.run / "snapshots/bridge.pt")
+        self.rosie.sync("rosie-123", self.rosie.manifest("rosie-123"))
+        library = json.loads((self.rosie.cache / "library.json").read_text())
+        self.assertEqual([entry["update"] for entry in library["policies"]], [42, 21])
+        self.assertTrue(all(entry["protocol"] == 2 for entry in library["policies"]))
+        self.assertEqual(library["environments"][0]["environment"]["experimental_bridge"], scenario["experimental_bridge"])
+
+        output = io.StringIO()
+        with patch.object(Rosie, "ssh_command", side_effect=self.local_command), \
+                patch("http.server.ThreadingHTTPServer.serve_forever"), contextlib.redirect_stdout(output):
+            self.assertEqual(main(["duel", "--run", "rosie-123", "--minecraft-directory", str(self.game), "--json"]), 0)
+        event = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual((event["event"], event["protocol"]), ("policy", 2))
+
     def test_named_snapshot_sync_and_persistent_local_library(self):
         import torch
         from backend.fast_rl_model import ActorCritic

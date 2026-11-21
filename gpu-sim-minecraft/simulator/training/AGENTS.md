@@ -56,8 +56,9 @@ and evaluations may use different fixed Bridge configurations, including task
 rewards and match rules. A changed Bridge scenario recreates worlds at the stage
 boundary; evaluation uses its own batch. Replay
 export runs a separate sampled match; it is not a recording of an in-progress
-training world. Sampling, `task_override.max_ticks`, resident collection, Fabric Bridge
-replay and live serving are rejected. Bridge checkpoints preserve reset counters
+training world. Sampling, `task_override.max_ticks` and resident collection are
+rejected. Fabric has experimental absolute Bridge replay; input replay and live
+Bridge matches remain unsupported. Bridge checkpoints preserve reset counters
 and resume with fresh episodes; checkpoints missing those counters cannot be resumed.
 
 The optional `opponent_score`, `toward` and `away` task reward fields and the
@@ -68,6 +69,19 @@ independent weights; zero disables either term. The version-2 input requires
 native item tick and actor-state/geometry encoders can be reused by other task
 implementations, but ordinary authored duel plans do not yet enable those item
 mechanics or append the new features to their policy contract.
+
+For isolated inference integration, `python -m simulator.training.serve
+<checkpoint> --bridge-protocol --port 8766` opts into loopback protocol 2.
+`/info` exposes the scalar contract, exact structured descriptor and both hashes.
+`/act` requires those hashes, a session, tick, unique player-seat indices and
+`observations` with scalar, match and `[player,5,9,9]` categorical voxel arrays.
+One or two seats are supported. The service validates the checkpoint's concrete
+Bridge rules against its arena before serving and preserves the separate match
+clock and external training cutoff. It reuses the structured checkpoint
+controller and rejects malformed shapes, categories and incompatible checkpoints.
+The ordinary `Policy` and duel configuration paths still reject Bridge. The
+Java structured client and pure encoders have headless tests, but no Minecraft
+world controller is connected; `minecraft_bridge_supported` remains false.
 `Environment.item_progress()` exposes the actor's current eating and mining
 fractions in any host-staged batch; `actor_task_state()` exposes pose, countdown,
 mining progress and item delays for `actor_task_observations()` with task-chosen

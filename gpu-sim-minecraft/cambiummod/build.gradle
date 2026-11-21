@@ -66,6 +66,7 @@ def replayAnalysisChecks = tasks.register('replayAnalysisChecks', JavaExec) {
 	systemProperty 'cambium.contractFixtures', file('../contracts/policy_fixtures.json').absolutePath
 	if (project.hasProperty('livePolicyPort')) args project.property('livePolicyPort')
 	if (project.hasProperty('replayFile')) args '--replay', project.property('replayFile')
+	if (project.hasProperty('bridgePolicyPort')) args '--bridge', project.property('bridgePolicyPort')
 }
 
 tasks.named('check') {

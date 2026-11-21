@@ -15,11 +15,12 @@ import numpy as np
 import torch
 
 from backend.fast_rl_model import ActorCritic
+from simulator.training.bridge import validate_bridge
 from simulator.training.environment import SCHEMA, SCHEMAS
 from simulator.training.contract import (CATALOGUE_HASH, fingerprint, from_legacy, reject_structured_bridge_checkpoint,
-                                         resolve_scenario, validate_contract)
+                                         resolve_scenario, validate_bridge_observation_descriptor, validate_contract)
 from simulator.training.policies import fixed_indices
-from simulator.training.controllers import create_controller
+from simulator.training.controllers import CheckpointController, create_controller
 
 LIVE_SCRIPTED_CONTROLLERS = frozenset((
     "stationary_target", "basic_melee", "stationary_melee", "tactical_melee", "random_walk", "archer",
@@ -118,6 +119,71 @@ class Policy:
                 for name in self.schema["action_names"]], dim=-1).cpu().tolist()
         return {"protocol": 1, "session": request["session"], "tick": request["tick"],
             "contract_hash": self.info["contract_hash"], "actions": actions}
+
+
+class BridgePolicy:
+    def __init__(self, checkpoint, device="cpu", deterministic=False, seed=1):
+        self.path = Path(checkpoint).resolve()
+        data = self.path.read_bytes()
+        saved = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+        if not isinstance(saved, dict) or not isinstance(saved.get("metadata"), dict):
+            raise ValueError("Invalid Bridge checkpoint")
+        manifest = saved["metadata"]
+        descriptor = validate_bridge_observation_descriptor(manifest.get("bridge_observation"))
+        schema = manifest.get("schema")
+        contract = (from_legacy(schema) if schema in SCHEMAS.values() else validate_contract(schema))
+        scenario = resolve_scenario(manifest.get("scenario", {}))
+        validate_bridge(scenario.get("experimental_bridge"), scenario)
+        limit = manifest.get("max_ticks")
+        if type(limit) is not int or not 1 <= limit <= 1000000:
+            raise ValueError("Invalid checkpoint round limit")
+        self.controller = CheckpointController(self.path, contract, 2, device, seed, deterministic,
+                               expected_sha256=hashlib.sha256(data).hexdigest(),
+                                               bridge_observation=descriptor)
+        descriptor_hash = hashlib.sha256(json.dumps(descriptor, sort_keys=True, separators=(",", ":"),
+                                                     allow_nan=False).encode()).hexdigest()
+        self.info = {"protocol": 2, "schema": contract, "contract": contract, "contract_hash": fingerprint(contract),
+                     "bridge_observation": descriptor, "bridge_observation_hash": descriptor_hash,
+                     "environment": scenario, "max_ticks": limit, "catalogue_hash": CATALOGUE_HASH,
+                     "minecraft_bridge_supported": False, "checkpoint": str(self.path),
+                     "update": saved.get("update", 0), "device": str(self.controller.device),
+                     "deterministic": deterministic}
+        self.lock = threading.Lock()
+
+    def act(self, request):
+        if (not isinstance(request, dict) or request.get("protocol") != 2
+                or not isinstance(request.get("session"), str) or not 1 <= len(request["session"]) <= 64
+                or type(request.get("tick")) is not int or not 0 <= request["tick"] < 2**53
+                or request.get("contract_hash") != self.info["contract_hash"]
+                or request.get("bridge_observation_hash") != self.info["bridge_observation_hash"]):
+            raise ValueError("Expected protocol 2, session, tick and negotiated Bridge contract hashes")
+        players = request.get("players")
+        if (not isinstance(players, list) or not 1 <= len(players) <= 2
+                or any(type(player) is not int or player not in (0, 1) for player in players)
+                or len(set(players)) != len(players)):
+            raise ValueError("Bridge inference requires unique player seats")
+        source = request.get("observations")
+        if not isinstance(source, dict) or set(source) != {"scalar", "match", "voxels"}:
+            raise ValueError("Bridge inference requires scalar, match and voxel observations")
+        scalar = np.asarray(source["scalar"])
+        match = np.asarray(source["match"])
+        voxels = np.asarray(source["voxels"])
+        count = len(players)
+        if (scalar.shape != (count, self.controller.contract["observation_dim"]) or scalar.dtype.kind not in "iuf"
+                or match.shape != (count, len(self.info["bridge_observation"]["match_features"])) or match.dtype.kind not in "iuf"
+                or voxels.shape != (count, 5, 9, 9) or voxels.dtype.kind not in "iu"
+                or not np.isfinite(scalar).all() or not np.isfinite(match).all()
+                or (voxels < 0).any() or (voxels >= 5).any()):
+            raise ValueError("Invalid structured Bridge observation shapes or values")
+        inputs = {"scalar": scalar.astype(np.float32), "match": match.astype(np.float32),
+                  "voxels": voxels.astype(np.uint8)}
+        if not np.isfinite(inputs["scalar"]).all() or not np.isfinite(inputs["match"]).all():
+            raise ValueError("Bridge observations exceed float32 range")
+        with self.lock:
+            actions = self.controller.act(inputs, indices=np.asarray(players, dtype=np.int64)).tolist()
+        return {"protocol": 2, "session": request["session"], "tick": request["tick"], "players": players,
+                "contract_hash": self.info["contract_hash"],
+                "bridge_observation_hash": self.info["bridge_observation_hash"], "actions": actions}
 
 
 class DuelPolicy:
@@ -262,6 +328,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path, nargs="?", help="Standalone trainer checkpoint (trusted files only)")
     parser.add_argument("--duel", type=Path, help="Local two-fighter duel configuration")
+    parser.add_argument("--bridge-protocol", action="store_true", help="Serve experimental structured Bridge protocol 2")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--deterministic", action="store_true", help="Use argmax instead of training-style stochastic actions")
@@ -272,15 +339,18 @@ def main(argv=None):
         parser.error("Invalid port or thread count")
     if (options.checkpoint is None) == (options.duel is None):
         parser.error("Choose a checkpoint or --duel, not both")
+    if options.bridge_protocol and options.checkpoint is None:
+        parser.error("Bridge protocol requires a standalone checkpoint")
     torch.set_num_threads(options.threads)
     policy = (DuelPolicy(options.duel, options.device, options.deterministic, options.seed) if options.duel else
+              BridgePolicy(options.checkpoint, options.device, options.deterministic, options.seed) if options.bridge_protocol else
               Policy(options.checkpoint, options.device, options.deterministic, options.seed))
     with make_server(policy, options.port) as server:
         print(f"Policy: {policy.path}\nLoopback inference: http://127.0.0.1:{options.port}", flush=True)
         if policy.info["minecraft_bridge_supported"]:
             print("Minecraft: /simduel arena OR /simduel pos1, /simduel pos2, /simduel world", flush=True)
         else:
-            print("V2 inference API ready; the current Minecraft mod only supports v1 sword policies.", flush=True)
+            print("Experimental Bridge protocol ready; the Minecraft live Bridge adapter is not yet supported.", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

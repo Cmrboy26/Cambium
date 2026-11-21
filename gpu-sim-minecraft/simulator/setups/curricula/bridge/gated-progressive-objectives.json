@@ -4,7 +4,7 @@
   "name": "bridge-gated-progressive-objectives",
   "seed": 42,
   "policy": "../../policies/bridge/building-items.json",
-  "environment": "../../environments/bridge/progression-wide-objectives.json",
+  "environment": "../../environments/bridge/progression-narrow-objectives.json",
   "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
   "bridge_observation": {
     "format": "minecraft_sim_bridge_observation", "version": 2,
@@ -22,19 +22,21 @@
   },
   "opponents": {
     "target": {"type": "scripted", "controller": "stationary_target"},
-    "runner": {"type": "scripted", "controller": "bridge_fixed_lane"},
-    "runner-sneak": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"sneak": true}},
     "runner-sneak-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"sneak": true, "jump": true}},
-    "runner-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true}}
+    "runner-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true}},
+    "bduel2": {"type": "checkpoint", "path": "../../../training/runs/BDuel2/snapshots/bridge-narrow-baseline.pt"},
+    "past-self": {"type": "frozen_self_play", "every_updates": 20}
   },
   "mixtures": {"target": [{"id": "target", "weight": 1}], "runner": [
-    {"id": "runner", "weight": 1}, {"id": "runner-sneak", "weight": 1},
     {"id": "runner-sneak-jump", "weight": 1}, {"id": "runner-jump", "weight": 1}
+  ], "runner-training": [
+    {"id": "runner-sneak-jump", "weight": 1}, {"id": "runner-jump", "weight": 1},
+    {"id": "bduel2", "weight": 1}, {"id": "past-self", "weight": 1}
   ]},
   "snapshots": [{"name": "initial", "at_updates": 0}],
   "stages": [
     {
-      "name": "reach-goal-wide", "opponents": "target",
+      "name": "reach-goal-narrow", "opponents": "target",
       "controls": {"fixed": {"jump": false, "sprint": false, "sneak": false,
                              "attack": false, "yaw": 0, "pitch": 0, "weapon": 0, "use_item": false}},
       "evaluations": {
@@ -45,10 +47,10 @@
         {"evaluation": {"suite": "reach-a", "metric": "goals_for_mean", "at_least": 0.75}},
         {"evaluation": {"suite": "reach-b", "metric": "goals_for_mean", "at_least": 0.75}}
       ]},
-      "snapshots": [{"name": "reach-goal-wide", "on_completion": true}]
+      "snapshots": [{"name": "reach-goal-narrow", "on_completion": true}]
     },
     {
-      "name": "defeat-target-wide", "opponents": "target",
+      "name": "defeat-target-narrow", "opponents": "target",
       "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
       "evaluations": {
         "target-a": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
@@ -58,19 +60,33 @@
         {"evaluation": {"suite": "target-a", "metric": "win_rate", "at_least": 0.75}},
         {"evaluation": {"suite": "target-b", "metric": "win_rate", "at_least": 0.75}}
       ]},
-      "snapshots": [{"name": "defeat-target-wide", "on_completion": true}]
+      "snapshots": [{"name": "defeat-target-narrow", "on_completion": true}]
     },
     {
-      "name": "defeat-runner-narrow", "environment": "../../environments/bridge/progression-narrow-objectives.json",
-      "opponents": "runner", "controls": {"fixed": {}},
+      "name": "defeat-runner-narrow-no-blocks", "environment": "../../environments/bridge/progression-narrow-objectives-no-blocks.json",
+      "opponents": "runner-training", "controls": {"fixed": {}},
       "evaluations": {
-        "runner-a": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
-        "runner-b": {"every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
+        "runner-no-blocks-a": {"overrides": {"opponents": "runner"}, "every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
+        "runner-no-blocks-b": {"overrides": {"opponents": "runner"}, "every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
       },
       "task_override": {"rewards": {"doing_damage": 1}},
       "advance": {"all": [
-        {"evaluation": {"suite": "runner-a", "metric": "win_rate", "at_least": 0.50}},
-        {"evaluation": {"suite": "runner-b", "metric": "win_rate", "at_least": 0.50}}
+        {"evaluation": {"suite": "runner-no-blocks-a", "metric": "win_rate", "at_least": 0.75}},
+        {"evaluation": {"suite": "runner-no-blocks-b", "metric": "win_rate", "at_least": 0.75}}
+      ]},
+      "snapshots": [{"name": "bridge-narrow-no-blocks", "on_completion": true}]
+    },
+    {
+      "name": "defeat-runner-narrow", "environment": "../../environments/bridge/progression-narrow-objectives.json",
+      "opponents": "runner-training", "controls": {"fixed": {}},
+      "evaluations": {
+        "runner-a": {"overrides": {"opponents": "runner"}, "every_updates": 10, "worlds": 8, "episodes": 16, "seed": 1729},
+        "runner-b": {"overrides": {"opponents": "runner"}, "every_updates": 10, "worlds": 8, "episodes": 16, "seed": 2718}
+      },
+      "task_override": {"rewards": {"doing_damage": 1}},
+      "advance": {"all": [
+        {"evaluation": {"suite": "runner-a", "metric": "win_rate", "at_least": 0.75}},
+        {"evaluation": {"suite": "runner-b", "metric": "win_rate", "at_least": 0.75}}
       ]},
       "snapshots": [{"name": "bridge-narrow-baseline", "on_completion": true}]
     }

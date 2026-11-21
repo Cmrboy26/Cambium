@@ -5,6 +5,7 @@
 #include "minecraft_sim/cuda_backend.hpp"
 #include "minecraft_sim/terrain.hpp"
 #include "minecraft_sim/bridge_observation.hpp"
+#include "minecraft_sim/bridge_terrain_generation.hpp"
 #include "minecraft_sim/objective_progress.hpp"
 
 #include <algorithm>
@@ -68,6 +69,8 @@ struct TrainingBatch {
     std::unique_ptr<TerrainOverlays> bridge_terrain;
     std::vector<std::uint8_t> finished;
     bool bridge_enabled = false;
+    bool bridge_terrain_generation_enabled = false;
+    BridgeTerrainGeneration bridge_terrain_generation;
     BridgeMatchRules bridge_rules;
     std::vector<BridgeInitialPlayers> bridge_initial;
     std::vector<BridgeMatchState> bridge_states;
@@ -354,7 +357,7 @@ struct TrainingBatch {
     }
 
     void validateBridgeSpawns(const app::Scene::PlayerDefinitions& definitions,
-                              const BridgeMatchRules& rules) const {
+                              const BridgeMatchRules& rules, const BridgeTerrainGeneration* generation = nullptr) const {
         if (definitions.players[0].bounds().intersects(definitions.players[1].bounds())) {
             throw std::invalid_argument("Bridge spawns must not overlap");
         }
@@ -362,6 +365,14 @@ struct TrainingBatch {
             if (player.position.y < rules.void_y || !noBlockCollision(terrain.blocks, player.bounds())
                 || player.bounds().intersects(rules.goals[0]) || player.bounds().intersects(rules.goals[1])) {
                 throw std::invalid_argument("Bridge spawns must be safe and outside both goals");
+            }
+            if (generation) {
+                for (int side : {-1, 1}) {
+                    const double low_x = generation->center_x + (side < 0 ? -2.0 : 1.0);
+                    const Aabb area{{low_x, double(generation->floor_y), double(generation->start_z)},
+                                    {low_x + 2.0, double(generation->floor_y) + 2.0, double(generation->end_z)}};
+                    if (player.bounds().intersects(area)) throw std::invalid_argument("Bridge spawn overlaps generated terrain");
+                }
             }
         }
     }
@@ -428,7 +439,7 @@ struct TrainingBatch {
         for (const auto& field : config.items()) {
             if (field.key() != "mode" && field.key() != "goals" && field.key() != "void_y"
                 && field.key() != "match" && field.key() != "task_rewards" && field.key() != "kits"
-                && field.key() != "building") {
+                && field.key() != "building" && field.key() != "terrain_generation") {
                 throw std::invalid_argument("Unsupported experimental Bridge field: " + field.key());
             }
         }
@@ -581,6 +592,44 @@ struct TrainingBatch {
             }
 #endif
         }
+        BridgeTerrainGeneration generation;
+        const bool generate_terrain = config.contains("terrain_generation");
+        if (generate_terrain) {
+            if (!rules.building.enabled) throw std::invalid_argument("Bridge terrain generation requires building rules");
+            const auto& source = config.at("terrain_generation");
+            const char* names[]{"center_x", "floor_y", "start_z", "end_z", "segments"};
+            if (!source.is_object() || source.size() != 5) throw std::invalid_argument("Invalid Bridge terrain generation");
+            for (const auto* name : names) {
+                if (!source.contains(name) || !source[name].is_number_integer()
+                    || source[name] < -1000000000 || source[name] > 1000000000) {
+                    throw std::invalid_argument("Bridge terrain generation requires bounded integer fields");
+                }
+            }
+            generation = {source["center_x"].get<int>(), source["floor_y"].get<int>(),
+                          source["start_z"].get<int>(), source["end_z"].get<int>(), source["segments"].get<int>()};
+            TerrainOverlays validation(terrain.blocks, 1);
+            if (!generateBridgeTerrain(validation.view(0), generation, 0)) {
+                throw std::invalid_argument("Bridge terrain generation requires a clear, straight protected center lane");
+            }
+            for (int z = generation.start_z; z < generation.end_z; ++z) {
+                for (int offset : {-2, -1, 1, 2}) {
+                    for (int height = 0; height <= 1; ++height) {
+                        if (!bridgeBuildZoneContains(rules.building, generation.center_x + offset,
+                                                     generation.floor_y + height, z)) {
+                            throw std::invalid_argument("Generated terrain must be inside Bridge build zones");
+                        }
+                    }
+                }
+            }
+            for (int side : {-1, 1}) {
+                const double low_x = generation.center_x + (side < 0 ? -2.0 : 1.0);
+                const Aabb area{{low_x, double(generation.floor_y), double(generation.start_z)},
+                                {low_x + 2.0, double(generation.floor_y) + 2.0, double(generation.end_z)}};
+                if (area.intersects(rules.goals[0]) || area.intersects(rules.goals[1])) {
+                    throw std::invalid_argument("Generated terrain must not overlap Bridge goals");
+                }
+            }
+        }
         const auto& task = config.at("task_rewards");
         if (weights[2] != 0.0F || weights[8] != 0.0F) {
             throw std::invalid_argument("Bridge does not support duel win rewards");
@@ -637,7 +686,7 @@ struct TrainingBatch {
         }
         validateBridgeKitObservations(rules);
         for (const auto& definitions : episode_players) {
-            validateBridgeSpawns(definitions, rules);
+            validateBridgeSpawns(definitions, rules, generate_terrain ? &generation : nullptr);
             validateBridgeKits(definitions, rules);
         }
         if (rules.building.enabled) {
@@ -662,6 +711,8 @@ struct TrainingBatch {
         objective_progress.resize(players.size());
         bridge_reward_terms.resize(players.size());
         bridge_rules = rules;
+        bridge_terrain_generation = generation;
+        bridge_terrain_generation_enabled = generate_terrain;
         bridge_score_reward = task_weights[0];
         bridge_win_reward = task_weights[1];
         bridge_loss_reward = task_weights[2];
@@ -739,11 +790,16 @@ struct TrainingBatch {
 #endif
             }
             initial_projectiles.push_back(projectile_states[environment]);
+            if (bridge_terrain_generation_enabled) {
+                generateBridgeTerrain(blocks[environment], bridge_terrain_generation,
+                                      bridgeTerrainSeed(players[std::size_t(environment) * 2].random.state));
+            }
         }
 #if defined(MCSIM_HAS_CUDA)
         if (gpu) {
             gpu->resetEnvironments(ids.data(), ids.size(), initial.data(), initial_projectiles.data(),
-                gpu_observations_configured ? initial_observation_actors.data() : nullptr);
+                gpu_observations_configured ? initial_observation_actors.data() : nullptr,
+                bridge_terrain_generation_enabled ? &bridge_terrain_generation : nullptr);
             if (bridge_enabled && !ids.empty()) {
                 gpu->configureBridge(bridge_rules, bridge_initial.data(), bridge_states.data(), worlds.size(), max_ticks);
             }
@@ -770,7 +826,8 @@ struct TrainingBatch {
             }
             auto parsed = terrain.parsePlayers(definitions[environment], true);
             if (bridge_enabled) {
-                validateBridgeSpawns(parsed, bridge_rules);
+                validateBridgeSpawns(parsed, bridge_rules,
+                    bridge_terrain_generation_enabled ? &bridge_terrain_generation : nullptr);
                 validateBridgeKits(parsed, bridge_rules);
             }
             if (projectile_thrown.empty()) {
@@ -1128,6 +1185,7 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"bridge_host_batch_version", 3},
         {"bridge_shared_reward_version", 1},
         {"bridge_local_voxels_version", 1},
+        {"bridge_terrain_generation_version", 1},
         {"bridge_opponent_score_version", 1},
         {"bridge_objective_reward_version", 1},
         {"actor_task_state_version", 1},
@@ -1758,6 +1816,21 @@ MCSIM_EXPORT const char* mcsim_replay_frame(void* handle, int environment) {
             &batch.projectile_states[environment]);
         if (batch.bridge_enabled) {
             auto bridge = bridgeStateDescription(batch, environment);
+            if (batch.bridge_terrain_generation_enabled && batch.bridge_states[environment].ticks == 0) {
+                auto& initial_terrain = bridge["initial_terrain"] = nlohmann::json::array();
+                const auto blocks = batch.blocks[environment];
+                const auto& generation = batch.bridge_terrain_generation;
+                for (int z = generation.start_z; z < generation.end_z; ++z) {
+                    for (int x = generation.center_x - 2; x <= generation.center_x + 2; ++x) {
+                        for (int y = generation.floor_y; y <= generation.floor_y + 1; ++y) {
+                            const auto index = blocks.cellIndex(x, y, z);
+                            if (index < 0 || blocks.overlay[index] == PlacedBlock::empty) continue;
+                            initial_terrain.push_back({{"player", blocks.overlay[index] == PlacedBlock::team0 ? 0 : 1},
+                                                       {"position", {x, y, z}}});
+                        }
+                    }
+                }
+            }
             bridge["terrain_edits"] = nlohmann::json::array();
             for (int player = 0; player < 2; ++player) {
                 const auto& edit = batch.bridge_events[environment].terrain_edits[player];

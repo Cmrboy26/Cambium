@@ -22,7 +22,7 @@ from simulator.training.contract import bridge_observation_descriptor, from_lega
 from simulator.training.environment import Environment, ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
-from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan
+from simulator.training.plans import EpisodeSampler, advance_rule, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
 from simulator.training.research import (BehaviorEvaluation, EpisodeMetrics, OpponentPool,
                                          ResidentOpponentPool, SampledWorlds, bridge_observation_inputs,
@@ -858,6 +858,22 @@ class BridgeResearchChecks(unittest.TestCase):
             self.assertEqual(list(Path(directory).iterdir()), [])
             self.assertTrue(model.training)
 
+    def test_bridge_replay_preserves_generated_initial_terrain(self):
+        from simulator.training.compiler import _Authoring
+
+        self.scenario = _Authoring(ROOT).environment(
+            "simulator/setups/environments/bridge/progression-narrow-generated.json")["scenario"]
+        self.stage["scenario"] = self.scenario
+        with tempfile.TemporaryDirectory() as directory:
+            plan, options, scenario, provenance = self.replay_inputs(max_ticks=2)
+            path = export_replay(self.model(), plan, self.stage, options, scenario, provenance,
+                                 torch.device("cpu"), 1, 1, Path(directory) / "replays")
+            _, initial, *frames = [json.loads(line) for line in Path(path).read_text().splitlines()]
+            self.assertTrue(initial["bridge"]["initial_terrain"])
+            self.assertTrue(all("initial_terrain" not in frame["bridge"] for frame in frames))
+            replay = self.dashboard_replay(directory)
+            self.assertEqual(replay["frames"][0]["bridge"]["initial_terrain"], initial["bridge"]["initial_terrain"])
+
     def test_bridge_replay_preserves_native_terrain_edits(self):
         scene = self.scenario["arenas"][0]["environment"]
         scene["blocks"].append({"from": [0, 2, 1], "to": [0, 2, 1], "block": "minecraft:stone"})
@@ -1094,6 +1110,11 @@ class BridgeResearchChecks(unittest.TestCase):
         self.assertEqual((first["goals_for"], first["goals_against"]), (10, 0))
         self.assertEqual(first["reward_mean"], 9)
         self.assertEqual([seat["episodes"] for seat in first["seats"]], [3, 2])
+        self.assertEqual(first["min_seat_win_rate"], 1.0)
+        self.assertTrue(reached({"evaluation": {"suite": "test", "metric": "min_seat_win_rate", "at_least": 0.75}},
+                    {}, {"test": first}))
+        single = evaluate(model, plan, {**suite, "episodes": 1}, options, torch.device("cpu"), {}, training_pool)
+        self.assertEqual(single["min_seat_win_rate"], 0.0)
         self.assertTrue(all(state["outcome"] in ("team0", "team1") and sum(state["scores"]) == 2
                             for state in final_states))
         self.assertNotIn("mace_smash_rate", first)
@@ -1970,6 +1991,16 @@ class PlanChecks(unittest.TestCase):
         self.assertTrue(reached({"any": [{"updates": 4}, {"evaluation": evaluation}]},
                                 progress, {"held": {"win_rate": 0.75}}))
         self.assertFalse(reached({"all": [{"updates": 4}, {"episodes": 8}]}, progress, {}))
+
+    def test_bridge_seat_advancement_validation(self):
+        rule = {"evaluation": {"suite": "held", "metric": "min_seat_win_rate", "at_least": 0.75}}
+        suite = {"scenario": {"bridge": {}}, "episodes": 32}
+        advance_rule(rule, {"held": suite})
+        self.assertFalse(reached(rule, {}, {"held": {"win_rate": 0.875, "min_seat_win_rate": 0.5}}))
+        self.assertTrue(reached(rule, {}, {"held": {"win_rate": 0.875, "min_seat_win_rate": 0.75}}))
+        for invalid in ({**suite, "episodes": 1}, {"scenario": {}, "episodes": 32}):
+            with self.assertRaises(ValueError):
+                advance_rule(rule, {"held": invalid})
 
     def test_reject_unknown_and_invalid_conditions(self):
         mutations = [

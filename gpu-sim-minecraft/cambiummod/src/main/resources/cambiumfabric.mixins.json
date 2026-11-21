@@ -3,6 +3,8 @@
 	"package": "net.cambium.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
+		"BridgeGameModeMixin",
+		"BridgePacketMixin",
 		"ArrowStateAccess",
 		"ArrowTrackingMixin",
 		"EggTrackingMixin",

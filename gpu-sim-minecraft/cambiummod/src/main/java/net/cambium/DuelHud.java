@@ -99,7 +99,8 @@ final class DuelHud {
 		text(graphics, font, match.state(), left, 48, width, 0xFFB9C8C1);
 		text(graphics, font, time(match.maxTicks() - match.tick()) + " / " + time(match.maxTicks()), left, 63, width, 0xFFFFFFFF);
 		bar(graphics, left + 8, 77, width - 16, 5, fraction(match.maxTicks() - match.tick(), match.maxTicks()), 0xFF92DDB3);
-		text(graphics, font, match.round() > 0 ? match.winsA() + " : " + match.winsB() + " | D " + match.draws() : "Tick " + match.tick(), left, 88, width, 0xFFE7ECE9);
+		text(graphics, font, match.round() > 0 ? match.winsA() + " : " + match.winsB() + " | D " + match.draws()
+				: match.title().equals("BRIDGE REPLAY") || match.title().equals("LIVE BRIDGE") ? match.winsA() + " : " + match.winsB() : "Tick " + match.tick(), left, 88, width, 0xFFE7ECE9);
 		text(graphics, font, match.round() > 0 ? String.format(java.util.Locale.ROOT, "%.0f ms | %s", match.latency(), match.mode()) : match.title(), left, 103, width, 0xFF94A9A0);
 	}
 
