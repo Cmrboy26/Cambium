@@ -720,9 +720,10 @@ class Rosie:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel", "local", "local-policy", "local-bridge", "import"))
+    parser.add_argument("action", choices=("setup", "connect", "runs", "replays", "replay", "sync", "duel", "local", "local-policy", "local-bridge", "local-bridge-duel", "import"))
     parser.add_argument("--duel", type=Path)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--opponent-checkpoint", type=Path)
     parser.add_argument("--minecraft-directory", required=True)
     parser.add_argument("--run", default="latest")
     parser.add_argument("--replay", default="latest")
@@ -767,17 +768,22 @@ def main(argv=None):
             library = rosie.import_checkpoint(args.checkpoint)
             emit("imported", run=library["policies"][-1]["run"], name=args.checkpoint.stem)
             return 0
-        if args.action in ("local-policy", "local-bridge"):
+        if args.action in ("local-policy", "local-bridge", "local-bridge-duel"):
             if args.checkpoint is None:
                 raise ValueError("Local policy requires --checkpoint <policy.pt>")
             emit("startup", phase="Importing PyTorch", seconds=time.monotonic() - started)
             import torch
-            from simulator.training.serve import Policy, make_server
+            from simulator.training.serve import BridgeDuelPolicy, Policy, make_server
 
             torch.set_num_threads(1)
             emit("startup", phase="Loading checkpoint", seconds=time.monotonic() - started)
-            policy = checkpoint_policy(args.checkpoint) if args.action == "local-bridge" else Policy(args.checkpoint)
-            if args.action == "local-bridge" and policy.info["protocol"] != 2:
+            if args.action == "local-bridge-duel":
+                if args.opponent_checkpoint is None:
+                    raise ValueError("Bridge duel requires two checkpoints")
+                policy = BridgeDuelPolicy(args.checkpoint, args.opponent_checkpoint)
+            else:
+                policy = checkpoint_policy(args.checkpoint) if args.action == "local-bridge" else Policy(args.checkpoint)
+            if args.action in ("local-bridge", "local-bridge-duel") and policy.info["protocol"] != 2:
                 raise ValueError("Bridge launch requires a structured Bridge checkpoint")
             with make_server(policy, 0) as server:
                 emit("policy", run=args.checkpoint.stem, port=server.server_address[1],

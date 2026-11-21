@@ -58,7 +58,7 @@ class InferenceChecks(unittest.TestCase):
     def test_structured_bridge_inference_supports_both_seats(self):
         from backend.fast_rl_model import BridgeActorCritic
         from simulator.training.contract import bridge_observation_descriptor
-        from simulator.training.serve import BridgePolicy
+        from simulator.training.serve import BridgeDuelPolicy, BridgePolicy
 
         descriptor = bridge_observation_descriptor(2)
         contract = from_legacy(SCHEMA)
@@ -76,6 +76,8 @@ class InferenceChecks(unittest.TestCase):
                                       bridge_observation=descriptor)
         self.saved["model"] = BridgeActorCritic(contract["observation_dim"], descriptor, 16,
             dict(zip(contract["action_names"], contract["action_sizes"]))).state_dict()
+        self.saved["model"]["policy.jump_head.weight"].zero_()
+        self.saved["model"]["policy.jump_head.bias"][:] = torch.tensor([20.0, 0.0])
         torch.save(self.saved, self.path)
         with self.assertRaisesRegex(ValueError, "Structured Bridge"):
             Policy(self.path)
@@ -103,6 +105,22 @@ class InferenceChecks(unittest.TestCase):
                    "observations": observations}
         actions = policy.act(request)["actions"]
         self.assertEqual(len(actions), 2)
+        other = Path(self.directory.name) / "other.pt"
+        other_saved = deepcopy(self.saved)
+        other_saved["model"]["policy.jump_head.bias"][:] = torch.tensor([0.0, 20.0])
+        torch.save(other_saved, other)
+        duel = BridgeDuelPolicy(self.path, other, deterministic=True)
+        self.assertEqual(duel.info["environment"], policy.info["environment"])
+        self.assertEqual([fighter["checkpoint"] for fighter in duel.info["fighters"]], [str(self.path), str(other)])
+        jump = contract["action_names"].index("jump")
+        self.assertEqual([action[jump] for action in duel.act(request)["actions"]], [0, 1])
+        reversed_request = {**request, "players": [1, 0],
+                            "observations": {name: values[::-1] for name, values in observations.items()}}
+        self.assertEqual([action[jump] for action in duel.act(reversed_request)["actions"]], [1, 0])
+        for seat in (0, 1):
+            single = {**request, "players": [seat],
+                      "observations": {name: [values[seat]] for name, values in observations.items()}}
+            self.assertEqual(duel.act(single)["actions"][0][jump], seat)
         for seat in (0, 1):
             single = {**request, "players": [seat],
                       "observations": {name: [values[seat]] for name, values in observations.items()}}
@@ -119,6 +137,16 @@ class InferenceChecks(unittest.TestCase):
                 {**request, "observations": invalid_voxel_type}):
             with self.assertRaises(ValueError):
                 policy.act(invalid)
+            with self.assertRaises(ValueError):
+                duel.act(invalid)
+        other_contract = deepcopy(other_saved)
+        changed_contract = deepcopy(contract)
+        changed_contract["observations"][0]["scale"] = 0.5
+        other_contract["metadata"].update(schema=changed_contract, contract=changed_contract)
+        torch.save(other_contract, other)
+        with self.assertRaisesRegex(ValueError, "matching policy and observation contracts"):
+            BridgeDuelPolicy(self.path, other, deterministic=True)
+        torch.save(other_saved, other)
         with make_server(policy, 0) as server:
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
@@ -138,12 +166,26 @@ class InferenceChecks(unittest.TestCase):
                 server.shutdown()
                 worker.join(timeout=3)
 
+        with make_server(duel, 0) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                with urlopen(Request(base + "/act", json.dumps(reversed_request).encode(),
+                                     {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual([action[jump] for action in json.load(response)["actions"]], [1, 0])
+            finally:
+                server.shutdown()
+                worker.join(timeout=3)
+
         descriptor = bridge_observation_descriptor(1)
         self.saved["metadata"]["bridge_observation"] = descriptor
         self.saved["model"] = BridgeActorCritic(contract["observation_dim"], descriptor, 16,
             dict(zip(contract["action_names"], contract["action_sizes"]))).state_dict()
         torch.save(self.saved, self.path)
         version_one = BridgePolicy(self.path, deterministic=True)
+        with self.assertRaisesRegex(ValueError, "matching policy and observation contracts"):
+            BridgeDuelPolicy(self.path, other, deterministic=True)
         version_one_request = {**request, "bridge_observation_hash": version_one.info["bridge_observation_hash"],
                                "observations": {**observations, "match": [[0.0] * 10] * 2}}
         self.assertEqual(len(version_one.act(version_one_request)["actions"]), 2)

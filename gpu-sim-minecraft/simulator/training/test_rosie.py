@@ -1518,6 +1518,15 @@ class RosieTests(unittest.TestCase):
         event = json.loads(output.getvalue().splitlines()[-1])
         self.assertEqual((event["event"], event["protocol"]), ("policy", 2))
 
+        checkpoint = self.rosie.cache / "rosie-123/snapshots/bridge.pt"
+        output = io.StringIO()
+        with patch("http.server.ThreadingHTTPServer.serve_forever"), contextlib.redirect_stdout(output):
+            self.assertEqual(main(["local-bridge-duel", "--checkpoint", str(checkpoint),
+                                   "--opponent-checkpoint", str(self.rosie.cache / "rosie-123/latest.pt"),
+                                   "--minecraft-directory", str(self.game), "--json"]), 0)
+        event = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual((event["event"], event["protocol"]), ("policy", 2))
+
         output = io.StringIO()
         checkpoint = self.rosie.cache / "rosie-123/snapshots/bridge.pt"
         with patch("http.server.ThreadingHTTPServer.serve_forever"), contextlib.redirect_stdout(output):

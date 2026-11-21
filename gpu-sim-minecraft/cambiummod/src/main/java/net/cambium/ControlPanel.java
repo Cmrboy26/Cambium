@@ -41,6 +41,7 @@ final class ControlPanel extends Screen {
 	private final JsonObject[] scriptOptions = {new JsonObject(), new JsonObject()};
 	private final JsonObject[] loadouts = {DuelLibrary.defaultWorldLoadout(), DuelLibrary.defaultWorldLoadout()};
 	private boolean arena = true;
+	private boolean bridge;
 	private int tab;
 	private int page;
 	private String query = "";
@@ -69,6 +70,7 @@ final class ControlPanel extends Screen {
 				JsonObject saved = JsonParser.parseString(Files.readString(library.root.resolve("selections.json"))).getAsJsonObject();
 				environmentId = saved.get("environment").getAsString();
 				arena = saved.get("arena").getAsBoolean();
+				bridge = saved.has("bridge") && saved.get("bridge").getAsBoolean();
 				maxTicks = saved.has("max_ticks") ? saved.get("max_ticks").getAsInt() : 0;
 				if (saved.has("sync_scope") && List.of("policy", "latest", "all").contains(saved.get("sync_scope").getAsString())) syncScope = saved.get("sync_scope").getAsString();
 				for (int index = 0; index < 2; index++) {
@@ -168,21 +170,23 @@ final class ControlPanel extends Screen {
 	}
 
 	private void duel() {
-		JsonObject environment = arena ? compatibleEnvironment() : null;
+		JsonObject environment = arena && !bridge ? compatibleEnvironment() : null;
 		label("Environment", left, 63, contentWidth, 0xFFB5C2BE);
 		List<JsonObject> environmentChoices = compatibleEnvironmentChoices();
-		String environmentLabel = !arena ? "Not used in World mode" : environment != null ? name(environment)
+		String environmentLabel = bridge ? "Arena and rules: Fighter A checkpoint" : !arena ? "Not used in World mode" : environment != null ? name(environment)
 				: library == null || library.environments.isEmpty() ? "No local environments" : "No compatible environment";
-		button(environmentLabel, left, 76, contentWidth - 100, this::chooseEnvironment).active = arena && !environmentChoices.isEmpty();
-		addRenderableWidget(CycleButton.builder(value -> Component.literal(value ? "Arena" : "World"), arena)
-				.withValues(true, false).displayOnlyValue().create(left + contentWidth - 96, 76, 96, 20, Component.literal("Location"),
-						(widget, value) -> { arena = value; persist(); rebuildWidgets(); }));
+		button(environmentLabel, left, 76, contentWidth - 100, this::chooseEnvironment).active = !bridge && arena && !environmentChoices.isEmpty();
+		String location = bridge ? "Bridge" : arena ? "Arena" : "World";
+		addRenderableWidget(CycleButton.builder(Component::literal, location)
+				.withValues("Arena", "World", "Bridge").displayOnlyValue().create(left + contentWidth - 96, 76, 96, 20, Component.literal("Location"),
+						(widget, value) -> { bridge = value.equals("Bridge"); arena = !value.equals("World"); persist(); rebuildWidgets(); }));
 		int columnWidth = (contentWidth - 12) / 2;
 		for (int index = 0; index < 2; index++) {
 			final int fighter = index;
 			int column = left + index * (columnWidth + 12);
 			label(index == 0 ? "Fighter A" : "Fighter B", column, 107, columnWidth, index == 0 ? 0xFF85C5F5 : 0xFFF6A397);
-			addRenderableWidget(CycleButton.builder(Component::literal, modes[index]).withValues(MODES).displayOnlyValue()
+			if (bridge) label("Bridge policy", column, 126, columnWidth, 0xFFACBDB5);
+			else addRenderableWidget(CycleButton.builder(Component::literal, modes[index]).withValues(MODES).displayOnlyValue()
 					.create(column, 120, columnWidth, 20, Component.literal("Controller"), (widget, value) -> {
 						if (!modes[fighter].equals(value)) scriptOptions[fighter] = new JsonObject();
 						modes[fighter] = value;
@@ -190,23 +194,23 @@ final class ControlPanel extends Screen {
 						rebuildWidgets();
 					}));
 			JsonObject policy = library == null ? null : library.find(library.policies, policyIds[index]);
-			String title = modes[index].equals("Policy") ? policy == null ? "Select local policy" : name(policy)
+			String title = bridge || modes[index].equals("Policy") ? policy == null || DuelLibrary.bridgePolicy(policy) != bridge ? "Select local " + (bridge ? "Bridge " : "") + "policy" : name(policy)
 					: modes[index].equals("Stationary target") ? "Idle target" : "Script settings";
 			Button selection = button(title, column, 146, columnWidth, () -> {
-				if (modes[fighter].equals("Policy")) {
-					if (library != null) choosePolicy("Fighter " + (fighter == 0 ? "A" : "B"), policyIds[fighter], entry -> { policyIds[fighter] = identity(entry); persist(); });
+				if (bridge || modes[fighter].equals("Policy")) {
+					if (library != null) choosePolicy("Fighter " + (fighter == 0 ? "A" : "B"), policyIds[fighter], entry -> { policyIds[fighter] = identity(entry); persist(); }, bridge);
 				} else minecraft.gui.setScreen(new ScriptScreen(fighter));
 			});
-			selection.active = !modes[index].equals("Stationary target");
-			if (!arena) button((LiveDuel.worldSpawnReady(minecraft, fighter) ? "Spawn " + (index + 1) + " marked" : "Mark spawn " + (index + 1)),
+			selection.active = bridge || !modes[index].equals("Stationary target");
+			if (!arena && !bridge) button((LiveDuel.worldSpawnReady(minecraft, fighter) ? "Spawn " + (index + 1) + " marked" : "Mark spawn " + (index + 1)),
 					column, 172, columnWidth, () -> LiveDuel.markSpawn(minecraft, fighter));
-			else if (modes[index].equals("Policy") && policy != null) label("Update " + policy.get("update").getAsLong() + " / " + policy.get("stage").getAsString(), column, 176, columnWidth, 0xFFACBDB5);
-			if (!arena) button("Loadout: " + loadoutSummary(loadouts[index]), column, 198, columnWidth, () -> minecraft.gui.setScreen(new LoadoutScreen(fighter)));
+			else if ((bridge || modes[index].equals("Policy")) && policy != null && DuelLibrary.bridgePolicy(policy) == bridge) label("Update " + policy.get("update").getAsLong() + " / " + policy.get("stage").getAsString(), column, 176, columnWidth, 0xFFACBDB5);
+			if (!arena && !bridge) button("Loadout: " + loadoutSummary(loadouts[index]), column, 198, columnWidth, () -> minecraft.gui.setScreen(new LoadoutScreen(fighter)));
 		}
 		button(RosieLauncher.isServing() ? "Replace live duel" : "Start live duel", left, height - 30, contentWidth - 124, this::launch)
-				.active = RosieLauncher.canStartLocalMatch() && (arena ? environment != null && canStartArena(environment) : canStartWorld());
+				.active = RosieLauncher.canStartLocalMatch() && (bridge ? library != null : arena ? environment != null && canStartArena(environment) : canStartWorld());
 		button(maxTicks == 0 ? arena ? "Duration: Default" : "Set duration" : String.format(Locale.ROOT, "Duration: %.1f s", maxTicks / 20.0), left + contentWidth - 120, height - 30, 120,
-				() -> minecraft.gui.setScreen(new DurationScreen()));
+				() -> minecraft.gui.setScreen(new DurationScreen())).active = !bridge;
 	}
 
 	private void shelf() {
@@ -251,30 +255,17 @@ final class ControlPanel extends Screen {
 		List<JsonObject> versions = library == null ? List.of() : libraryFavorites ? library.favoriteVersions() : library.versionsByUpdate(libraryRun);
 		JsonObject version = library == null ? null : library.find(versions, selectedPolicy);
 		int actionWidth = (contentWidth - 12) / 4;
-		Button first = button(DuelLibrary.bridgePolicy(version) ? "Play Bridge" : "Assign A", left, height - 30, actionWidth, () -> {
-			JsonObject selected = library.find(library.policies, selectedPolicy);
-			if (DuelLibrary.bridgePolicy(selected)) {
-				try {
-					RosieLauncher.start(minecraft, "local-bridge", "latest", library.checkpointPath(selected).toString());
-					tab = 3;
-					rebuildWidgets();
-				} catch (IOException | RuntimeException error) { status = error.getMessage(); }
-			} else { policyIds[0] = selectedPolicy; modes[0] = "Policy"; tab = 0; persist(); rebuildWidgets(); }
-		});
-		first.active = privateWorld(minecraft) && version != null && RosieLauncher.canStartLocalMatch();
+		Button first = button("Assign A", left, height - 30, actionWidth, () -> assignPolicy(0));
+		first.active = privateWorld(minecraft) && version != null;
 		Button second = button("Assign B", left + actionWidth + 4, height - 30, actionWidth,
-				() -> { policyIds[1] = selectedPolicy; modes[1] = "Policy"; tab = 0; persist(); rebuildWidgets(); });
-		second.active = privateWorld(minecraft) && version != null && !DuelLibrary.bridgePolicy(version);
+				() -> assignPolicy(1));
+		second.active = privateWorld(minecraft) && version != null;
 		if (version != null) {
 			Button favorite = button(favoriteLabel(selectedPolicy), left + contentWidth - 100, height - 80, 100, () -> toggleFavorite(selectedPolicy));
 			addRenderableWidget(new CheckpointSlider(left, height - 80, contentWidth - 104, versions, selectedPolicy, entry -> {
 				selectedPolicy = identity(entry);
 				favorite.setMessage(Component.literal(favoriteLabel(selectedPolicy)));
 				favorite.setTooltip(Tooltip.create(Component.literal(favoriteLabel(selectedPolicy))));
-				String firstLabel = DuelLibrary.bridgePolicy(entry) ? "Play Bridge" : "Assign A";
-				first.setMessage(Component.literal(fit(firstLabel, actionWidth - 12)));
-				first.setTooltip(Tooltip.create(Component.literal(firstLabel)));
-				second.active = privateWorld(minecraft) && !DuelLibrary.bridgePolicy(entry);
 			}));
 		}
 		button("Name policy", left + 2 * (actionWidth + 4), height - 30, actionWidth, () -> {
@@ -284,6 +275,16 @@ final class ControlPanel extends Screen {
 		button("Name run", left + 3 * (actionWidth + 4), height - 30, actionWidth,
 				() -> minecraft.gui.setScreen(new RenameScreen(library.find(library.runs, libraryRun))))
 				.active = !libraryFavorites && !RosieLauncher.isBusy() && library != null && library.find(library.runs, libraryRun) != null;
+	}
+
+	private void assignPolicy(int fighter) {
+		policyIds[fighter] = selectedPolicy;
+		modes[fighter] = "Policy";
+		bridge = DuelLibrary.bridgePolicy(library.find(library.policies, selectedPolicy));
+		if (bridge) arena = true;
+		tab = 0;
+		persist();
+		rebuildWidgets();
 	}
 
 	private void playerControl() {
@@ -418,6 +419,14 @@ final class ControlPanel extends Screen {
 
 	private void launch() {
 		try {
+			if (bridge) {
+				var paths = library.bridgeCheckpoints(library.find(library.policies, policyIds[0]), library.find(library.policies, policyIds[1]));
+				persist();
+				RosieLauncher.start(minecraft, "local-bridge-duel", paths[0].toString(), paths[1].toString());
+				tab = 3;
+				rebuildWidgets();
+				return;
+			}
 			JsonObject environment = arena ? compatibleEnvironment() : null;
 			JsonObject[] fighters = new JsonObject[2];
 			JsonObject[] policyEntries = new JsonObject[2];
@@ -442,6 +451,7 @@ final class ControlPanel extends Screen {
 		JsonObject saved = new JsonObject();
 		saved.addProperty("environment", environmentId);
 		saved.addProperty("arena", arena);
+		saved.addProperty("bridge", bridge);
 		saved.addProperty("max_ticks", maxTicks);
 		saved.addProperty("sync_scope", syncScope);
 		var fighters = new com.google.gson.JsonArray();
@@ -465,7 +475,11 @@ final class ControlPanel extends Screen {
 	}
 
 	private void choosePolicy(String title, String current, Consumer<JsonObject> selected) {
-		minecraft.gui.setScreen(new PolicyScreen(title, current, selected));
+		choosePolicy(title, current, selected, null);
+	}
+
+	private void choosePolicy(String title, String current, Consumer<JsonObject> selected, Boolean bridgeFilter) {
+		minecraft.gui.setScreen(new PolicyScreen(title, current, selected, bridgeFilter));
 	}
 
 	private void chooseEnvironment() {
@@ -736,6 +750,7 @@ final class ControlPanel extends Screen {
 
 	private final class PolicyScreen extends Screen {
 		private final Consumer<JsonObject> selected;
+		private final Boolean bridgeFilter;
 		private String selectedId;
 		private String groupRun;
 		private boolean favoritesGroup;
@@ -745,16 +760,21 @@ final class ControlPanel extends Screen {
 		private int position;
 		private int size;
 
-		PolicyScreen(String title, String current, Consumer<JsonObject> selected) {
+		PolicyScreen(String title, String current, Consumer<JsonObject> selected, Boolean bridgeFilter) {
 			super(Component.literal(title));
 			this.selected = selected;
+			this.bridgeFilter = bridgeFilter;
 			selectedId = current;
 			JsonObject policy = library.find(library.policies, current);
 			groupRun = policy != null && policy.has("run") ? policy.get("run").getAsString()
 					: library.runs.isEmpty() ? "" : identity(library.runs.getFirst());
 		}
 
-		private List<JsonObject> versions() { return favoritesGroup ? library.favoriteVersions() : library.versionsByUpdate(groupRun); }
+		private List<JsonObject> filtered(List<JsonObject> entries) {
+			return bridgeFilter == null ? entries : entries.stream().filter(entry -> DuelLibrary.bridgePolicy(entry) == bridgeFilter).toList();
+		}
+		private List<JsonObject> versionsFor(String run) { return filtered(library.versionsByUpdate(run)); }
+		private List<JsonObject> versions() { return favoritesGroup ? filtered(library.favoriteVersions()) : versionsFor(groupRun); }
 
 		private void selectGroup(String run, boolean favorites) {
 			groupRun = run;
@@ -774,10 +794,10 @@ final class ControlPanel extends Screen {
 			search.setValue(filter);
 			search.setResponder(value -> { filter = value; selectedPage = 0; rebuildWidgets(); });
 			setInitialFocus(search);
-			addRenderableWidget(Button.builder(Component.literal((favoritesGroup ? "> " : "") + "Favorites (" + library.favoriteVersions().size() + ")"),
+			addRenderableWidget(Button.builder(Component.literal((favoritesGroup ? "> " : "") + "Favorites (" + filtered(library.favoriteVersions()).size() + ")"),
 					widget -> selectGroup("", true)).bounds(position, 70, size, 20).build());
 			List<JsonObject> groups = new ArrayList<>(library.runs);
-			if (!library.versionsByUpdate("").isEmpty()) {
+			if (!versionsFor("").isEmpty()) {
 				JsonObject ungrouped = new JsonObject();
 				ungrouped.addProperty("id", "");
 				ungrouped.addProperty("name", "Other policies");
@@ -786,15 +806,15 @@ final class ControlPanel extends Screen {
 			String searchText = filter.toLowerCase(Locale.ROOT);
 			groups = groups.stream().filter(run -> {
 				String runId = identity(run);
-				return name(run).toLowerCase(Locale.ROOT).contains(searchText) || runId.toLowerCase(Locale.ROOT).contains(searchText)
-						|| library.versionsByUpdate(runId).stream().anyMatch(policy -> name(policy).toLowerCase(Locale.ROOT).contains(searchText));
+				return !versionsFor(runId).isEmpty() && (name(run).toLowerCase(Locale.ROOT).contains(searchText) || runId.toLowerCase(Locale.ROOT).contains(searchText)
+						|| versionsFor(runId).stream().anyMatch(policy -> name(policy).toLowerCase(Locale.ROOT).contains(searchText)));
 			}).toList();
 			int rows = Math.max(1, (height - 218) / 24);
 			selectedPage = Math.min(selectedPage, Math.max(0, (groups.size() - 1) / rows));
 			for (int index = selectedPage * rows; index < Math.min(groups.size(), (selectedPage + 1) * rows); index++) {
 				JsonObject run = groups.get(index);
 				String runId = identity(run);
-				String title = (!favoritesGroup && runId.equals(groupRun) ? "> " : "") + name(run) + " / " + library.versionsByUpdate(runId).size() + " versions";
+				String title = (!favoritesGroup && runId.equals(groupRun) ? "> " : "") + name(run) + " / " + versionsFor(runId).size() + " versions";
 				addRenderableWidget(Button.builder(Component.literal(fit(title, size - 12)), widget -> selectGroup(runId, false))
 						.bounds(position, 94 + index % rows * 24, size, 20).tooltip(Tooltip.create(Component.literal(title))).build());
 			}

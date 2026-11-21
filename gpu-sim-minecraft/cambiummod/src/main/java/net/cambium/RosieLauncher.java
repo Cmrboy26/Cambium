@@ -130,11 +130,11 @@ final class RosieLauncher {
 			if (reloadToken != null && worker != null && worker.isAlive()) return reload(client, !action.equals("local-world"));
 			stopOwned(client);
 		}
-		if (busy && serving && !reloading && action.equals("local-bridge")) stopOwned(client);
+		if (busy && serving && !reloading && (action.equals("local-bridge") || action.equals("local-bridge-duel"))) stopOwned(client);
 		if (busy) return message(client, "Rosie is busy: " + operation + ". Use /simrosie shutdown before switching helpers.");
 		Path game = client.gameDirectory.toPath().toAbsolutePath();
 		Path configuration = game.resolve("config/cambium-rosie.json");
-		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import") || action.equals("local-policy") || action.equals("local-bridge");
+		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import") || action.equals("local-policy") || action.equals("local-bridge") || action.equals("local-bridge-duel");
 		boolean bundled = local && BundledInference.available();
 		if (!bundled && !Files.isRegularFile(configuration)) {
 			return message(client, local ? "This mod build has no bundled inference runtime for this platform."
@@ -158,7 +158,7 @@ final class RosieLauncher {
 				Path logs = game.resolve("logs");
 				Files.createDirectories(logs);
 				ProcessBuilder builder;
-				if (bundled) builder = BundledInference.helper(BundledInference.prepare(game), game, action, replay);
+				if (bundled) builder = BundledInference.helper(BundledInference.prepare(game), game, action, run, replay);
 				else {
 					JsonObject config = JsonParser.parseString(Files.readString(configuration)).getAsJsonObject();
 					builder = helper(config, game, action, run, replay, scope);
@@ -253,11 +253,12 @@ final class RosieLauncher {
 	}
 
 	static ProcessBuilder helper(JsonObject config, Path game, String action, String run, String replay, String scope) {
-		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import") || action.equals("local-bridge");
+		boolean local = action.equals("local") || action.equals("local-world") || action.equals("import") || action.equals("local-bridge") || action.equals("local-bridge-duel");
 		var arguments = new ArrayList<>(List.of(config.get("python").getAsString(), "-u", "-B", "-m",
 				"simulator.training.rosie", action.equals("local-world") ? "local" : action, "--minecraft-directory", game.toString(),
 				"--run", run, "--replay", replay, "--json"));
-		if (action.equals("import") || action.equals("local-policy") || action.equals("local-bridge")) arguments.addAll(List.of("--checkpoint", replay, "--offline"));
+		if (action.equals("local-bridge-duel")) arguments.addAll(List.of("--checkpoint", run, "--opponent-checkpoint", replay, "--offline"));
+		else if (action.equals("import") || action.equals("local-policy") || action.equals("local-bridge")) arguments.addAll(List.of("--checkpoint", replay, "--offline"));
 		else if (local) arguments.addAll(List.of("--duel", game.resolve("sim-rosie-cache/duel.json").toString(), "--offline"));
 		else arguments.add("--connect");
 		if (action.equals("sync")) {

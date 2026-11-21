@@ -274,6 +274,13 @@ public final class ReplayAnalysisChecks {
 			require(command.contains("--offline") && !command.contains("--duel") && !command.contains("--connect")
 					&& command.get(command.indexOf("--checkpoint") + 1).equals(checkpoint), "Player helper must use a literal local checkpoint");
 		}
+		String opponent = root.resolve("other policy;test.pt").toString();
+		for (var command : java.util.List.of(RosieLauncher.helper(config, root, "local-bridge-duel", checkpoint, opponent).command(),
+				BundledInference.helper(root.resolve("runtime.exe"), root, "local-bridge-duel", checkpoint, opponent).command())) {
+			require(command.contains("--offline") && !command.contains("--connect") && !command.contains("--duel")
+					&& command.get(command.indexOf("--checkpoint") + 1).equals(checkpoint)
+					&& command.get(command.indexOf("--opponent-checkpoint") + 1).equals(opponent), "Bridge duel must pass both literal checkpoint paths offline");
+		}
 		JsonObject supported = JsonParser.parseString("""
 				{"format":"minecraft_sim_policy","version":1,"minecraft":"26.3","ticks_per_action":1,
 				 "observations":[{"feature":"self.health_fraction"}],"actions":[{"name":"jump","values":[false,true]}]}
@@ -433,9 +440,19 @@ public final class ReplayAnalysisChecks {
 					"A structured Bridge checkpoint must resolve to its cached file");
 			boolean bridgeRejected = false;
 			try { library.policyFighter(bridgeEntry, environment); } catch (java.io.IOException expected) {
-				bridgeRejected = expected.getMessage().contains("Play Bridge");
+				bridgeRejected = expected.getMessage().contains("Bridge mode");
 			}
-			require(bridgeRejected, "Ordinary duels must direct structured checkpoints to Play Bridge");
+			require(bridgeRejected, "Ordinary duels must direct structured checkpoints to Bridge mode");
+			require(java.util.Arrays.equals(library.bridgeCheckpoints(bridgeEntry, bridgeEntry), new Path[]{checkpoint, checkpoint}),
+					"Bridge duels must resolve both cached checkpoints");
+			boolean invalidBridge = false;
+			try { library.bridgeCheckpoints(bridgeEntry, entry); } catch (java.io.IOException expected) { invalidBridge = true; }
+			require(invalidBridge, "Bridge duels must reject scalar fighters");
+			JsonObject incompatibleBridge = bridgeEntry.deepCopy();
+			incompatibleBridge.addProperty("contract_hash", "b".repeat(64));
+			invalidBridge = false;
+			try { library.bridgeCheckpoints(bridgeEntry, incompatibleBridge); } catch (java.io.IOException expected) { invalidBridge = true; }
+			require(invalidBridge, "Bridge duels must reject mismatched policy layouts");
 			JsonObject meleeOptions = new JsonObject();
 			meleeOptions.addProperty("attack_interval", 5);
 			meleeOptions.addProperty("strafe", true);

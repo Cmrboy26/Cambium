@@ -199,7 +199,7 @@ final class DuelLibrary {
 
 	JsonObject policyFighter(JsonObject entry, String contractHash) throws IOException {
 		if (entry == null) throw new IOException("Choose a local policy first");
-		if (bridgePolicy(entry)) throw new IOException("Bridge checkpoints use Play Bridge in the Library");
+		if (bridgePolicy(entry)) throw new IOException("Select Bridge mode in the Duel tab for Bridge checkpoints");
 		if (!entry.get("contract_hash").getAsString().equals(contractHash)) throw new IOException("Policy layouts must match");
 		Path path = checkpointPath(entry);
 		JsonObject fighter = new JsonObject();
@@ -211,6 +211,12 @@ final class DuelLibrary {
 
 	static boolean bridgePolicy(JsonObject entry) {
 		return entry != null && entry.has("protocol") && entry.get("protocol").getAsInt() == 2;
+	}
+
+	Path[] bridgeCheckpoints(JsonObject first, JsonObject second) throws IOException {
+		if (!bridgePolicy(first) || !bridgePolicy(second)) throw new IOException("Choose a Bridge checkpoint for each fighter");
+		if (!first.get("contract_hash").equals(second.get("contract_hash"))) throw new IOException("Bridge fighters must use the same policy layout");
+		return new Path[]{checkpointPath(first), checkpointPath(second)};
 	}
 
 	Path checkpointPath(JsonObject entry) throws IOException {

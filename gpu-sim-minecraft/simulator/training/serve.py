@@ -150,7 +150,7 @@ class BridgePolicy:
                      "deterministic": deterministic}
         self.lock = threading.Lock()
 
-    def act(self, request):
+    def observations(self, request):
         if (not isinstance(request, dict) or request.get("protocol") != 2
                 or not isinstance(request.get("session"), str) or not 1 <= len(request["session"]) <= 64
                 or type(request.get("tick")) is not int or not 0 <= request["tick"] < 2**53
@@ -179,8 +179,36 @@ class BridgePolicy:
                   "voxels": voxels.astype(np.uint8)}
         if not np.isfinite(inputs["scalar"]).all() or not np.isfinite(inputs["match"]).all():
             raise ValueError("Bridge observations exceed float32 range")
+        return players, inputs
+
+    def act(self, request):
+        players, inputs = self.observations(request)
         with self.lock:
             actions = self.controller.act(inputs, indices=np.asarray(players, dtype=np.int64)).tolist()
+        return {"protocol": 2, "session": request["session"], "tick": request["tick"], "players": players,
+                "contract_hash": self.info["contract_hash"],
+                "bridge_observation_hash": self.info["bridge_observation_hash"], "actions": actions}
+
+
+class BridgeDuelPolicy:
+    def __init__(self, first, second, device="cpu", deterministic=False, seed=1):
+        self.policies = [BridgePolicy(first, device, deterministic, seed),
+                         BridgePolicy(second, device, deterministic, seed + 1)]
+        self.info = deepcopy(self.policies[0].info)
+        if any(self.policies[1].info[key] != self.info[key]
+               for key in ("contract_hash", "bridge_observation_hash", "catalogue_hash")):
+            raise ValueError("Bridge fighters require matching policy and observation contracts")
+        self.info["fighters"] = [{"name": str(policy.path.name), "checkpoint": str(policy.path),
+                                  "update": policy.info["update"]} for policy in self.policies]
+        self.lock = threading.Lock()
+
+    def act(self, request):
+        players, inputs = self.policies[0].observations(request)
+        with self.lock:
+            actions = [self.policies[seat].controller.act(
+                {name: value[index:index + 1] for name, value in inputs.items()},
+                indices=np.asarray([seat], dtype=np.int64))[0].tolist()
+                for index, seat in enumerate(players)]
         return {"protocol": 2, "session": request["session"], "tick": request["tick"], "players": players,
                 "contract_hash": self.info["contract_hash"],
                 "bridge_observation_hash": self.info["bridge_observation_hash"], "actions": actions}
