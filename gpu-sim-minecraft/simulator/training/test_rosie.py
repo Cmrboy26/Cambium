@@ -1518,6 +1518,14 @@ class RosieTests(unittest.TestCase):
         event = json.loads(output.getvalue().splitlines()[-1])
         self.assertEqual((event["event"], event["protocol"]), ("policy", 2))
 
+        output = io.StringIO()
+        checkpoint = self.rosie.cache / "rosie-123/snapshots/bridge.pt"
+        with patch("http.server.ThreadingHTTPServer.serve_forever"), contextlib.redirect_stdout(output):
+            self.assertEqual(main(["local-bridge", "--checkpoint", str(checkpoint),
+                                   "--minecraft-directory", str(self.game), "--json"]), 0)
+        event = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual((event["event"], event["protocol"]), ("policy", 2))
+
     def test_named_snapshot_sync_and_persistent_local_library(self):
         import torch
         from backend.fast_rl_model import ActorCritic

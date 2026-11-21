@@ -98,6 +98,8 @@ python -m simulator.training.serve simulator/training/runs/BDuel4/snapshots/buil
 
 Use `/simduel bridge` (or `/simduel bridge 8766`) to build the checkpoint arena
 and start two bots. The Live tab also has a Bridge port and connect button.
+For a synced Bridge checkpoint, select its version in Library and choose
+**Play Bridge**; ordinary duel fighter assignments use the scalar adapter.
 `/simduel join` and `/simduel join 2` take either seat; `/simduel leave` restores
 the participant and returns to bots. The usual pause, resume, reset, status and
 stop commands apply. Bridge requires its checkpoint arena; existing-world mode

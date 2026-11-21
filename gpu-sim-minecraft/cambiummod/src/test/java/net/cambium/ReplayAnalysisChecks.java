@@ -268,7 +268,9 @@ public final class ReplayAnalysisChecks {
 		var bundledDuel = BundledInference.helper(root.resolve("runtime.exe"), root, "local-world", "").command();
 		require(bundledDuel.get(1).equals("local") && bundledDuel.contains("--duel"), "Bundled world duels must use local inference");
 		for (var command : java.util.List.of(RosieLauncher.helper(config, root, "local-policy", "latest", checkpoint).command(),
-				BundledInference.helper(root.resolve("runtime.exe"), root, "local-policy", checkpoint).command())) {
+				BundledInference.helper(root.resolve("runtime.exe"), root, "local-policy", checkpoint).command(),
+				RosieLauncher.helper(config, root, "local-bridge", "latest", checkpoint).command(),
+				BundledInference.helper(root.resolve("runtime.exe"), root, "local-bridge", checkpoint).command())) {
 			require(command.contains("--offline") && !command.contains("--duel") && !command.contains("--connect")
 					&& command.get(command.indexOf("--checkpoint") + 1).equals(checkpoint), "Player helper must use a literal local checkpoint");
 		}
@@ -425,6 +427,15 @@ public final class ReplayAnalysisChecks {
 				 "actions":[{"name":"weapon","values":[0,2]}]}
 				""").getAsJsonObject());
 			JsonObject first = library.policyFighter(entry, environment);
+			JsonObject bridgeEntry = entry.deepCopy();
+			bridgeEntry.addProperty("protocol", 2);
+			require(DuelLibrary.bridgePolicy(bridgeEntry) && library.checkpointPath(bridgeEntry).equals(checkpoint),
+					"A structured Bridge checkpoint must resolve to its cached file");
+			boolean bridgeRejected = false;
+			try { library.policyFighter(bridgeEntry, environment); } catch (java.io.IOException expected) {
+				bridgeRejected = expected.getMessage().contains("Play Bridge");
+			}
+			require(bridgeRejected, "Ordinary duels must direct structured checkpoints to Play Bridge");
 			JsonObject meleeOptions = new JsonObject();
 			meleeOptions.addProperty("attack_interval", 5);
 			meleeOptions.addProperty("strafe", true);

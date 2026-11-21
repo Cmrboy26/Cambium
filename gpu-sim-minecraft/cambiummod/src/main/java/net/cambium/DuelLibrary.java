@@ -199,14 +199,25 @@ final class DuelLibrary {
 
 	JsonObject policyFighter(JsonObject entry, String contractHash) throws IOException {
 		if (entry == null) throw new IOException("Choose a local policy first");
+		if (bridgePolicy(entry)) throw new IOException("Bridge checkpoints use Play Bridge in the Library");
 		if (!entry.get("contract_hash").getAsString().equals(contractHash)) throw new IOException("Policy layouts must match");
-		Path path = Path.of(entry.get("path").getAsString()).toAbsolutePath().normalize();
-		if (!Files.isRegularFile(path) || !path.toRealPath().startsWith(root.toRealPath())) throw new IOException("Policy is missing from the local cache; sync it again");
+		Path path = checkpointPath(entry);
 		JsonObject fighter = new JsonObject();
 		fighter.addProperty("type", "checkpoint");
 		fighter.addProperty("name", entry.get("name").getAsString());
 		fighter.addProperty("path", path.toString());
 		return fighter;
+	}
+
+	static boolean bridgePolicy(JsonObject entry) {
+		return entry != null && entry.has("protocol") && entry.get("protocol").getAsInt() == 2;
+	}
+
+	Path checkpointPath(JsonObject entry) throws IOException {
+		if (entry == null) throw new IOException("Choose a local policy first");
+		Path path = Path.of(entry.get("path").getAsString()).toAbsolutePath().normalize();
+		if (!Files.isRegularFile(path) || !path.toRealPath().startsWith(root.toRealPath())) throw new IOException("Policy is missing from the local cache; sync it again");
+		return path;
 	}
 
 	JsonObject worldPolicy(JsonObject first, JsonObject second) throws IOException {

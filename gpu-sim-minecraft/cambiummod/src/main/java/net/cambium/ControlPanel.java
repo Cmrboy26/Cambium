@@ -250,20 +250,32 @@ final class ControlPanel extends Screen {
 		pager(entries.size(), rows, height - 108);
 		List<JsonObject> versions = library == null ? List.of() : libraryFavorites ? library.favoriteVersions() : library.versionsByUpdate(libraryRun);
 		JsonObject version = library == null ? null : library.find(versions, selectedPolicy);
+		int actionWidth = (contentWidth - 12) / 4;
+		Button first = button(DuelLibrary.bridgePolicy(version) ? "Play Bridge" : "Assign A", left, height - 30, actionWidth, () -> {
+			JsonObject selected = library.find(library.policies, selectedPolicy);
+			if (DuelLibrary.bridgePolicy(selected)) {
+				try {
+					RosieLauncher.start(minecraft, "local-bridge", "latest", library.checkpointPath(selected).toString());
+					tab = 3;
+					rebuildWidgets();
+				} catch (IOException | RuntimeException error) { status = error.getMessage(); }
+			} else { policyIds[0] = selectedPolicy; modes[0] = "Policy"; tab = 0; persist(); rebuildWidgets(); }
+		});
+		first.active = privateWorld(minecraft) && version != null && RosieLauncher.canStartLocalMatch();
+		Button second = button("Assign B", left + actionWidth + 4, height - 30, actionWidth,
+				() -> { policyIds[1] = selectedPolicy; modes[1] = "Policy"; tab = 0; persist(); rebuildWidgets(); });
+		second.active = privateWorld(minecraft) && version != null && !DuelLibrary.bridgePolicy(version);
 		if (version != null) {
 			Button favorite = button(favoriteLabel(selectedPolicy), left + contentWidth - 100, height - 80, 100, () -> toggleFavorite(selectedPolicy));
 			addRenderableWidget(new CheckpointSlider(left, height - 80, contentWidth - 104, versions, selectedPolicy, entry -> {
 				selectedPolicy = identity(entry);
 				favorite.setMessage(Component.literal(favoriteLabel(selectedPolicy)));
 				favorite.setTooltip(Tooltip.create(Component.literal(favoriteLabel(selectedPolicy))));
+				String firstLabel = DuelLibrary.bridgePolicy(entry) ? "Play Bridge" : "Assign A";
+				first.setMessage(Component.literal(fit(firstLabel, actionWidth - 12)));
+				first.setTooltip(Tooltip.create(Component.literal(firstLabel)));
+				second.active = privateWorld(minecraft) && !DuelLibrary.bridgePolicy(entry);
 			}));
-		}
-		int actionWidth = (contentWidth - 12) / 4;
-		for (int index = 0; index < 2; index++) {
-			final int fighter = index;
-			button(index == 0 ? "Assign A" : "Assign B", left + index * (actionWidth + 4), height - 30, actionWidth,
-					() -> { policyIds[fighter] = selectedPolicy; modes[fighter] = "Policy"; tab = 0; persist(); rebuildWidgets(); })
-					.active = privateWorld(minecraft) && library != null && library.find(library.policies, selectedPolicy) != null;
 		}
 		button("Name policy", left + 2 * (actionWidth + 4), height - 30, actionWidth, () -> {
 			JsonObject entry = library.find(library.policies, selectedPolicy);
