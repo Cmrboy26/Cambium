@@ -396,18 +396,20 @@ still required after key setup.
 
 ## Dashboard And SSH Tunnel
 
-Start `bash ./rosie/dashboard-connect.sh`
+Start `bash ./rosie/dashboard-connect.sh --remote`
 from PowerShell in the local `gpu-sim-minecraft` directory (Git Bash must be
-installed and available as `bash`), or `bash rosie/dashboard-connect.sh` from
+installed and available as `bash`), or `bash rosie/dashboard-connect.sh --remote` from
 Git Bash.
-Connect to GlobalVPN first. By default, the script starts the read-only,
+Connect to GlobalVPN first. Remote mode starts the read-only,
 standard-library Python dashboard directly on the management node without
 querying Slurm or requiring/submitting an allocation. It reads saved run files,
 so training can start or stop independently. Set `ROSIE_PROJECT_DIR` to the
 remote checkout when connecting from another computer without a job ID;
 there is no assumed checkout location. When invoked on a management node,
 the default is the script's own checkout. Missing or unspecified checkouts
-fail with an explicit configuration diagnostic.
+fail with an explicit configuration diagnostic. `--local` always hosts the local
+checkout. Without a mode, the existing automatic selection remains available:
+on non-Rosie hosts without remote settings or a job ID it hosts local runs.
 
 An explicit job ID (positional or `ROSIE_JOB_ID`) retains compute-node hosting
 with `srun --jobid ... --overlap`, using that job's working directory and SSH
@@ -455,7 +457,9 @@ and waits up to two minutes for login. Closing that console before connection
 fails the operation; a timeout leaves it open so login can finish before retrying.
 The terminal stays open across completed operations and is separate from the
 inference process. Stop/disconnect does not close an already established terminal
-session. Close it explicitly with Ctrl+C when finished.
+session. Close it explicitly with Ctrl+C when finished. After authenticating,
+the connection checks that the configured remote runs directory is readable
+before it saves a session descriptor. A first training run creates that directory.
 On other platforms, open
 `scripts/rosie-play.ps1 -Connect -MinecraftDirectory <game>` in a **local terminal**
 first. This manual command remains available on Windows too.
@@ -485,9 +489,11 @@ key/agent use still opens noninteractive SSH
 The SSH command/agent must then be available to Minecraft's process. Offline
 mode ignores the descriptor. Do not disable host-key checking.
 
-The default remote root is
-`~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs`; override with
-`-RemoteRunsDirectory` at setup. SSH runs a bundled, standard-library Python 3
+Setup prompts for the remote `gpu-sim-minecraft` checkout and derives its runs
+directory. Supply `-RemoteCambiumDirectory` or `-RemoteRunsDirectory` to avoid
+that prompt; direct Python setup requires `--runs-directory`. Setup does not
+connect, so a wrong path is reported on connection or an artifact request. SSH
+runs a bundled, standard-library Python 3
 artifact reader on the management host. Only saved files are read, not training
 or inference. No public port or active SLURM allocation is needed. The password-
 session reader runs only while `-Connect` is open; key-based requests run the

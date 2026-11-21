@@ -41,7 +41,7 @@ def bridge_reward_semantics(configuration, weights=None):
             else BRIDGE_REWARD_SEMANTICS)
 
 
-def bridge_observation_inputs(environment, scalar, descriptor=None):
+def bridge_observation_inputs(environment, scalar, descriptor=None, states=None):
     """Sample versioned Bridge inputs from the current host state."""
     if environment.bridge is None:
         raise ValueError("Structured Bridge observations require a Bridge environment")
@@ -49,7 +49,7 @@ def bridge_observation_inputs(environment, scalar, descriptor=None):
     if scalar.shape != (environment.count, 2, environment.observation_dim) or scalar.dtype != np.float32:
         raise ValueError("Bridge scalar observations have an invalid shape or dtype")
     match = environment.bridge["match"]
-    states = environment.bridge_state()
+    states = environment.bridge_state() if states is None else states
     kits = [environment.bridge_kits(player) for player in (0, 1)]
     voxels = environment.bridge_local_voxels()
     version = 1 if descriptor is None else validate_bridge_observation_descriptor(descriptor)["version"]
@@ -308,7 +308,7 @@ class SampledWorlds:
             result[ids] = environment.observe()
         return result
 
-    def bridge_observations(self, scalar, descriptor=None):
+    def bridge_observations(self, scalar, descriptor=None, states=None):
         if self.bridge_scenario is None:
             raise ValueError("Structured Bridge observations require Bridge worlds")
         if (not isinstance(scalar, np.ndarray) or scalar.dtype != np.float32
@@ -319,7 +319,8 @@ class SampledWorlds:
                   "match": np.empty((self.count, 2, 10 if version == 1 else 17), dtype=np.float32),
                   "voxels": np.empty((self.count, 2, 5, 9, 9), dtype=np.uint8)}
         for ids, environment in self.groups:
-            inputs = bridge_observation_inputs(environment, scalar[ids], descriptor)
+            group_states = None if states is None else [states[int(world)] for world in ids]
+            inputs = bridge_observation_inputs(environment, scalar[ids], descriptor, group_states)
             for name in result:
                 result[name][ids] = inputs[name]
         return result
@@ -393,10 +394,11 @@ class SampledWorlds:
             result[ids] = environment.step_behavior_events()
         return result
 
-    def bridge_goal_counts(self, learner_slots):
+    def bridge_goal_counts(self, learner_slots, states=None):
         goals_for = goals_against = 0
         for ids, environment in self.groups:
-            for local, state in enumerate(environment.bridge_state()):
+            group_states = environment.bridge_state() if states is None else [states[int(world)] for world in ids]
+            for local, state in enumerate(group_states):
                 player = int(learner_slots[ids[local]])
                 goals_for += int(state["scored"][player])
                 goals_against += int(state["scored"][1 - player])
@@ -428,7 +430,7 @@ class SampledWorlds:
                 result[ids] = environment.losses(mask[ids])
         return result
 
-    def outcomes(self, done, terminated, learner_slots):
+    def outcomes(self, done, terminated, learner_slots, states=None):
         if self.bridge_scenario is None:
             losses = self.losses(done)
             return ["timeout" if not terminated[world] else
@@ -439,11 +441,11 @@ class SampledWorlds:
         for ids, environment in self.groups:
             if not done[ids].any():
                 continue
-            states = environment.bridge_state()
+            group_states = environment.bridge_state() if states is None else [states[int(world)] for world in ids]
             for local, world in enumerate(ids):
                 if not done[world]:
                     continue
-                outcome = states[local]["outcome"]
+                outcome = group_states[local]["outcome"]
                 if not terminated[world]:
                     results[int(world)] = "timeout"
                 elif outcome == "draw":
@@ -867,8 +869,9 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
                 for name, amount in contributions.items():
                     reward_types[name] += amount
         with timer.phase("next_value", cuda=True):
+            bridge_states = worlds.bridge_states() if bridge_events is not None else None
             if structured_bridge:
-                final_inputs = worlds.bridge_observations(final, model.descriptor)
+                final_inputs = worlds.bridge_observations(final, model.descriptor, bridge_states)
                 next_observation = {name: torch.as_tensor(value[ids, slots], device=device)
                                     for name, value in final_inputs.items()}
             else:
@@ -886,7 +889,7 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
                 rollout[name][step] = torch.as_tensor(value, device=device)
         with timer.phase("episode_bookkeeping"):
             if bridge_events is not None:
-                goals_for, goals_against = worlds.bridge_goal_counts(slots)
+                goals_for, goals_against = worlds.bridge_goal_counts(slots, bridge_states)
                 bridge_events["bridge_goals_for"] += goals_for
                 bridge_events["bridge_goals_against"] += goals_against
                 if bridge_rewards is not None:
@@ -896,7 +899,7 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
             endings += int(terminated.sum())
             timeouts += int(truncated.sum())
             selected = np.flatnonzero(done)
-            outcomes = worlds.outcomes(done, terminated, slots) if len(selected) else []
+            outcomes = worlds.outcomes(done, terminated, slots, bridge_states) if len(selected) else []
             if bridge_events is not None:
                 for outcome in ("win", "loss", "draw"):
                     key = {"win": "bridge_wins", "loss": "bridge_losses", "draw": "bridge_draws"}[outcome]

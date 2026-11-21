@@ -60,6 +60,9 @@ training world. Sampling, `task_override.max_ticks` and resident collection are
 rejected. Fabric has experimental absolute Bridge replay; input replay and live
 Bridge matches remain unsupported. Bridge checkpoints preserve reset counters
 and resume with fresh episodes; checkpoints missing those counters cannot be resumed.
+Structured opponent sampling retains independent checkpointed per-actor RNG streams,
+but its batched categorical sampler produces different action sequences from the
+older per-head multinomial sampler, including after resuming an older checkpoint.
 
 The optional `opponent_score`, `toward` and `away` task reward fields and the
 version-2 structured observation are specified in

@@ -625,9 +625,12 @@ class BridgeResearchChecks(unittest.TestCase):
 
                 handle = model.register_forward_hook(capture)
                 try:
-                    rollout, reset_scalar, endings, timeouts = collect(
-                        model, worlds, pool, scalar, 1, torch.device("cpu"), {"movement": 0},
-                        structured_bridge=True)
+                    with patch.object(worlds.groups[0][1], "bridge_state",
+                                      wraps=worlds.groups[0][1].bridge_state) as state_reads:
+                        rollout, reset_scalar, endings, timeouts = collect(
+                            model, worlds, pool, scalar, 1, torch.device("cpu"), {"movement": 0},
+                            structured_bridge=True)
+                    self.assertEqual(state_reads.call_count, 3)
                 finally:
                     handle.remove()
                 self.assertEqual((endings, timeouts), (2, 0) if terminal else (0, 2))

@@ -48,6 +48,18 @@ shared definitions directly at the category root, outside personal folders.
 The `example/` folders are starter templates, not a place for personal experiments.
 Copy their files into your folders, rename JSON `name` values and update references.
 
+## Checkpoint Prerequisites
+
+Some research plans use opponent checkpoints from previous runs, rather than
+bundled files. For example, the Bridge gated and generated progressive plans
+reference `BDuel2` and `BDuel3` under `simulator/training/runs`. Runs are not
+included in a fresh checkout. Obtain the intended trusted checkpoints from the
+experiment owner and place them at the referenced paths, or copy the plan and
+point it at compatible checkpoints of your own. The validator reads every named
+checkpoint, even when it is only used in a later stage. The wizard stops before
+submission if one is missing. Do not substitute checkpoints without checking
+their policy and experiment compatibility.
+
 ## Choose The Right File
 
 | Folder / example | Owns | Format / version |

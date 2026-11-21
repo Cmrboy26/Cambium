@@ -5,8 +5,8 @@ No Minecraft, RCON or legacy backend server is needed for training.
 
 ## Setup
 
-Requires Python 3.10+ and the [native simulator](../README.md). From the repository
-root on Windows, the quickest setup is:
+Requires Python 3.10+ and the [native simulator](../README.md). From
+`gpu-sim-minecraft` on Windows, the quickest setup is:
 
 ```powershell
 .\scripts\setup.ps1
@@ -18,7 +18,7 @@ CUDA needs a CUDA-built simulator and CUDA-enabled PyTorch; see
 
 ### Linux CPU Smoke Test
 
-After the [Linux native build](../README.md#linux-build), from the repository root:
+After the [Linux native build](../README.md#linux-build), from `gpu-sim-minecraft`:
 
 ```sh
 python3 -m venv .venv

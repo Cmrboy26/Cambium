@@ -53,12 +53,14 @@ if ($Setup) {
     if (-not $SshUser) { throw 'Specify -SshUser for your Rosie account.' }
     if ($SshUser -notmatch '@') { $SshUser += '@ad.msoe.edu' }
     if (-not $RemoteRunsDirectory) {
-        if (-not $RemoteCambiumDirectory) { $RemoteCambiumDirectory = '~/minecraftlol/Cambium' }
-        if (-not $DryRun) {
-            $answer = (Read-Host "Remote Cambium directory on Rosie [$RemoteCambiumDirectory]").Trim()
-            if ($answer) { $RemoteCambiumDirectory = $answer }
+        if ($RemoteCambiumDirectory) {
+            $remoteProject = "$($RemoteCambiumDirectory.TrimEnd('/'))/gpu-sim-minecraft"
+        } else {
+            if ($DryRun) { throw 'Specify -RemoteCambiumDirectory or -RemoteRunsDirectory for setup with -DryRun.' }
+            $remoteProject = (Read-Host 'Remote gpu-sim-minecraft directory on Rosie (run pwd there)').Trim()
         }
-        $RemoteRunsDirectory = "$($RemoteCambiumDirectory.TrimEnd('/'))/gpu-sim-minecraft/simulator/training/runs"
+        if (-not $remoteProject) { throw 'Specify your remote gpu-sim-minecraft directory.' }
+        $RemoteRunsDirectory = "$($remoteProject.TrimEnd('/'))/simulator/training/runs"
     }
     $command += @('setup', '--minecraft-directory', $game, '--host', $SshHost,
         '--user', $SshUser, '--runs-directory', $RemoteRunsDirectory)

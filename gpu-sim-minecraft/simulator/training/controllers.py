@@ -661,11 +661,19 @@ class _PolicyController(_BatchedController):
             inputs = ({name: torch.as_tensor(value.copy(), device=self.device)
                        for name, value in observations.items()} if isinstance(observations, dict)
                       else torch.as_tensor(np.array(observations, dtype=np.float32, copy=True), device=self.device))
-            if not all(torch.isfinite(value).all() for value in (inputs.values() if isinstance(inputs, dict) else (inputs,))):
+            if not torch.stack([torch.isfinite(value).all()
+                                for value in (inputs.values() if isinstance(inputs, dict) else (inputs,))]).all():
                 raise ValueError("Observations are not finite at model precision")
             logits, _ = self.model(inputs)
-            if not all(torch.isfinite(value).all() for value in logits.values()):
+            if not torch.stack([torch.isfinite(value).all() for value in logits.values()]).all():
                 raise ValueError("Policy inference produced non-finite logits")
+            stochastic_names = [name for name in self.contract["action_names"] if name not in self._fixed]
+            uniforms = None
+            if isinstance(inputs, dict) and not self.deterministic and stochastic_names:
+                uniforms = torch.stack([torch.rand(len(stochastic_names), device=self.device,
+                                                   generator=self._actor_generators[int(actor)])
+                                        for actor in indices])
+            stochastic_index = 0
             actions = []
             for name in self.contract["action_names"]:
                 if name in self._fixed:
@@ -674,9 +682,9 @@ class _PolicyController(_BatchedController):
                     action = logits[name].argmax(-1)
                 elif isinstance(inputs, dict):
                     probabilities = logits[name].softmax(-1)
-                    action = torch.stack([torch.multinomial(probabilities[row], 1,
-                                          generator=self._actor_generators[int(actor)])[0]
-                                          for row, actor in enumerate(indices)])
+                    action = (uniforms[:, stochastic_index:stochastic_index + 1] >=
+                              probabilities.cumsum(dim=-1)).sum(dim=-1).clamp_max(probabilities.shape[-1] - 1)
+                    stochastic_index += 1
                 else:
                     action = torch.multinomial(logits[name].softmax(-1), 1, generator=self._generator).squeeze(-1)
                 actions.append(action)

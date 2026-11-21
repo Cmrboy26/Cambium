@@ -297,6 +297,9 @@ or repository-wide programming changes.
 
 **Prerequisites:** P1-02 through P1-05 contracts and relevant shared mechanics.
 Start with the existing resident duel implementation, not a separate trainer.
+Host-staged Bridge collection reuses each post-step match-state snapshot, but
+still constructs structured observations and serializes state on the host. This
+optimization does not satisfy the resident collection or H100 performance gates.
 
 - [ ] P1-06-00: Complete this milestone only after P1-06-01 through P1-06-08.
 - [ ] P1-06-01: Extend [CUDA batch](../simulator/src/cuda_backend.cu),

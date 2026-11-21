@@ -8,7 +8,7 @@ Use a disposable test world.
 ## Installation
 
 Install JDK 25, Fabric Loader 0.19.5+ and matching Fabric API for Minecraft 26.3.
-Close Minecraft, then run from the repository root:
+Close Minecraft, then run from `gpu-sim-minecraft`:
 
 ```powershell
 $env:MCSIM_MINECRAFT_DIRECTORY = Read-Host 'Minecraft game folder (containing mods)'

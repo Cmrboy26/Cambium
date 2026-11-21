@@ -23,7 +23,6 @@ from textwrap import dedent
 
 
 CONFIG_NAME = "cambium-rosie.json"
-DEFAULT_RUNS = "~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs"
 MAX_FILE = 512 * 1024 * 1024
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
 
@@ -322,6 +321,12 @@ def connect_terminal(game):
         session = {"port": local_port, "token": token, "connection_id": connection_id(configuration)}
         with session_response(session):
             pass
+        try:
+            with session_response(session, {"action": "runs"}):
+                pass
+        except RuntimeError as error:
+            raise RuntimeError("Cannot access the configured Rosie runs directory. Check the remote path, "
+                               "run training once to create it, and rerun setup if needed. " + str(error)) from error
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=descriptor.parent, delete=False) as target:
             temporary = Path(target.name)
             try:
@@ -393,6 +398,8 @@ def configure(game, host, user, runs_directory):
         raise ValueError("SSH host must be a hostname or an SSH config alias")
     if not user or user.startswith("-") or any(character.isspace() for character in user):
         raise ValueError("A valid Rosie SSH username is required")
+    if not isinstance(runs_directory, str) or not runs_directory.strip():
+        raise ValueError("A remote runs directory is required; specify --runs-directory")
     path = config_path(game)
     configuration = {"python": str(Path(sys.executable).absolute()),
                      "repository": str(Path(__file__).resolve().parents[2]),
@@ -731,7 +738,7 @@ def main(argv=None):
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=3)
     parser.add_argument("--host")
     parser.add_argument("--user")
-    parser.add_argument("--runs-directory", default=DEFAULT_RUNS)
+    parser.add_argument("--runs-directory")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--connect", dest="auto_connect", action="store_true")
     parser.add_argument("--json", action="store_true")

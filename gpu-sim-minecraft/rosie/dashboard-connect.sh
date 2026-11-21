@@ -2,13 +2,24 @@
 set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    printf 'Usage: %s [TRAINING_JOB_ID]\n' "$0"
+    printf 'Usage: %s [--local|--remote] [TRAINING_JOB_ID]\n' "$0"
     printf 'On Rosie, open the dashboard through an SSH tunnel; elsewhere, host the local checkout directly.\n'
-    printf 'An explicit job ID uses that Rosie allocation. Set ROSIE_SSH_JUMP and ROSIE_PROJECT_DIR to connect remotely.\n'
+    printf 'Use --remote for Rosie or --local for this checkout. An explicit job ID uses that Rosie allocation.\n'
+    printf 'Set ROSIE_SSH_JUMP and ROSIE_PROJECT_DIR to connect remotely without a job ID.\n'
     exit 0
 fi
+MODE=auto
+case "${1:-}" in
+    --local) MODE=local; shift ;;
+    --remote) MODE=remote; shift ;;
+    -*) printf 'ERROR: Unknown option: %s\n' "$1" >&2; exit 2 ;;
+esac
 if [[ "$#" -gt 1 ]]; then
-    printf 'Usage: %s [TRAINING_JOB_ID]\n' "$0" >&2
+    printf 'Usage: %s [--local|--remote] [TRAINING_JOB_ID]\n' "$0" >&2
+    exit 2
+fi
+if [[ "$MODE" == local && "$#" -gt 0 ]]; then
+    printf 'ERROR: --local cannot be combined with a training job ID.\n' >&2
     exit 2
 fi
 
@@ -26,7 +37,7 @@ JOB_ID="${1:-${ROSIE_JOB_ID:-}}"
 PROJECT_DIR="${ROSIE_PROJECT_DIR:-}"
 SSH_JUMP="${ROSIE_SSH_JUMP:-}"
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ ! "$CURRENT_HOST" =~ \.hpc\.msoe\.edu$ \
+if [[ "$MODE" == local ]] || [[ "$MODE" == auto && ! "$CURRENT_HOST" =~ \.hpc\.msoe\.edu$ \
     && ! "$CURRENT_HOST" =~ ^dh-mgmt[1-4]$ && -z "$SSH_JUMP" \
         && -z "$JOB_ID" && -z "$PROJECT_DIR" ]]; then
     if [[ -n "${ROSIE_RUNS_DIR:-}" ]]; then
@@ -39,6 +50,12 @@ if [[ ! "$CURRENT_HOST" =~ \.hpc\.msoe\.edu$ \
     printf 'Starting the dashboard from this local checkout.\n'
     printf 'Runs directory: %s\nPress Ctrl+C to stop the dashboard.\n' "$RUNS_DIR"
     exec "$LOCAL_PYTHON" -B -m simulator.training.dashboard --runs-dir "$RUNS_DIR" --port "$PORT"
+fi
+
+if [[ "$MODE" == remote && -z "$JOB_ID" && -z "$PROJECT_DIR" \
+    && ! "$CURRENT_HOST" =~ ^dh-mgmt[1-4](\.hpc\.msoe\.edu)?$ ]]; then
+    printf 'ERROR: Set ROSIE_PROJECT_DIR to the remote gpu-sim-minecraft checkout, or specify a training job ID.\n' >&2
+    exit 1
 fi
 
 if ! command -v ssh >/dev/null 2>&1; then

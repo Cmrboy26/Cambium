@@ -416,7 +416,10 @@ class ScriptedChecks(unittest.TestCase):
         inputs["voxels"][2, 4, 5, 6] = 4
         first = create_controller({"type": "self_play"}, contract, 3, seed=7, learner=model)
         second = create_controller({"type": "self_play"}, contract, 3, seed=7, learner=model)
-        batched = first.act(inputs)
+        with mock.patch("torch.rand", wraps=torch.rand) as random_draws, \
+                mock.patch("torch.multinomial", side_effect=AssertionError("unbatched sampling")):
+            batched = first.act(inputs)
+        self.assertEqual(random_draws.call_count, 3)
         reordered = np.empty_like(batched)
         for actor in (2, 0, 1):
             batch = {name: value[actor:actor + 1] for name, value in inputs.items()}
@@ -429,6 +432,13 @@ class ScriptedChecks(unittest.TestCase):
         np.testing.assert_array_equal(first.act(inputs), restored.act(inputs))
         with self.assertRaisesRegex(ValueError, "structured Bridge observations"):
             first.act({**inputs, "voxels": inputs["voxels"].astype(np.float32)})
+        for invalid_name in (contract["action_names"][0], contract["action_names"][-1]):
+            logits = {name: torch.zeros((3, size)) for name, size in
+                      zip(contract["action_names"], contract["action_sizes"], strict=True)}
+            logits[invalid_name][1, 0] = float("nan")
+            with mock.patch.object(model, "forward", return_value=(logits, torch.zeros(3))), \
+                    self.assertRaisesRegex(ValueError, "non-finite logits"):
+                first.act(inputs)
 
         definition = {"type": "frozen_self_play", "every_updates": 1}
         frozen = create_controller(definition, contract, 3, seed=9, learner=model)
@@ -461,6 +471,27 @@ class ScriptedChecks(unittest.TestCase):
         bad_model.descriptor["version"] = 2
         with self.assertRaisesRegex(ValueError, "descriptor"):
             frozen.capture(bad_model, 2, {"fixed": {}}, force=True)
+
+    def test_structured_self_play_sampling_distribution_and_fixed_actions(self):
+        contract = policy(actions=[{"name": "movement", "values": ["neutral", "forward", "right"]}])
+        model = BridgeActorCritic(contract["observation_dim"], bridge_observation_descriptor(), 8,
+                                  dict(zip(contract["action_names"], contract["action_sizes"])))
+        count = 1024
+        controller = create_controller({"type": "self_play"}, contract, count, seed=7, learner=model)
+        inputs = {"scalar": np.zeros((count, contract["observation_dim"]), dtype=np.float32),
+                  "match": np.zeros((count, 10), dtype=np.float32),
+                  "voxels": np.zeros((count, 5, 9, 9), dtype=np.uint8)}
+        logits = torch.tensor([0.1, 0.2, 0.7]).log().expand(count, -1)
+        with mock.patch.object(model, "forward", return_value=({"movement": logits}, torch.zeros(count))):
+            actions = controller.act(inputs)
+            frequencies = np.bincount(actions[:, 0], minlength=3) / count
+            np.testing.assert_allclose(frequencies, [0.1, 0.2, 0.7], atol=0.05)
+            controller.set_controls({"fixed": {"movement": "forward"}})
+            before = [generator.get_state().clone() for generator in controller._actor_generators]
+            with mock.patch("torch.rand", side_effect=AssertionError("fixed action drew randomness")):
+                np.testing.assert_array_equal(controller.act(inputs), np.ones((count, 1), dtype=np.int64))
+            for generator, state in zip(controller._actor_generators, before, strict=True):
+                torch.testing.assert_close(generator.get_state(), state)
 
     def test_frozen_self_play_replacement_episode_pinning_and_resume(self):
         contract = policy()
@@ -905,6 +936,34 @@ class CheckpointChecks(unittest.TestCase):
         torch.save(self.saved, self.path)
         with self.assertRaisesRegex(ValueError, "not a Bridge policy"):
             CheckpointController(self.path, self.contract, 2, bridge_observation=descriptor)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_structured_cuda_actor_streams_are_independent_and_checkpointed(self):
+        descriptor = bridge_observation_descriptor()
+        model = BridgeActorCritic(self.contract["observation_dim"], descriptor, 8,
+                                  dict(zip(self.contract["action_names"], self.contract["action_sizes"])))
+        self.saved["metadata"].update(bridge_observation=descriptor,
+                                      scenario={"experimental_bridge": {"mode": {"name": "bridge", "version": 1}}})
+        self.saved["model"] = model.state_dict()
+        torch.save(self.saved, self.path)
+        first = CheckpointController(self.path, self.contract, 3, device="cuda", seed=7,
+                                     bridge_observation=descriptor)
+        second = CheckpointController(self.path, self.contract, 3, device="cuda", seed=7,
+                                      bridge_observation=descriptor)
+        inputs = {"scalar": observations(self.contract, 3).astype(np.float32),
+                  "match": np.zeros((3, 10), dtype=np.float32),
+                  "voxels": np.zeros((3, 5, 9, 9), dtype=np.uint8)}
+        cpu_rng, cuda_rng = torch.get_rng_state(), torch.cuda.get_rng_state()
+        batched = first.act(inputs)
+        reordered = np.empty_like(batched)
+        for actor in (2, 0, 1):
+            batch = {name: value[actor:actor + 1] for name, value in inputs.items()}
+            reordered[actor] = second.act(batch, [actor])[0]
+        np.testing.assert_array_equal(batched, reordered)
+        self.assertTrue(torch.equal(cpu_rng, torch.get_rng_state()))
+        self.assertTrue(torch.equal(cuda_rng, torch.cuda.get_rng_state()))
+        second.load_state_dict(first.state_dict())
+        np.testing.assert_array_equal(first.act(inputs), second.act(inputs))
 
     def test_rng_independence_and_checkpointable_sampling_roundtrip(self):
         learner_rng = torch.get_rng_state().clone()

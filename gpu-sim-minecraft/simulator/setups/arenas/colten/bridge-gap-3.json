@@ -1,0 +1,15 @@
+{
+  "format": "minecraft_sim_arena",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "bridge-gap-3",
+  "requires": ["movement", "melee"],
+  "rules": {"simulate_food": false, "natural_regeneration": false},
+  "bounds": {"min": [-5, -4, -12], "size": [11, 10, 24]},
+  "blocks": [
+    {"from": [-3, 0, -11], "to": [3, 0, -8], "block": "minecraft:stone"},
+    {"from": [0, 0, -7], "to": [0, 0, -2], "block": "minecraft:stone"},
+    {"from": [0, 0, 2], "to": [0, 0, 7], "block": "minecraft:stone"},
+    {"from": [-3, 0, 8], "to": [3, 0, 11], "block": "minecraft:stone"}
+  ]
+}

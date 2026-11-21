@@ -168,7 +168,7 @@ requirements. [Authentication, caching and protocol](../rosie/AGENTS.md#local-ar
 
 | Parameter | Purpose / default |
 | --- | --- |
-| `-Setup` | Save game configuration; prompt for missing host/account |
+| `-Setup` | Save game configuration; prompt for missing host/account/remote checkout |
 | `-Connect` | Authenticate in the local terminal; keep one SSH connection open for Minecraft; incompatible with `-Setup`/`-Offline` |
 | `-Action` | `runs` (default), `replays`, `replay`, `sync`, `duel` |
 | `-Run` | Run basename or `latest` (newest saved, not best) |
@@ -178,10 +178,11 @@ requirements. [Authentication, caching and protocol](../rosie/AGENTS.md#local-ar
 | `-MinecraftDirectory` | Instance game folder; normal selection rules |
 | `-SshHost` | Setup only; management host, SSH alias or 1..4; `ROSIE_SSH_JUMP` |
 | `-SshUser` | Setup only; Rosie account, `ROSIE_SSH_USER` or prompted local username |
-| `-RemoteRunsDirectory` | Setup only; default `~/minecraftlol/Cambium/gpu-sim-minecraft/simulator/training/runs` |
+| `-RemoteCambiumDirectory` | Setup only; remote Cambium checkout, from `ROSIE_REMOTE_CAMBIUM_DIR` or explicit argument |
+| `-RemoteRunsDirectory` | Setup only; explicit remote runs directory, otherwise derived from remote checkout |
 | `-Python` | Local interpreter; setup records it for Minecraft |
 | `-Offline` | Use cache without SSH |
-| `-DryRun` | Preview only; no config, transfer or process; setup needs a host |
+| `-DryRun` | Preview only; no config, transfer or process; setup needs a host and remote path |
 
 Terminal `replay` prints the downloaded path; it does not issue Minecraft commands.
 Password users first run `-Connect`, enter SSH credentials only in that terminal,

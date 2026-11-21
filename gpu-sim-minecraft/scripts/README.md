@@ -1,6 +1,7 @@
 # Workflow Scripts
 
-Windows PowerShell 5.1+ helpers. Run these commands from the repository root.
+Windows PowerShell 5.1+ helpers. Run these commands from `gpu-sim-minecraft`
+inside the Cambium checkout, not from the Cambium Git root.
 Every launcher supports `-DryRun` to preview its commands.
 
 ## First-Time Setup
@@ -60,9 +61,11 @@ instance name is assumed. Remove differently named older Cambium JARs yourself.
 
 ## Rosie Setup On A New Machine
 
-From the repository root, follow [First-Time Setup](#first-time-setup) once per
+From `gpu-sim-minecraft`, follow [First-Time Setup](#first-time-setup) once per
 machine or checkout. It creates `.venv` and installs the Python requirements.
-Then configure Rosie for the actual Minecraft game folder:
+On Rosie, run `pwd` in your `gpu-sim-minecraft` checkout and note the path.
+Run a training job to create its `simulator/training/runs` directory. Then, on
+your local computer, configure Rosie for the actual Minecraft game folder:
 
 ```powershell
 $python = (Resolve-Path '.\.venv\Scripts\python.exe').Path
@@ -74,7 +77,9 @@ $game = Read-Host 'Full Minecraft game folder path (the folder containing mods)'
 
 For Prism, `$game` should be the instance's `minecraft` subfolder, for example
 `%APPDATA%\PrismLauncher\instances\<instance>\minecraft`, not its parent
-folder. Setup prompts for the Rosie host and account when they are not supplied.
+folder. Setup prompts for the Rosie host, account and remote checkout when they
+are not supplied. It saves settings locally without connecting; `-Connect`
+checks access to the remote runs directory after authentication.
 Connect needs the required VPN/network access and SSH login; enter credentials
 in the terminal and leave it running while you play. Ctrl+C disconnects. If it
 exits instead of staying open, check the SSH error, VPN, host and account. Rosie

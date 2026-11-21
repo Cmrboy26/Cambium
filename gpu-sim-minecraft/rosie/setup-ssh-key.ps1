@@ -2,9 +2,9 @@
 .SYNOPSIS
 Install this computer's public SSH key on Rosie and verify key-only login.
 .EXAMPLE
-.\rosie\setup-ssh-key.ps1 -SshHost 2 -SshUser reissmannc
+.\rosie\setup-ssh-key.ps1
 .EXAMPLE
-.\rosie\setup-ssh-key.ps1 -SshHost 2 -SshUser reissmannc -DryRun
+.\rosie\setup-ssh-key.ps1 -SshHost 2 -SshUser your-account -DryRun
 #>
 [CmdletBinding()]
 param(

@@ -6,11 +6,12 @@ with the Cambium Fabric mod. This is a focused simulation, not a server replacem
 
 ## Get Started
 
-On Windows, follow the [first-time setup guide](scripts/README.md#first-time-setup)
-from the repository root. It installs Python requirements, builds the CPU
-simulator and runs checks:
+From the Cambium Git checkout, enter `gpu-sim-minecraft`. On Windows, follow
+the [first-time setup guide](scripts/README.md#first-time-setup). It installs
+Python requirements, builds the CPU simulator and runs checks:
 
 ```powershell
+cd gpu-sim-minecraft
 .\scripts\setup.ps1
 .\scripts\train.ps1 -Updates 1 -Environments 2 -RolloutSteps 16
 ```

@@ -7,7 +7,7 @@ regression checks. Synthetic scenarios need no Minecraft installation.
 ## Windows Build
 
 Requires Git, CMake 3.24+ and a C++20 compiler. From a Visual Studio 2022
-compiler-enabled terminal at the repository root:
+compiler-enabled terminal in `gpu-sim-minecraft`:
 
 ```powershell
 cmake -S simulator -B simulator/build -G "Visual Studio 17 2022" -A x64
@@ -21,7 +21,7 @@ offline builds, see the [build reference](AGENTS.md#windows-build).
 
 ## Linux Build
 
-From the repository root with CMake, a C++20 compiler and Make or Ninja:
+From `gpu-sim-minecraft` with CMake, a C++20 compiler and Make or Ninja:
 
 ```sh
 cmake -S simulator -B simulator/build -DCMAKE_BUILD_TYPE=Release

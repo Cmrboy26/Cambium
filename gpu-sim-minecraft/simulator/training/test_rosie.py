@@ -1208,6 +1208,42 @@ class DashboardConnectLocalTests(unittest.TestCase):
             self.assertIn(str(root / "simulator/training/runs"), arguments)
             self.assertEqual(arguments[-2:], ["--port", "0"])
             self.assertNotIn("ssh", arguments)
+            environment["ROSIE_PROJECT_DIR"] = "/remote/project"
+            explicit = subprocess.run(["bash", str(root / "rosie/dashboard-connect.sh"), "--local"],
+                                      cwd=temporary, env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(explicit.returncode, 0, explicit.stderr)
+            self.assertIn("Starting the dashboard from this local checkout", explicit.stdout)
+
+    def test_remote_mode_requires_checkout_or_job_on_local_host(self):
+        script = Path(__file__).resolve().parents[2] / "rosie/dashboard-connect.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            hostname = Path(temporary) / "hostname"
+            hostname.write_text("#!/usr/bin/env bash\nprintf 'local-wsl\\n'\n")
+            hostname.chmod(0o700)
+            environment = {**os.environ, "PATH": temporary + os.pathsep + os.environ["PATH"],
+                           "ROSIE_SSH_JUMP": "", "ROSIE_PROJECT_DIR": "", "ROSIE_JOB_ID": ""}
+            result = subprocess.run(["bash", str(script), "--remote"], env=environment,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ROSIE_PROJECT_DIR", result.stderr)
+            self.assertNotIn("Starting the dashboard from this local checkout", result.stdout)
+
+    def test_remote_mode_uses_ssh_with_explicit_checkout(self):
+        script = Path(__file__).resolve().parents[2] / "rosie/dashboard-connect.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, body in (("hostname", "printf 'local-wsl\\n'"),
+                               ("ssh", "printf 'SSH_SELECTED\\n' >&2; exit 1")):
+                tool = Path(temporary) / name
+                tool.write_text("#!/usr/bin/env bash\n" + body + "\n")
+                tool.chmod(0o700)
+            environment = {**os.environ, "PATH": temporary + os.pathsep + os.environ["PATH"],
+                           "ROSIE_SSH_JUMP": "2", "ROSIE_SSH_USER": "student",
+                           "ROSIE_PROJECT_DIR": "/remote/project", "ROSIE_JOB_ID": ""}
+            result = subprocess.run(["bash", str(script), "--remote"], env=environment,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SSH_SELECTED", result.stderr)
+            self.assertNotIn("Starting the dashboard from this local checkout", result.stdout)
 
 
 @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Requires a POSIX shell")
@@ -1723,6 +1759,15 @@ class RosieTests(unittest.TestCase):
         self.assertEqual(json.loads(base64.b64decode(payload))["token"], observed[0]["token"])
         self.assertFalse(session_path(self.game).exists())
 
+    def test_terminal_connect_reports_inaccessible_runs_before_saving_session(self):
+        with patch("sys.stdin.isatty", return_value=True), patch("simulator.training.rosie.secrets.randbelow", return_value=10000), \
+                patch("simulator.training.rosie.session_response", side_effect=[contextlib.nullcontext(), RuntimeError("missing path")]), \
+                patch("simulator.training.rosie.subprocess.Popen") as spawn, contextlib.redirect_stdout(io.StringIO()):
+            spawn.return_value.stdout.readline.return_value = b'{"ready":true,"port":30000}\n'
+            with self.assertRaisesRegex(RuntimeError, "configured Rosie runs directory"):
+                connect_terminal(self.game)
+        self.assertFalse(session_path(self.game).exists())
+
     def test_launcher_reuses_existing_terminal_connection(self):
         descriptor = {"port": 12345, "token": "test-token",
                       "connection_id": connection_id(self.rosie.configuration)}
@@ -1822,6 +1867,14 @@ class RosieTests(unittest.TestCase):
         with patch("sys.executable", str(interpreter)):
             path = configure(self.game, "rosie-test", "student", str(self.remote))
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["python"], str(interpreter))
+
+    def test_setup_requires_explicit_remote_runs_directory(self):
+        with self.assertRaisesRegex(ValueError, "remote runs directory"):
+            configure(self.game, "rosie-test", "student", None)
+        with contextlib.redirect_stdout(io.StringIO()) as errors:
+            self.assertEqual(main(["setup", "--minecraft-directory", str(self.game),
+                                   "--host", "rosie-test", "--user", "student"]), 1)
+        self.assertIn("--runs-directory", errors.getvalue())
 
     def test_ntfs_timestamp_precision_reuses_cache(self):
         timestamp = 1700000000123456789
