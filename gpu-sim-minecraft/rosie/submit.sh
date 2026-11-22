@@ -6,6 +6,7 @@ cd "$ROOT"
 DRY_RUN=false
 LOCAL=false
 PROFILE_EVERY=0
+ROLLOUT_BACKEND=host
 SHARED_GPU=false
 MAX_PARALLEL=0
 LINE_MODE=false
@@ -20,6 +21,13 @@ while (( $# )); do
         --local) LOCAL=true; shift ;;
         --line-mode) LINE_MODE=true; shift ;;
         --shared-gpu) SHARED_GPU=true; shift ;;
+        --rollout-backend)
+            if [[ "${2:-}" != host && "${2:-}" != cuda-resident && "${2:-}" != auto ]]; then
+                printf 'Expected host, cuda-resident, or auto after --rollout-backend.\n' >&2
+                exit 1
+            fi
+            ROLLOUT_BACKEND="$2"
+            shift 2 ;;
         --initialize|--resume|--start-stage|--save-every)
             if (( $# < 2 )); then printf 'Expected a value after %s.\n' "$1" >&2; exit 1; fi
             case "$1" in
@@ -56,12 +64,17 @@ while (( $# )); do
             shift 2 ;;
         -h|--help)
             printf 'Usage: bash rosie/submit.sh [--local] [--dry-run] [--line-mode] [--profile-every N] [--shared-gpu [--max-parallel N]] [--resume CHECKPOINT] [--initialize CHECKPOINT] [--start-stage NAME] [--save-every N]\n--local builds and trains on this WSL/Linux host; use a local checkout with CUDA installed.\nInteractive settings: Up/Down to navigate, type to edit, Enter on Submit.\nUse comma-separated values in one field for a single-variable sweep.\n--line-mode retains sequential prompts (also used for piped input).\n--initialize loads compatible weights into a new run; --resume restores optimizer and curriculum progress.\n--start-stage skips earlier stages in a new run; it cannot be combined with --resume.\n--save-every sets the rolling checkpoint cadence in optimizer updates (default 10).\nPPO overrides: --gamma, --gae-lambda, --clip-eps, --vf-coef, --ent-coef, --max-grad-norm VALUE.\nA comma-separated override also works in line mode.\n--shared-gpu runs training-setting trials in one allocation, all concurrently by default.\nVerbose timing profiling defaults to off (0); its interval applies to every submitted job.\n'
+            printf '%s\n' '--rollout-backend selects host (default), cuda-resident, or auto; shared-GPU sweeps use host.'
             exit 0 ;;
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
 if ! "$SHARED_GPU" && (( MAX_PARALLEL != 0 )); then
     printf -- '--max-parallel requires --shared-gpu.\n' >&2
+    exit 1
+fi
+if "$SHARED_GPU" && [[ "$ROLLOUT_BACKEND" != host ]]; then
+    printf -- '--rollout-backend is not supported with --shared-gpu.\n' >&2
     exit 1
 fi
 if "$LOCAL" && "$SHARED_GPU"; then
@@ -456,7 +469,7 @@ prepare_command() {
         printf -v "$SWEEP_VARIABLE" '%s' "${SWEEP_VALUES[index]}"
     fi
     RUN_OUTPUT="simulator/training/runs/${RUN_NAMES[index]}"
-    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_SAVE_EVERY=$SAVE_EVERY,SIM_RESUME=$RESUME,SIM_INITIALIZE=$INITIALIZE,SIM_START_STAGE=$START_STAGE,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY,SIM_PROFILE_EVERY=$PROFILE_EVERY,SIM_GAMMA=$GAMMA,SIM_GAE_LAMBDA=$GAE_LAMBDA,SIM_CLIP_EPS=$CLIP_EPS,SIM_VF_COEF=$VF_COEF,SIM_ENT_COEF=$ENT_COEF,SIM_MAX_GRAD_NORM=$MAX_GRAD_NORM"
+    EXPORTS="ALL,MCSIM_CUDA_ARCHITECTURES=$ARCH,SIM_PLAN=$PLAN,SIM_OUTPUT=$RUN_OUTPUT,SIM_ENVS=$ENVS,SIM_UPDATES=$UPDATES,SIM_SAVE_EVERY=$SAVE_EVERY,SIM_RESUME=$RESUME,SIM_INITIALIZE=$INITIALIZE,SIM_START_STAGE=$START_STAGE,SIM_ROLLOUT_STEPS=$ROLLOUT,SIM_ROLLOUT_BACKEND=$ROLLOUT_BACKEND,SIM_HIDDEN_DIM=$HIDDEN,SIM_EPOCHS=$EPOCHS,SIM_MINIBATCH_SIZE=$MINIBATCH,SIM_LR=$LR,SIM_THREADS=$THREADS,SIM_REPLAY_EVERY=$REPLAY,SIM_PROFILE_EVERY=$PROFILE_EVERY,SIM_GAMMA=$GAMMA,SIM_GAE_LAMBDA=$GAE_LAMBDA,SIM_CLIP_EPS=$CLIP_EPS,SIM_VF_COEF=$VF_COEF,SIM_ENT_COEF=$ENT_COEF,SIM_MAX_GRAD_NORM=$MAX_GRAD_NORM"
     COMMAND=(sbatch --parsable "--job-name=${RUN_NAMES[index]}" "--partition=$PARTITION" "--gres=$GRES"
         "--time=$TIME" "--cpus-per-gpu=$CPUS" "--mem=$MEMORY" "--export=$EXPORTS")
     if [[ "$dependency" != none ]]; then
@@ -479,6 +492,7 @@ prepare_local_command() {
         "SIM_UPDATES=$UPDATES"
         "SIM_SAVE_EVERY=$SAVE_EVERY"
         "SIM_ROLLOUT_STEPS=$ROLLOUT"
+        "SIM_ROLLOUT_BACKEND=$ROLLOUT_BACKEND"
         "SIM_HIDDEN_DIM=$HIDDEN"
         "SIM_EPOCHS=$EPOCHS"
         "SIM_MINIBATCH_SIZE=$MINIBATCH"

@@ -995,11 +995,14 @@ MCSIM_HD inline bool building(minecraft_sim::MathView math) {
     world.player(0).setInputs(controls);
     events = processBridgeWorldTick(world, projectiles, initial, rules, state);
     if (events.broke[0] || state.kits[0].building.break_progress != 0.5F) return false;
+    rules.kits[0].slot_count = 3;
+    rules.kits[0].slots[2] = BridgeHotbarItem::pickaxe;
+    controls.selected_slot = 2;
     players[0].on_ground = true;
     world.player(0).setInputs(controls);
     events = processBridgeWorldTick(world, projectiles, initial, rules, state);
     if (!events.broke[0] || blocks.solid(0, 2, -1) || state.kits[0].building.break_delay != 5
-        || !buildingConsumers(blocks, math, false)) return false;
+        || state.kits[0].selected_slot != 2 || !buildingConsumers(blocks, math, false)) return false;
     if (!blocks.setPlacedBlock(0, 2, 0, PlacedBlock::empty)) return false;
     state.kits[0].building.break_delay = 0;
     world.player(0).setInputs(controls);

@@ -632,10 +632,10 @@ class _PolicyController(_BatchedController):
     _generator: "torch.Generator"
 
     def _policy_batch(self, observations, indices):
-        from backend.fast_rl_model import BridgeActorCritic
+        from simulator.training.models import bridge_model_descriptor
         from simulator.training.contract import validate_bridge_observation_descriptor
 
-        if not isinstance(self.model, BridgeActorCritic):
+        if bridge_model_descriptor(self.model) is None:
             return self._batch(observations, indices)
         if validate_bridge_observation_descriptor(self.model.descriptor) != self._description.get("bridge_observation"):
             raise ValueError("Structured Bridge self-play model descriptor differs")
@@ -722,21 +722,15 @@ class _PolicyController(_BatchedController):
 class SelfPlayController(_PolicyController):
     def __init__(self, learner, contract, count, device="cpu", seed=1, deterministic=False):
         import torch
-        from backend.fast_rl_model import BridgeActorCritic
-        from simulator.training.contract import validate_bridge_observation_descriptor
+        from simulator.training.models import bridge_model_descriptor, validate_structured_model
 
         super().__init__(contract, count, seed)
         if learner is None:
             raise ValueError("Self-play requires the learner policy model")
         if type(deterministic) is not bool:
             raise ValueError("deterministic must be boolean")
-        if isinstance(learner, BridgeActorCritic):
-            descriptor = validate_bridge_observation_descriptor(learner.descriptor)
-            if (learner.observation_dim != self.contract["observation_dim"]
-                    or learner.action_names != tuple(self.contract["action_names"])
-                    or [getattr(learner.policy, f"{name}_head").out_features for name in learner.action_names]
-                    != self.contract["action_sizes"]):
-                raise ValueError("Structured Bridge self-play model differs from its policy contract")
+        if bridge_model_descriptor(learner) is not None:
+            descriptor = validate_structured_model(learner, self.contract)
             self._description["bridge_observation"] = descriptor
         self.model = learner
         self.device = next(learner.parameters()).device
@@ -771,13 +765,17 @@ class FrozenSelfPlayController(SelfPlayController):
         self.snapshots = {0: (self.model, {})}
 
     def capture(self, learner, update, controls, force=False):
+        from simulator.training.models import bridge_model_descriptor, model_identity
+
         from simulator.training.policies import fixed_indices
 
         _integer(update, "snapshot update", 0)
         if not force and (update <= self.latest_update or update % self.every_updates):
             return
-        if getattr(learner, "descriptor", None) != self._description.get("bridge_observation"):
+        if bridge_model_descriptor(learner) != self._description.get("bridge_observation"):
             raise ValueError("Frozen self-play model descriptor differs")
+        if model_identity(learner) != model_identity(self.model):
+            raise ValueError("Frozen self-play model architecture differs")
         fixed = fixed_indices(self.contract, controls)
         self.snapshots[update] = (deepcopy(learner).eval().requires_grad_(False), fixed)
         self.latest_update = update
@@ -804,12 +802,16 @@ class FrozenSelfPlayController(SelfPlayController):
         return actions
 
     def copy_snapshot(self, source, update=None):
+        from simulator.training.models import model_identity
+
         if (not isinstance(source, FrozenSelfPlayController)
             or source.contract_hash != self.contract_hash
             or source._description.get("bridge_observation") != self._description.get("bridge_observation")):
             raise ValueError("Frozen self-play snapshot is incompatible")
         update = source.latest_update if update is None else update
         model, fixed = source.snapshots[update]
+        if model_identity(model) != model_identity(self.model):
+            raise ValueError("Frozen self-play model architecture differs")
         self.model = deepcopy(model).to(self.device).eval().requires_grad_(False)
         self.latest_update = update
         self.snapshot_updates[:] = update
@@ -856,8 +858,8 @@ class CheckpointController(_PolicyController):
     def __init__(self, path, contract, count, device="cpu", seed=1, deterministic=False,
                  expected_sha256=None, bridge_observation=None):
         import torch
-        from backend.fast_rl_model import ActorCritic, BridgeActorCritic
         from simulator.training.contract import validate_bridge_observation_descriptor
+        from simulator.training.models import checkpoint_model_descriptor, create_model
         from simulator.training.policies import fixed_indices
 
         super().__init__(contract, count, seed)
@@ -909,9 +911,9 @@ class CheckpointController(_PolicyController):
         # Initialization consumes global CPU RNG even though all weights are replaced.
         with torch.random.fork_rng(devices=[]):
             sizes = dict(zip(self.contract["action_names"], self.contract["action_sizes"]))
-            self.model = (BridgeActorCritic(self.contract["observation_dim"], descriptor, hidden, sizes)
-                          if bridge_observation is not None else
-                          ActorCritic(self.contract["observation_dim"], hidden, action_sizes=sizes))
+            architecture = checkpoint_model_descriptor(metadata, bridge_observation)
+            self.model = create_model(architecture, self.contract["observation_dim"],
+                                      bridge_observation, hidden, sizes)
         try:
             self.model.load_state_dict(saved["model"], strict=True)
         except (KeyError, TypeError, RuntimeError) as error:
@@ -975,13 +977,15 @@ def create_controller(definition, contract, count, device="cpu", seed=1, *, lear
                                         definition.get("deterministic", False),
                                         _integer(definition.get("every_updates"), "every_updates"))
     if kind == "checkpoint":
+        from simulator.training.models import bridge_model_descriptor
+
         _options(definition, ("type", "path", "deterministic", "sha256"))
         path = definition.get("path")
         if not isinstance(path, (str, Path)) or not str(path):
             raise ValueError("Checkpoint controller requires a path")
         return CheckpointController(path, contract, count, device, seed,
                         definition.get("deterministic", False), definition.get("sha256"),
-                        getattr(learner, "descriptor", None))
+                        bridge_model_descriptor(learner))
     raise ValueError(f"Unknown controller type: {kind!r}")
 
 

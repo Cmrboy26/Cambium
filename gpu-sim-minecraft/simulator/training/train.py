@@ -31,6 +31,8 @@ def arguments(argv=None):
     parser.add_argument("--profile-every", type=int, default=0,
                         help="Profile collection every N global updates; 0 disables profiling")
     parser.add_argument("--library", help="Explicit native training DLL/SO")
+    parser.add_argument("--trusted-model-module", action="append", default=[],
+                        help="Explicitly import a trusted Python module that registers model factories")
     parser.add_argument("--output", help="Run directory; default timestamp or resumed checkpoint directory")
     parser.add_argument("--save-every", type=positive, default=10)
     replay = parser.add_mutually_exclusive_group()

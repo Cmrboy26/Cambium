@@ -56,6 +56,12 @@ through CMake configure, build and the library snapshot copy. It canonicalizes
 the build path before opening the lock, and releases/closes the lock before
 training. Keep this persistent lock file; deleting it can split lock ownership.
 
+Select `--rollout-backend host|cuda-resident|auto` with `rosie/submit.sh`, or
+set `SIM_ROLLOUT_BACKEND` for `train.sbatch` and `train-local.sh`. The default is
+`host`. `cuda-resident` rejects unsupported plans; `auto` reports its reason when
+falling back to host. Bridge resident collection is not yet supported, and shared
+GPU sweeps currently use host collection.
+
 Each job copies the completed `minecraft_sim_training.so` into a unique private
 directory under `SLURM_TMPDIR`, falling back to `TMPDIR` and then `/tmp`. The
 copy is read-only and Python's `--library` points to it, not the shared output.

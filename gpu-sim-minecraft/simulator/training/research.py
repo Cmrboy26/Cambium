@@ -15,12 +15,14 @@ import time
 import numpy as np
 import torch
 
-from backend.fast_rl_model import ActorCritic, BridgeActorCritic
 from simulator.training.compiler import LEARNER_DEFAULTS, _structured_opponents, _validate_bridge_opponents
 from simulator.training.contract import fingerprint, validate_bridge_observation_descriptor
 from simulator.training.controllers import (BridgeFixedLaneController, CheckpointController, FrozenSelfPlayController, SelfPlayController,
                                             StationaryTargetController, create_controller)
 from simulator.training.environment import Environment, REWARD_NAMES, REWARD_SEMANTICS, ROOT, actor_lost as _lost
+from simulator.training.models import (bridge_model_descriptor, checkpoint_model_descriptor, create_model,
+                                       legacy_model_descriptor, load_trusted_models, model_factory,
+                                       validate_structured_model)
 from simulator.training.objectives import actor_task_observations
 from simulator.training.plans import EpisodeSampler, plan_hash, reached, resolve_plan, weights
 from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
@@ -76,12 +78,7 @@ def bridge_observation_inputs(environment, scalar, descriptor=None, states=None)
 
 
 def _validate_structured_bridge_model(model, policy):
-    validate_bridge_observation_descriptor(model.descriptor)
-    if (model.observation_dim != policy["observation_dim"]
-            or model.action_names != tuple(policy["action_names"])
-            or [getattr(model.policy, f"{name}_head").out_features for name in model.action_names]
-            != policy["action_sizes"]):
-        raise ValueError("Structured Bridge model and scalar policy are incompatible")
+    validate_structured_model(model, policy)
 
 
 def _validate_structured_bridge_consumer(model, plan, scenario):
@@ -123,7 +120,7 @@ def research_metadata(environment, hidden_dim, learner):
     return result
 
 
-def _validate_checkpoint_model(metadata, descriptor):
+def _validate_checkpoint_model(metadata, descriptor, model_descriptor=None):
     if not isinstance(metadata, dict):
         raise ValueError("Checkpoint is missing model metadata")
     saved = metadata.get("bridge_observation")
@@ -131,6 +128,9 @@ def _validate_checkpoint_model(metadata, descriptor):
         saved = validate_bridge_observation_descriptor(saved)
     if (descriptor is None) != ("bridge_observation" not in metadata) or (descriptor is not None and saved != descriptor):
         raise ValueError("Checkpoint structured Bridge model descriptor differs from the selected plan")
+    expected = legacy_model_descriptor(descriptor) if model_descriptor is None else model_descriptor
+    if checkpoint_model_descriptor(metadata, descriptor) != expected:
+        raise ValueError("Checkpoint model architecture differs from the selected plan")
 
 
 def resident_unsupported(plan, device):
@@ -567,6 +567,39 @@ class OpponentPool:
             self.controllers[name].load_state_dict(saved)
 
 
+class ResidentFixedLane:
+    def __init__(self, controller, device):
+        self.directions = torch.full((controller.count,), -1, dtype=torch.long, device=device)
+        self.feature, descriptor = controller._features["self.yaw_fraction"]
+        self.scale = descriptor["scale"]
+        self.yaw_column, yaw_choices = controller._heads["yaw"]
+        self.yaw_choices = torch.tensor(yaw_choices, dtype=torch.float64, device=device)
+        self.movement_column, movement_choices = controller._heads["movement"]
+        self.forward = movement_choices.index("forward")
+        self.neutral_movement = movement_choices.index("neutral")
+        self.neutral = torch.as_tensor(controller._neutral, device=device)
+        self.enabled = [(controller._heads[name][0], controller._heads[name][1].index(True))
+                        for name in ("jump", "sneak") if getattr(controller, name)]
+
+    def reset(self, mask):
+        self.directions = torch.where(mask, -1, self.directions)
+
+    def act(self, observations, selected):
+        yaw = torch.remainder(observations[:, self.feature].to(torch.float64) / self.scale * 180 + 180, 360) - 180
+        uninitialized = self.directions == -1
+        distance = torch.minimum(yaw.abs(), 180 - yaw.abs())
+        valid = ~uninitialized | (distance < 45)
+        initial = (yaw.abs() > 90).to(torch.long)
+        self.directions = torch.where(selected & uninitialized & valid, initial, self.directions)
+        error = torch.remainder(self.directions * 180 - yaw + 180, 360) - 180
+        actions = self.neutral.expand(len(observations), -1).clone()
+        actions[:, self.yaw_column] = (error.unsqueeze(1) - self.yaw_choices).abs().argmin(dim=1)
+        actions[:, self.movement_column] = torch.where(error.abs() <= 1, self.forward, self.neutral_movement)
+        for column, choice in self.enabled:
+            actions[:, column] = choice
+        return actions, valid
+
+
 class ResidentOpponentPool:
     def __init__(self, pool, device, seed):
         if not pool.mixture:
@@ -578,13 +611,23 @@ class ResidentOpponentPool:
         self.count = pool.count
         self.names = pool.names
         self.controllers = []
+        self.lanes = {}
+        self.frozen = {}
         for entry in pool.mixture:
             name = entry["id"]
             controller = pool.controllers[name]
             if type(controller) is StationaryTargetController:
                 neutral = torch.as_tensor(controller._neutral, device=self.device)
-            elif type(controller) is SelfPlayController:
+            elif type(controller) is BridgeFixedLaneController:
+                neutral = torch.as_tensor(controller._neutral, device=self.device)
+                self.lanes[self.names.index(name)] = ResidentFixedLane(controller, self.device)
+            elif type(controller) in (SelfPlayController, CheckpointController):
                 neutral = None
+            elif type(controller) is FrozenSelfPlayController:
+                neutral = None
+                self.frozen[self.names.index(name)] = {
+                    "updates": torch.full((self.count,), controller.latest_update, dtype=torch.long, device=self.device),
+                    "snapshots": dict(controller.snapshots)}
             else:
                 raise ValueError(f"Resident rollout does not support opponent {name!r}")
             self.controllers.append((self.names.index(name), controller, neutral))
@@ -616,6 +659,22 @@ class ResidentOpponentPool:
         self.assignments = torch.where(mask, selected, self.assignments)
         self.learner_slots = torch.where(mask, sides, self.learner_slots)
         self.episodes += mask.to(torch.long)
+        for lane in self.lanes.values():
+            lane.reset(mask)
+        for index, controller, _ in self.controllers:
+            if index in self.frozen:
+                frozen = self.frozen[index]
+                frozen["snapshots"].update(controller.snapshots)
+                frozen["updates"] = torch.where(mask, controller.latest_update, frozen["updates"])
+
+    def sync_snapshots(self):
+        for index, controller, _ in self.controllers:
+            if index in self.frozen:
+                frozen = self.frozen[index]
+                controller.snapshots.update(frozen["snapshots"])
+                controller.snapshot_updates[:] = frozen["updates"].cpu().numpy()
+                controller._prune()
+                frozen["snapshots"] = dict(controller.snapshots)
 
     def act(self, model, observations, action_names, fixed):
         slots = self.learner_slots
@@ -627,9 +686,25 @@ class ResidentOpponentPool:
         opponent = torch.zeros_like(learner)
         for index, controller, neutral in self.controllers:
             selected = self.assignments == index
-            if neutral is None:
+            if index in self.lanes:
+                actions, opponent_valid = self.lanes[index].act(other, selected)
+                valid = valid & (~selected | opponent_valid)
+            elif index in self.frozen:
+                actions = torch.zeros_like(learner)
+                matched = torch.zeros_like(selected)
+                frozen = self.frozen[index]
+                for update, (snapshot, snapshot_fixed) in frozen["snapshots"].items():
+                    assigned = selected & (frozen["updates"] == update)
+                    matched |= assigned
+                    snapshot_actions, _, _, opponent_valid = resident_policy_actions(
+                        snapshot, other, action_names, snapshot_fixed, controller._generator, controller.deterministic)
+                    actions = torch.where(assigned.unsqueeze(-1), snapshot_actions, actions)
+                    valid = valid & (~assigned | opponent_valid)
+                valid = valid & (~selected | matched)
+            elif neutral is None:
                 actions, _, _, opponent_valid = resident_policy_actions(
-                    model, other, action_names, controller._fixed, controller._generator, controller.deterministic)
+                    controller.model if type(controller) is CheckpointController else model,
+                    other, action_names, controller._fixed, controller._generator, controller.deterministic)
                 valid = valid & (~selected | opponent_valid)
             else:
                 actions = neutral.expand_as(learner)
@@ -744,7 +819,7 @@ class ResidentCollector:
             valid &= torch.isfinite(rollout["advantages"]).all() & torch.isfinite(rollout["returns"]).all()
         self.environment.wait_cuda_actions()
         if not valid.item():
-            raise ValueError("Resident rollout encountered nonfinite observations, rewards or policy outputs")
+            raise ValueError("Resident rollout encountered invalid observations, rewards or policy outputs")
         terminated = rollout["terminated"].cpu().numpy()
         truncated = rollout["truncated"].cpu().numpy()
         returns, lengths = event_returns.cpu().numpy(), event_lengths.cpu().numpy()
@@ -765,6 +840,7 @@ class ResidentCollector:
                                       "training_rollout": worlds.episode_metrics.rollout_snapshot()}
         pool.pool.assignments[:] = pool.assignments.cpu().numpy()
         pool.pool.learner_slots[:] = pool.learner_slots.cpu().numpy()
+        pool.sync_snapshots()
         if timer.enabled:
             timer.count("reset_calls", np.any(terminated | truncated, axis=1).sum())
             timer.count("reset_worlds", (terminated | truncated).sum())
@@ -778,7 +854,7 @@ def collect(model, worlds, pool, observations, steps, device, fixed, profile=Fal
     if type(structured_bridge) is not bool:
         raise ValueError("Structured Bridge collection opt-in must be boolean")
     if structured_bridge:
-        if (not isinstance(model, BridgeActorCritic) or worlds.bridge_scenario is None
+        if (bridge_model_descriptor(model) is None or worlds.bridge_scenario is None
                 or len(worlds.bridge_scenario["arenas"]) != 1 or worlds.contract["ticks_per_action"] != 1):
             raise ValueError("Structured Bridge collection requires a compatible fixed Bridge model and stage")
         _validate_structured_bridge_model(model, worlds.contract)
@@ -791,14 +867,14 @@ def collect(model, worlds, pool, observations, steps, device, fixed, profile=Fal
             raise ValueError("Structured Bridge opponent pool differs from the world contract")
         if any(isinstance(controller, (SelfPlayController, CheckpointController)) and
                (controller.describe.get("bridge_observation") != model.descriptor
-                or not isinstance(controller.model, BridgeActorCritic)
+                or bridge_model_descriptor(controller.model) is None
                 or controller.model.descriptor != model.descriptor
                 or type(controller) is SelfPlayController and controller.model is not model)
                for controller in pool.controllers.values()):
             raise ValueError("Structured Bridge opponent model descriptor differs from the learner")
         if not np.array_equal(observations, worlds.observe()):
             raise ValueError("Structured Bridge collection requires current scalar observations")
-    elif isinstance(model, BridgeActorCritic):
+    elif bridge_model_descriptor(model) is not None:
         raise ValueError("Structured Bridge collection requires explicit opt-in")
     timer = CollectionTimer(device, profile)
     timer.count("worlds", worlds.count)
@@ -998,8 +1074,8 @@ def _copy_bridge_snapshot(pool, source, name, update=None):
     if (original.describe.get("bridge_observation") != target.describe.get("bridge_observation")
             or getattr(snapshot, "descriptor", None) != target.describe.get("bridge_observation")):
         raise ValueError(f"Bridge frozen self-play opponent {name!r} requires a compatible source snapshot")
-    if isinstance(target.model, BridgeActorCritic):
-        if not isinstance(snapshot, BridgeActorCritic):
+    if bridge_model_descriptor(target.model) is not None:
+        if bridge_model_descriptor(snapshot) is None:
             raise ValueError(f"Bridge frozen self-play opponent {name!r} requires a compatible source snapshot")
         try:
             _validate_structured_bridge_model(snapshot, target.contract)
@@ -1010,7 +1086,7 @@ def _copy_bridge_snapshot(pool, source, name, update=None):
 
 def _evaluate_bridge(model, plan, suite, options, device, opponent_pool):
     scenario = suite["scenario"]
-    structured = isinstance(model, BridgeActorCritic)
+    structured = bridge_model_descriptor(model) is not None
     if structured:
         _validate_structured_bridge_consumer(model, plan, scenario)
     if (len(scenario.get("arenas", [])) != 1 or any(scenario.get(name) for name in ("spawns", "equipment"))
@@ -1129,7 +1205,7 @@ def _evaluate_bridge(model, plan, suite, options, device, opponent_pool):
 def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
     if suite["scenario"].get("bridge") is not None:
         return _evaluate_bridge(model, plan, suite, options, device, opponent_pool)
-    if isinstance(model, BridgeActorCritic):
+    if bridge_model_descriptor(model) is not None:
         raise ValueError("Structured Bridge evaluation requires a Bridge scenario")
     count = min(suite.get("worlds", 16), suite["episodes"])
     fixed = fixed_indices(plan["policy"], suite["controls"])
@@ -1187,7 +1263,7 @@ def evaluate(model, plan, suite, options, device, fixed, opponent_pool=None):
 def export_replay(model, plan, stage, options, scenario, provenance, device, rounds, update, directory,
                   opponent_pool=None):
     bridge = stage["scenario"].get("bridge")
-    structured = isinstance(model, BridgeActorCritic)
+    structured = bridge_model_descriptor(model) is not None
     if structured:
         _validate_structured_bridge_consumer(model, plan, stage["scenario"])
     if "experimental_bridge" in scenario and scenario["experimental_bridge"] != bridge:
@@ -1320,6 +1396,7 @@ def run(options, checkpoint=None):
     )
     from simulator.training.replay_requests import finish_request, read_request, requested_replay_round
 
+    load_trusted_models(getattr(options, "trusted_model_module", []))
     run_started = time.perf_counter()
     if options.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA training requested but unavailable")
@@ -1342,8 +1419,10 @@ def run(options, checkpoint=None):
         setattr(options, name, plan["learner"][name])
     plan = resolve_plan(plan)
     descriptor = plan.get("bridge_observation")
+    architecture = plan.get("model", legacy_model_descriptor(descriptor))
+    model_factory(architecture)
     if checkpoint is not None:
-        _validate_checkpoint_model(checkpoint.get("metadata"), descriptor)
+        _validate_checkpoint_model(checkpoint.get("metadata"), descriptor, architecture)
     saved = {} if checkpoint is None else checkpoint.get("research", {})
     requested_backend = getattr(options, "rollout_backend", "host")
     reason = resident_unsupported(plan, options.device) if requested_backend != "host" else None
@@ -1404,9 +1483,8 @@ def run(options, checkpoint=None):
         if requested_backend == "auto" and reason is not None:
             print(f"CUDA resident rollout unavailable; using host collection: {reason}")
         action_sizes = dict(zip(worlds.action_names, plan["policy"]["action_sizes"]))
-        model = (BridgeActorCritic(worlds.observation_dim, descriptor, options.hidden_dim, action_sizes)
-             if descriptor is not None else
-             ActorCritic(worlds.observation_dim, options.hidden_dim, movement_bins=9, action_sizes=action_sizes)).to(device)
+        model = create_model(architecture, worlds.observation_dim, descriptor,
+                     options.hidden_dim, action_sizes).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=options.lr, eps=1e-5)
         pool = OpponentPool(plan["opponents"], plan["policy"], options.envs, options.device, plan["seed"], learner=model)
         pool.configure(stage["opponents"], stage["controls"])
@@ -1428,7 +1506,7 @@ def run(options, checkpoint=None):
                 torch.cuda.set_rng_state(checkpoint["cuda_rng_state"].cpu())
         elif options.initialize:
             initial = torch.load(options.initialize, map_location=device, weights_only=True)
-            _validate_checkpoint_model(initial.get("metadata"), descriptor)
+            _validate_checkpoint_model(initial.get("metadata"), descriptor, architecture)
             from simulator.training.contract import from_legacy
             schema = initial["metadata"]["schema"]
             contract = schema if schema.get("format") == "minecraft_sim_policy" else from_legacy(schema)
@@ -1477,6 +1555,8 @@ def run(options, checkpoint=None):
         config["dashboard_replay_requests"] = True
         config["dashboard_analytics_requests"] = True
         run_metadata = research_metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
+        if "model" in plan:
+            run_metadata["model"] = deepcopy(architecture)
         if descriptor is not None:
             run_metadata["bridge_observation"] = deepcopy(descriptor)
         run_metadata.update(learner="opponent_pool", controls=stage["controls"], rollout_backend=rollout_backend,
@@ -1492,6 +1572,8 @@ def run(options, checkpoint=None):
         def save_snapshot(rule, snapshot_update, stage_updates):
             scenario = worlds.episode_scenario(0)
             manifest = research_metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
+            if "model" in plan:
+                manifest["model"] = deepcopy(architecture)
             if descriptor is not None:
                 manifest["bridge_observation"] = deepcopy(descriptor)
             manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario,
@@ -1704,6 +1786,8 @@ def run(options, checkpoint=None):
             if update % options.save_every == 0 or update == base_update + options.updates or completed:
                 scenario = worlds.episode_scenario(0)
                 manifest = research_metadata(worlds.groups[0][1], options.hidden_dim, plan["learner"])
+                if "model" in plan:
+                    manifest["model"] = deepcopy(architecture)
                 if descriptor is not None:
                     manifest["bridge_observation"] = deepcopy(descriptor)
                 manifest.update(schema=plan["policy"], contract=plan["policy"], environment=scenario, scenario=scenario,

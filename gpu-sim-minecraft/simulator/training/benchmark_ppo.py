@@ -19,8 +19,9 @@ import torch
 
 from backend.fast_rl_model import ActorCritic
 from simulator.training.compiler import LEARNER_DEFAULTS
-from simulator.training.contract import fingerprint, from_legacy
+from simulator.training.contract import fingerprint, from_legacy, reject_structured_bridge_checkpoint
 from simulator.training.environment import REWARD_SEMANTICS, SCHEMA
+from simulator.training.models import checkpoint_model_descriptor, legacy_model_descriptor
 from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.plans import plan_hash, resolve_plan
 from simulator.training.ppo import compute_gae, optimize
@@ -329,6 +330,10 @@ def load_baseline(path):
     if checkpoint["metadata"].get("reward_semantics") != REWARD_SEMANTICS:
         raise ValueError("Checkpoint reward semantics are incompatible with this trainer")
     policy = plan["policy"]
+    reject_structured_bridge_checkpoint(checkpoint["metadata"])
+    architecture = checkpoint_model_descriptor(checkpoint["metadata"], None)
+    if architecture != legacy_model_descriptor(None) or plan.get("model", architecture) != architecture:
+        raise ValueError("PPO benchmark supports only the built-in scalar_mlp architecture")
     descriptors = [checkpoint["metadata"].get(key) for key in ("contract", "schema")
                    if checkpoint["metadata"].get(key) is not None]
     if not descriptors or any(fingerprint(value) != fingerprint(policy) for value in descriptors):

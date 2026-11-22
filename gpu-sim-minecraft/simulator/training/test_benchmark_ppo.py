@@ -18,6 +18,7 @@ from simulator.training.benchmark_ppo import (
     build_parser,
     clone_model,
     clone_rollout,
+    load_baseline,
     main,
     optimizer_steps,
     parse_minibatch_sizes,
@@ -41,6 +42,23 @@ class BenchmarkChecks(unittest.TestCase):
                                  action_sizes=dict(zip(self.contract["action_names"],
                                                        self.contract["action_sizes"])))
         self.rollout = synthetic_rollout(self.model, 3, 5, self.contract, torch.device("cpu"), 47)
+
+    def test_baseline_rejects_non_builtin_architecture(self):
+        architecture = {"format": "minecraft_sim_model", "version": 1,
+                        "name": "external", "model_version": 1, "options": {}}
+        plan = {"policy": self.contract, "model": architecture}
+        checkpoint = {"format": "minecraft_sim_ppo", "version": 1,
+                      "metadata": {"reward_semantics": "health_normalized_v1", "model": architecture},
+                      "research": {"plan": plan, "pool": {}, "plan_hash": "test"}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.pt"
+            path.touch()
+            with patch("simulator.training.benchmark_ppo.torch.load", return_value=checkpoint), \
+                    patch("simulator.training.benchmark_ppo.resolve_plan", return_value=plan), \
+                    patch("simulator.training.benchmark_ppo.plan_hash", return_value="test"), \
+                    patch("simulator.training.benchmark_ppo.REWARD_SEMANTICS", "health_normalized_v1"):
+                with self.assertRaisesRegex(ValueError, "built-in scalar_mlp"):
+                    load_baseline(path)
 
     def test_model_and_rollout_clones_are_equal_and_independent(self):
         model_copy = clone_model(self.model, "cpu")

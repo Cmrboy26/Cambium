@@ -14,7 +14,7 @@ import time
 import numpy as np
 import torch
 
-from backend.fast_rl_model import ActorCritic
+from simulator.training.models import checkpoint_model_descriptor, create_model, load_trusted_models
 from simulator.training.bridge import validate_bridge
 from simulator.training.environment import SCHEMA, SCHEMAS
 from simulator.training.contract import (CATALOGUE_HASH, fingerprint, from_legacy, reject_structured_bridge_checkpoint,
@@ -83,8 +83,8 @@ class Policy:
                 raise ValueError("Policy weapon action outside scenario loadout")
         json.dumps(definition, allow_nan=False)
         torch.manual_seed(seed)
-        self.model = ActorCritic(self.schema["observation_dim"], hidden, movement_bins=9,
-            action_sizes=dict(zip(self.contract["action_names"], self.contract["action_sizes"]))).to(self.device)
+        self.model = create_model(checkpoint_model_descriptor(manifest, None), self.schema["observation_dim"], None, hidden,
+            dict(zip(self.contract["action_names"], self.contract["action_sizes"]))).to(self.device)
         try:
             self.model.load_state_dict(saved["model"], strict=True)
         except (KeyError, TypeError, RuntimeError) as error:
@@ -357,6 +357,8 @@ def main(argv=None):
     parser.add_argument("checkpoint", type=Path, nargs="?", help="Standalone trainer checkpoint (trusted files only)")
     parser.add_argument("--duel", type=Path, help="Local two-fighter duel configuration")
     parser.add_argument("--bridge-protocol", action="store_true", help="Serve experimental structured Bridge protocol 2")
+    parser.add_argument("--trusted-model-module", action="append", default=[],
+                        help="Explicitly import a trusted Python module that registers model factories")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--deterministic", action="store_true", help="Use argmax instead of training-style stochastic actions")
@@ -369,6 +371,7 @@ def main(argv=None):
         parser.error("Choose a checkpoint or --duel, not both")
     if options.bridge_protocol and options.checkpoint is None:
         parser.error("Bridge protocol requires a standalone checkpoint")
+    load_trusted_models(options.trusted_model_module)
     torch.set_num_threads(options.threads)
     policy = (DuelPolicy(options.duel, options.device, options.deterministic, options.seed) if options.duel else
               BridgePolicy(options.checkpoint, options.device, options.deterministic, options.seed) if options.bridge_protocol else

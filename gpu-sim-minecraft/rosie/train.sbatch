@@ -26,6 +26,7 @@ SIM_HIDDEN_DIM="${SIM_HIDDEN_DIM:-}"
 SIM_LR="${SIM_LR:-}"
 SIM_THREADS="${SIM_THREADS:-4}"
 SIM_PROFILE_EVERY="${SIM_PROFILE_EVERY:-0}"
+SIM_ROLLOUT_BACKEND="${SIM_ROLLOUT_BACKEND:-host}"
 SIM_SAVE_EVERY="${SIM_SAVE_EVERY:-10}"
 SIM_PLAN="${SIM_PLAN:-}"
 SIM_SWEEP="${SIM_SWEEP:-}"
@@ -53,6 +54,14 @@ if [[ -n "${SIM_ENVIRONMENT:-}" || -n "${SIM_SCHEMA:-}" || -n "${SIM_SEED:-}" ]]
 fi
 if [[ -n "$SIM_SWEEP" && ( ! -f "$SIM_SWEEP" || -n "$SIM_PLAN" || -n "$SIM_RESUME" || -n "$SIM_INITIALIZE" || -n "$SIM_START_STAGE" ) ]]; then
     echo "ERROR: SIM_SWEEP needs an existing manifest and cannot be combined with plan/resume/initialize/start-stage."
+    exit 1
+fi
+if [[ "$SIM_ROLLOUT_BACKEND" != host && "$SIM_ROLLOUT_BACKEND" != cuda-resident && "$SIM_ROLLOUT_BACKEND" != auto ]]; then
+    echo "ERROR: SIM_ROLLOUT_BACKEND must be host, cuda-resident, or auto."
+    exit 1
+fi
+if [[ -n "$SIM_SWEEP" && "$SIM_ROLLOUT_BACKEND" != host ]]; then
+    echo "ERROR: SIM_ROLLOUT_BACKEND is not supported for shared-GPU sweeps."
     exit 1
 fi
 if [[ -z "$SIM_PLAN" && -z "$SIM_RESUME" && -z "$SIM_SWEEP" ]]; then
@@ -203,6 +212,7 @@ fi
 echo "Training on $(hostname): envs=$SIM_ENVS updates=$SIM_UPDATES rollout_steps=$SIM_ROLLOUT_STEPS plan=$SIM_PLAN resume=$SIM_RESUME"
 TRAIN_ARGS=(
     --device cuda \
+    --rollout-backend "$SIM_ROLLOUT_BACKEND" \
     --updates "$SIM_UPDATES" \
     --threads "$SIM_THREADS" \
     --profile-every "$SIM_PROFILE_EVERY" \

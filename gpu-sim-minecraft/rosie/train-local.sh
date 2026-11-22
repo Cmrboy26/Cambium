@@ -20,6 +20,7 @@ SIM_ENT_COEF="${SIM_ENT_COEF:-}"
 SIM_MAX_GRAD_NORM="${SIM_MAX_GRAD_NORM:-}"
 SIM_THREADS="${SIM_THREADS:-4}"
 SIM_PROFILE_EVERY="${SIM_PROFILE_EVERY:-0}"
+SIM_ROLLOUT_BACKEND="${SIM_ROLLOUT_BACKEND:-host}"
 SIM_SAVE_EVERY="${SIM_SAVE_EVERY:-10}"
 SIM_PLAN="${SIM_PLAN:-}"
 SIM_REPLAY_EVERY="${SIM_REPLAY_EVERY:-0}"
@@ -48,6 +49,10 @@ if [[ -n "$SIM_RESUME" && -n "$SIM_INITIALIZE" ]]; then
 fi
 if [[ -n "$SIM_START_STAGE" && -n "$SIM_RESUME" ]]; then
     echo "ERROR: SIM_START_STAGE is for new runs and cannot be combined with SIM_RESUME."
+    exit 1
+fi
+if [[ "$SIM_ROLLOUT_BACKEND" != host && "$SIM_ROLLOUT_BACKEND" != cuda-resident && "$SIM_ROLLOUT_BACKEND" != auto ]]; then
+    echo "ERROR: SIM_ROLLOUT_BACKEND must be host, cuda-resident, or auto."
     exit 1
 fi
 for checkpoint in "$SIM_RESUME" "$SIM_INITIALIZE"; do
@@ -124,6 +129,7 @@ exec {BUILD_LOCK_FD}>&-
 
 TRAIN_ARGS=(
     --device cuda
+    --rollout-backend "$SIM_ROLLOUT_BACKEND"
     --updates "$SIM_UPDATES"
     --threads "$SIM_THREADS"
     --profile-every "$SIM_PROFILE_EVERY"

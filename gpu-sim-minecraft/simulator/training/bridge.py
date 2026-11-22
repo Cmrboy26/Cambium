@@ -100,6 +100,9 @@ def validate_bridge(configuration, scene):
            for score in (0, converted["score"]) for opposing in (0, opponent)
            for outcome in (0, converted["win"], converted["loss"])):
         raise ValueError("Combined Bridge rewards must fit float32")
+    player_bounds = [_player_bounds(player["position"]) for player in scene["players"]]
+    if _intersects(*player_bounds[0], *player_bounds[1]):
+        raise ValueError("Bridge spawns must not overlap")
     for player in scene["players"]:
         position = player["position"]
         lower, upper = _player_bounds(position)
@@ -107,6 +110,11 @@ def validate_bridge(configuration, scene):
                 or not player["on_ground"] or not _solid(scene, (math.floor(position[0]),
                     math.floor(position[1] - 1e-5), math.floor(position[2])))):
             raise ValueError("Bridge spawns must be supported, inside bounds and above the void")
+        for x_coord in range(math.floor(lower[0]), math.ceil(upper[0])):
+            for y_coord in range(math.floor(lower[1]), math.ceil(upper[1])):
+                for z_coord in range(math.floor(lower[2]), math.ceil(upper[2])):
+                    if _solid(scene, (x_coord, y_coord, z_coord)):
+                        raise ValueError("Bridge spawn must be clear of solid blocks")
         if any(_intersects(lower, upper, goal["min"], goal["max"]) for goal in goals):
             raise ValueError("Bridge spawns must be outside both goals")
         if match["arrow_refill_ticks"] and "minecraft:bow" not in player["loadout"]["weapons"]:

@@ -16,6 +16,7 @@ from simulator.training.bridge import _intersects, _player_bounds
 from simulator.training.contract import (CAPABILITIES, RULES, resolve_scenario, validate_contract,
                                          validate_bridge_observation_descriptor)
 from simulator.training.environment import BRIDGE_UNSUPPORTED_REWARDS, REWARD_NAMES, MAX_MAX_TICKS
+from simulator.training.models import validate_model_descriptor
 from simulator.training.plans import (
     EpisodeSampler, _opponent_mix, _scenario, advance_rule, fields, finite, positive,
 )
@@ -387,13 +388,15 @@ def _resolved_evaluations(value, policy, opponents):
 
 def _resolved(value, base_dir):
     fields(value, ("format", "version", "name", "seed", "policy", "learner", "opponents",
-                   "stages", "evaluations", "scenario", "snapshots", "bridge_observation"), "resolved experiment")
+                   "stages", "evaluations", "scenario", "snapshots", "bridge_observation", "model"), "resolved experiment")
     _version(value, "minecraft_sim_experiment", 1, "resolved experiment")
     result = deepcopy(value)
     result["name"] = _name(result.get("name"), "Experiment name")
     result["seed"] = _seed(result.get("seed"), "Experiment seed")
     result["policy"] = _policy(result.get("policy"))
     result["learner"] = _learner(result.get("learner", {}))
+    if "model" in result:
+        result["model"] = validate_model_descriptor(result["model"])
     if "bridge_observation" in result:
         result["bridge_observation"] = validate_bridge_observation_descriptor(result["bridge_observation"])
         _structured_opponents(result.get("opponents"))
@@ -584,7 +587,7 @@ def resolve_experiment(value, base_dir):
     if value.get("format") == "minecraft_sim_experiment":
         return _resolved(value, base_dir)
     fields(value, ("format", "version", "name", "seed", "policy", "environment", "learner",
-                   "opponents", "mixtures", "stages", "evaluations", "snapshots", "bridge_observation"), "training plan")
+                   "opponents", "mixtures", "stages", "evaluations", "snapshots", "bridge_observation", "model"), "training plan")
     _version(value, "minecraft_sim_training_plan", 2, "training plan")
     if "bridge_observation" in value:
         validate_bridge_observation_descriptor(value["bridge_observation"])
@@ -613,6 +616,8 @@ def resolve_experiment(value, base_dir):
         result["snapshots"] = deepcopy(value["snapshots"])
     if "bridge_observation" in value:
         result["bridge_observation"] = deepcopy(value["bridge_observation"])
+    if "model" in value:
+        result["model"] = validate_model_descriptor(value["model"])
     named_stages = {}
     for stage in stages:
         fields(stage, (*CONDITION_FIELDS, "name", "advance", "evaluations", "snapshots"), "stage")

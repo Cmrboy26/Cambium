@@ -240,6 +240,76 @@ Custom scripted `package.module:factory` controllers execute trusted Python code
 
 Shield/weapon options need matching policy observations/actions and actual loadouts.
 
+## Custom Models
+
+Model factories are trusted Python code. A plan or checkpoint can select a
+registered architecture, but cannot import one. Put your module on `PYTHONPATH`
+and explicitly pass `--trusted-model-module package.module` to every training,
+resume, or serving process that needs it. Never trust an unreviewed module.
+
+Add this optional field to a plan; omitting it preserves the legacy built-in
+scalar or Bridge model and old resolved-plan identity:
+
+```json
+"model": {"format": "minecraft_sim_model", "version": 1,
+					"name": "my_bridge", "model_version": 1, "options": {}}
+```
+
+A factory receives `observation_dim`, `bridge_observation`, `hidden_dim`,
+ordered `action_sizes`, and JSON `options` as keyword arguments. It returns a
+`torch.nn.Module` with ordered `action_names`; `forward` returns a dictionary of
+logits shaped `[batch, choices]` and a value tensor shaped `[batch]`. Structured
+Bridge models also expose `descriptor`, `observation_dim`, and `match_dim`, and
+receive `scalar` and `match` float32 tensors and a `voxels` uint8 tensor shaped
+`[batch, 5, 9, 9]`. The factory's initial CPU outputs are checked for shape,
+order, and finite values. For example, a module can register a wrapper around
+the built-in model before replacing the network with its own implementation:
+
+```python
+import torch
+from backend.fast_rl_model import BridgeActorCritic
+from simulator.training.models import register_model
+
+class MyBridge(torch.nn.Module):
+		def __init__(self, observation_dim, bridge_observation, hidden_dim, action_sizes):
+				super().__init__()
+				self.network = BridgeActorCritic(observation_dim, bridge_observation, hidden_dim, action_sizes)
+				self.descriptor = self.network.descriptor
+				self.observation_dim = self.network.observation_dim
+				self.match_dim = self.network.match_dim
+				self.action_names = self.network.action_names
+
+		def forward(self, inputs):
+				return self.network(inputs)
+
+def build(*, observation_dim, bridge_observation, hidden_dim, action_sizes, options):
+		if options:
+				raise ValueError("Unsupported model options")
+		return MyBridge(observation_dim, bridge_observation, hidden_dim, action_sizes)
+
+register_model("my_bridge", 1, build)
+```
+
+From the project root, a small CPU run and its experimental protocol-2 server
+can be started with:
+
+```sh
+python -m simulator.training.train --plan path/to/plan.json --device cpu --envs 2 \
+	--updates 1 --rollout-steps 2 --output path/to/run --trusted-model-module package.module
+python -m simulator.training.serve path/to/run/latest.pt --bridge-protocol \
+	--trusted-model-module package.module
+```
+
+Use the same explicit module flag for resume and for checkpoint opponents. The
+checkpoint records the architecture separately from the observation descriptor;
+initialization and resume reject mismatched architectures. GPU execution and a
+live Minecraft Bridge adapter still require their separate validation gates.
+
+For standalone duel checkpoint evaluation, pass the flag to the `run`
+subcommand as well. This evaluator does not support Bridge observations. The
+standalone PPO minibatch benchmark currently accepts only the built-in scalar
+architecture.
+
 ## Example Plan
 
 The example uses only the four example files: a walled arena, fixed iron swords,

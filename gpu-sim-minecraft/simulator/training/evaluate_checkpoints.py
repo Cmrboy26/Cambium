@@ -15,10 +15,10 @@ from uuid import uuid4
 import numpy as np
 import torch
 
-from backend.fast_rl_model import ActorCritic
-from simulator.training.contract import fingerprint
+from simulator.training.contract import fingerprint, reject_structured_bridge_checkpoint
 from simulator.training.controllers import create_controller
 from simulator.training.environment import ROOT
+from simulator.training.models import checkpoint_model_descriptor, create_model, load_trusted_models
 from simulator.training.policies import fixed_indices, policy_actions
 from simulator.training.research import SampledWorlds
 
@@ -463,8 +463,9 @@ def _load_candidate_model(root, candidate, contract, device):
             or fingerprint(metadata.get("contract")) != candidate.get("policy_sha256")):
         raise ValueError(f"Frozen candidate metadata differs from manifest: {candidate.get('id')}")
     hidden_dim = candidate.get("hidden_dim")
-    model = ActorCritic(contract["observation_dim"], hidden_dim, movement_bins=9,
-                        action_sizes=dict(zip(contract["action_names"], contract["action_sizes"])))
+    reject_structured_bridge_checkpoint(metadata)
+    model = create_model(checkpoint_model_descriptor(metadata, None), contract["observation_dim"], None, hidden_dim,
+                         dict(zip(contract["action_names"], contract["action_sizes"])))
     try:
         model.load_state_dict(saved["model"], strict=True)
     except (KeyError, RuntimeError, TypeError) as error:
@@ -790,6 +791,8 @@ def build_parser():
     run_parser.add_argument("--worlds", type=_positive_worlds, default=16)
     run_parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     run_parser.add_argument("--library", help="Native training library matching the selected device")
+    run_parser.add_argument("--trusted-model-module", action="append", default=[],
+                            help="Explicitly import a trusted Python module that registers model factories")
     run_parser.add_argument("--seed", type=_nonnegative_update, default=1729)
     run_parser.add_argument("--max-ticks", type=_positive_ticks,
                             help="Shorten the resolved episode limit for a smoke run")
@@ -803,6 +806,7 @@ def main(argv=None):
         if args.command == "prepare":
             destination = prepare(args.runs, args.run_root, args.update, args.output)
         else:
+            load_trusted_models(args.trusted_model_module)
             destination = run(args.bundle, args.episodes, args.worlds, args.device,
                               args.library, args.seed, args.max_ticks)
     except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:

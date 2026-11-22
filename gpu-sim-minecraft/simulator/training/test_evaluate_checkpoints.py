@@ -21,11 +21,51 @@ from simulator.training.evaluate_checkpoints import (
     _slot_for_episode,
     _summarize,
     _wilson_interval,
+    main,
     run,
 )
 
 
 class CheckpointSelectionChecks(unittest.TestCase):
+    def test_run_imports_only_explicitly_trusted_modules(self):
+        with patch("simulator.training.evaluate_checkpoints.load_trusted_models") as load, \
+             patch("simulator.training.evaluate_checkpoints.run", return_value=Path("bundle")):
+            self.assertEqual(main(["run", "bundle", "--trusted-model-module", "example.one",
+                                   "--trusted-model-module", "example.two"]), 0)
+        load.assert_called_once_with(["example.one", "example.two"])
+
+    def test_candidate_uses_registered_checkpoint_architecture(self):
+        from backend.fast_rl_model import ActorCritic
+        from simulator.training.evaluate_checkpoints import _load_candidate_model
+        from simulator.training.models import MODEL_REGISTRY, register_model
+
+        class AlternateModel(ActorCritic):
+            pass
+
+        contract = from_legacy(SCHEMA)
+        sizes = dict(zip(contract["action_names"], contract["action_sizes"]))
+        architecture = {"format": "minecraft_sim_model", "version": 1, "name": "evaluation_test",
+                        "model_version": 1, "options": {}}
+        metadata = {"model": architecture, "contract": contract, "controls": {"fixed": {}},
+                    "max_ticks": 100, "snapshot": {"name": "test", "stage_updates": 1},
+                    "experiment": {"stage": "combat", "stage_index": 0}}
+        saved = {"metadata": metadata, "update": 1, "samples": 2,
+                 "model": AlternateModel(contract["observation_dim"], 8, action_sizes=sizes).state_dict()}
+        candidate = {"id": "test", "checkpoint": {"sha256": "digest"}, "update": 1, "samples": 2,
+                     "snapshot_name": "test", "stage": {"name": "combat", "index": 0, "stage_updates": 1},
+                     "controls": {"fixed": {}}, "max_ticks": 100, "policy_sha256": fingerprint(contract),
+                     "hidden_dim": 8}
+        def factory(*, observation_dim, bridge_observation, hidden_dim, action_sizes, options):
+            return AlternateModel(observation_dim, hidden_dim, action_sizes=action_sizes)
+        with patch.dict(MODEL_REGISTRY, clear=False), \
+             patch("simulator.training.evaluate_checkpoints._bundle_file", return_value=Path("unused")), \
+             patch("simulator.training.evaluate_checkpoints._load_checkpoint", return_value=(saved, "digest")):
+            with self.assertRaisesRegex(ValueError, "not registered"):
+                _load_candidate_model(Path("."), candidate, contract, torch.device("cpu"))
+            register_model("evaluation_test", 1, factory)
+            model, _ = _load_candidate_model(Path("."), candidate, contract, torch.device("cpu"))
+            self.assertIsInstance(model, AlternateModel)
+
     def test_bridge_conditions_are_rejected_by_duel_evaluator(self):
         policy = from_legacy(SCHEMA)
         stage = {"name": "bridge", "controls": {"fixed": {}}, "scenario": {"bridge": {}}, "rewards": {}}

@@ -325,6 +325,17 @@ done
         arguments = self.log.read_text().splitlines()
         self.assertEqual(arguments[arguments.index("--profile-every") + 1], "10")
 
+    def test_rollout_backend_reaches_trainer_and_rejects_invalid_values(self):
+        result = self.launch(SIM_ROLLOUT_BACKEND="cuda-resident")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertEqual(arguments[arguments.index("--rollout-backend") + 1], "cuda-resident")
+        self.log.unlink()
+        result = self.launch(SIM_ROLLOUT_BACKEND="invalid")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SIM_ROLLOUT_BACKEND", result.stdout)
+        self.assertFalse(self.log.exists())
+
     def test_invalid_collection_profiling_fails_before_build(self):
         for value in ("-1", "abc", "1.5"):
             with self.subTest(value=value):
@@ -586,6 +597,18 @@ print(f"{12345 + count};test-cluster")
         self.assertIn("bash rosie/train-local.sh", result.stdout)
         self.assertNotIn("sbatch --parsable", result.stdout)
         self.assertNotIn("Wall-time limit", result.stdout)
+
+    def test_rollout_backend_reaches_rosie_and_local_submissions(self):
+        for local in (False, True):
+            with self.subTest(local=local):
+                result = self.launch(local=local, extra_arguments=("--rollout-backend", "auto"))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("SIM_ROLLOUT_BACKEND=auto", result.stdout)
+        result = self.launch(extra_arguments=("--rollout-backend", "invalid"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rollout-backend", result.stderr)
+        result = self.launch(shared_gpu=True, extra_arguments=("--rollout-backend", "auto"))
+        self.assertNotEqual(result.returncode, 0)
 
     def test_local_dry_run_exports_stage_checkpoint_and_cadence(self):
         checkpoint = self.root / "prior-run" / "snapshots" / "aim-1.pt"
@@ -1162,6 +1185,7 @@ class LocalRunnerTests(unittest.TestCase):
                 "PATH": str(tools) + os.pathsep + os.environ["PATH"],
                 "LOCAL_TRAIN_ARGS": str(arguments_file),
                 "SIM_PLAN": str(plan),
+                "SIM_ROLLOUT_BACKEND": "auto",
                 "SIM_GAMMA": "0.9",
                 "SIM_GAE_LAMBDA": "0.8",
                 "SIM_CLIP_EPS": "0.1",
@@ -1173,6 +1197,7 @@ class LocalRunnerTests(unittest.TestCase):
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             arguments = json.loads(arguments_file.read_text())
+            self.assertEqual(arguments[arguments.index("--rollout-backend") + 1], "auto")
             for flag, value in (("--gamma", "0.9"), ("--gae-lambda", "0.8"), ("--clip-eps", "0.1"),
                                 ("--vf-coef", "0.25"), ("--ent-coef", "0.025"), ("--max-grad-norm", "1")):
                 self.assertEqual(arguments[arguments.index(flag) + 1], value)
