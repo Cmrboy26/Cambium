@@ -35,6 +35,9 @@ int mcsim_bridge_reward_terms(void* handle, double* output, size_t count);
 int mcsim_bridge_reset_episodes(void* handle, uint64_t* episodes, size_t worlds);
 int mcsim_set_bridge_reset_episodes(void* handle, const uint64_t* episodes, size_t worlds);
 int mcsim_observe(void* handle, float* observations);
+/* Host diagnostic: version 1 or 2 Bridge match features [worlds, 2, 10 or 17].
+   count is the exact number of floats; output is unchanged on error. */
+int mcsim_bridge_match_features(void* handle, int version, float* output, size_t count);
 /* Host-staged Bridge terrain [worlds, 2, 5, 9, 9], uint8. count is the
    exact number of bytes; output is unchanged on error. Finished worlds retain
    their final snapshot until reset. Caller serializes access to the batch. */
@@ -71,6 +74,12 @@ int mcsim_clear_cuda_action_status(void* handle);
    contributions [worlds,2,18]. Activating this mode disables host-state APIs. */
 int mcsim_register_cuda_step_outputs(void* handle, float* rewards, uint8_t* terminated,
                                      uint8_t* truncated, uint8_t* losses, double* contributions, size_t worlds);
+/* Resident Bridge: caller-owned match [worlds,2,10|17], voxel
+   [worlds,2,5,9,9], scored [worlds,2] and task terms [worlds,2,4] buffers.
+   Counts are elements, and version selects the match feature layout. */
+int mcsim_register_cuda_bridge_buffers(void* handle, float* match, size_t match_count,
+                                       uint8_t* voxels, size_t voxel_count, uint8_t* scored, size_t scored_count,
+                                       double* task_terms, size_t task_count, int match_version);
 int mcsim_register_cuda_reset_mask(void* handle, const uint8_t* mask, size_t worlds);
 int mcsim_step_cuda_resident_async(void* handle, void* stream);
 int mcsim_reset_cuda_resident_async(void* handle, void* stream);

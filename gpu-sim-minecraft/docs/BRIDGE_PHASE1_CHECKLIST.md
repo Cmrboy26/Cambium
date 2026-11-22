@@ -49,9 +49,10 @@ yet validated in an actual Minecraft client.
 
 Phase 1 delivers a playable Bridge-style subset on Minecraft Java 26.3 shared
 CPU/CUDA mechanics, an opt-in representative GPU-resident PPO path, a model
-extension interface, dynamic replay and live 26.3 inference. The initial
-resident path targets one fixed arena per stage with stationary and current
-self-play opponents; other configurations retain an explicit host fallback.
+extension interface, dynamic replay and live 26.3 inference. The resident
+target covers one fixed arena per stage, generated terrain, building, scripted
+and checkpoint opponents, frozen/current self-play and stage transitions;
+unsupported configurations retain an explicit host fallback.
 
 The proposal's default is first to five goals, an 18,000-tick match cap and
 blocks persisting across goals. Cage duration, exact item counts, arrow
@@ -133,8 +134,8 @@ effective conditions and distinguish legacy duels from Bridge.
 - [ ] P1-01-06: **Gate, after the declared capabilities exist:** validate and
   resolve a representative Bridge setup;
   reject invalid goals, overlapping/unsafe spawns, kits, zones, limits,
-  unsupported capabilities and inconsistent versions. Confirm old duel
-  setups/checkpoints still load or reject explicitly as designed. **In progress:**
+  unsupported capabilities and inconsistent versions. Confirm current duel
+  setups load and incompatible checkpoints reject explicitly. **In progress:**
   fixed arena, kit and build-zone subsets validate and train; sampling and the
   full declared Bridge capability gate remain open.
 
@@ -275,20 +276,20 @@ or repository-wide programming changes.
 - [ ] P1-05-05: Add a trusted, versioned model registry/factory and separate
   architecture descriptor selectable with model options in setup JSON. Define
   the Python model's observation inputs, named action logits and value output,
-  shapes, device behavior and validation. Preserve the existing MLP's legacy
+  shapes, device behavior and validation. Keep stable current-format MLP
   state-dict keys; implement a test-only alternate model to prove the extension
   interface. External Python factories execute trusted code and must be
   explicitly trusted.
 - [ ] P1-05-06: Route training, PPO, frozen/checkpoint opponents, evaluation,
   serving and inference packaging through the same model contract. Reject
   incompatible model/policy descriptors rather than silently reinitializing or
-  relabeling checkpoints; preserve supported old scalar MLP checkpoints.
+  relabeling checkpoints; support current-format scalar and Bridge checkpoints.
 - [ ] P1-05-07: Add CPU/CUDA/Java fixtures for both teams, empty/boundary/placed
   cells, negative coordinates and yaw 0/45/90; test inputs, semantic actions,
   checkpoint identity, unsupported descriptors and memory bounds.
 - [ ] P1-05-08: **Gate:** MLP and test model train, save, reload, act as an
   opponent, evaluate and serve through the actual adapters; grid fixtures and
-  legacy compatibility pass. Document and exercise a teammate workflow that
+  current-format compatibility pass. Document and exercise a teammate workflow that
   adds a Python model, selects it and its options in JSON, validates the setup,
   trains on CPU and a supported CUDA backend, and reloads the checkpoint without
   editing simulator or PPO internals. A production CNN remains future work.
@@ -300,12 +301,25 @@ Start with the existing resident duel implementation, not a separate trainer.
 Host-staged Bridge collection reuses each post-step match-state snapshot, but
 still constructs structured observations and serializes state on the host. This
 optimization does not satisfy the resident collection or H100 performance gates.
+Historical training checkpoint migration is not required; fresh compatible
+checkpoints remain required for save/resume and checkpoint opponents.
 
 - [ ] P1-06-00: Complete this milestone only after P1-06-01 through P1-06-08.
 - [ ] P1-06-01: Extend [CUDA batch](../simulator/src/cuda_backend.cu),
   [environment.py](../simulator/training/environment.py) and
   [ResidentCollector](../simulator/training/research.py) for per-world terrain,
-  Bridge state, structured observations, item events and scoring.
+  Bridge state, structured observations, item events and scoring. Shared reward
+  and match-feature helpers, structured collector storage and Bridge metrics
+  have CPU coverage. Resident native/Python integration and selected-reset
+  parity have T4 coverage, including placement, mining and apple use. Portable
+  version-3 descriptors use the v2 feature layout with a distinct checkpoint
+  identity; historical weights are not relabeled.
+  The H100 native observation/terrain suite and Python CUDA adapter/Bridge
+  integration suite also pass, with the two-GPU adapter case skipped. The
+  independent Bridge tick check runs in its own kernel after the combined test
+  kernel produced a pitch mismatch under the H100 CUDA 12.0 build; the isolated
+  tick and the production CPU/CUDA caged-aim comparison both pass.
+  The full action matrix and final H100 gate remain open.
 - [ ] P1-06-02: Implement device player, round and match resets with correct
   state/terrain preservation, per-world RNG and final observation handling.
   Preserve terminal-versus-truncation masks and timeout bootstrap in
@@ -314,13 +328,15 @@ optimization does not satisfy the resident collection or H100 performance gates.
   same-stream ordering, explicit cross-stream fences, delayed sticky errors and
   safe teardown. Keep graph-capture restrictions explicit; check device errors
   and nonfinite rollout values before an optimizer update.
-- [ ] P1-06-04: Support one fixed arena per stage, one CUDA device, stationary
-  and current-policy self-play, with device-side seat/opponent selection. Record
-  backend/RNG provenance and fresh-episode checkpoint semantics. Explicitly
-  reject unsupported strict configurations or report the host fallback.
-- [ ] P1-06-05: Expose the backend selection through the Rosie submission
-  workflow; [train.sbatch](../rosie/train.sbatch) currently invokes the trainer
-  without the resident selector. Validate submission and monitoring paths.
+- [ ] P1-06-04: Support one fixed arena per stage, one CUDA device, stationary,
+  fixed-lane and fresh checkpoint opponents, frozen/current self-play, generated
+  terrain, building and stage transitions, with device-side seat/opponent
+  selection. Record backend/RNG provenance and fresh-episode checkpoint semantics.
+  Explicitly reject unsupported strict configurations or report the host fallback.
+  **In progress:** T4 checks cover generated terrain, stage changes, fresh
+  checkpoint/current/frozen opponents, host evaluation and fresh-episode resume.
+- [ ] P1-06-05: Validate the existing backend selector in the Rosie submission
+  and monitoring paths; [train.sbatch](../rosie/train.sbatch) passes it through.
 - [ ] P1-06-06: Compare fixed-action CPU/CUDA multi-world trajectories through
   placement, break, goal, respawn, match ending and selective reset; compare
   observations, rewards, flags, values, GAE/returns, counters and PPO updates.
@@ -332,13 +348,18 @@ optimization does not satisfy the resident collection or H100 performance gates.
   shutdown must be labeled separately.
 - [ ] P1-06-08: **Gate:** run actual resident Bridge PPO and the final current
   code on H100. Compare at least three warmed, unprofiled, matched host/resident
-  duel runs, then report a separate Bridge workload. Record source/dirty state,
+  duel runs and three matched representative Bridge runs. Record source/dirty state,
   build, GPU/Slurm/CPU resources, seed, model, rollout/optimizer settings,
   resets, learner transitions/s, collection/update time, variance and total
   device peak including native and PyTorch allocations. Report physics-only
   throughput separately; do not call the old aiming-only run Bridge performance.
-  Record whether resident collection improves the matched duel workload; keep
-  this performance gate open if it does not, unless the owner revises the goal.
+  Report full evaluation timing separately. Keep this gate open if resident
+  collection fails to improve either the matched duel or Bridge workload, unless
+  the owner revises the goal. **In progress:** one matched H100 pair on the
+  original gap-5-assisted stage, before its restricted-zone scaffold (2,048
+  worlds, 128 steps, five warmed updates), measured median 40.7k host versus
+  227.5k resident learner transitions/s. This single-seed result does not
+  satisfy the multi-run, memory or trace gates.
 
 ## 7. Replay, Live Integration And Final Validation
 

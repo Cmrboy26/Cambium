@@ -14,9 +14,12 @@ struct ActionHead;
 struct DuelRewardSettings;
 struct DuelRewardState;
 struct DuelRewardStep;
+struct BridgeTaskRewardSettings;
 struct ObservationProjection;
 struct ObservationActorMetadata;
 }
+
+struct ObjectiveProgress;
 
 class CudaBatch {
 public:
@@ -51,18 +54,24 @@ public:
     void configureRewards(const app::DuelRewardSettings& settings,
                           const app::DuelRewardState* states, std::size_t count,
                           const std::uint8_t* finished = nullptr);
+    void configureBridgeRewards(const app::BridgeTaskRewardSettings& settings, float win_reward, float loss_reward,
+                                const ObjectiveProgress* objectives, std::size_t count);
     void evaluateRewardsOnStream(void* stream);
     void downloadRewardResults(app::DuelRewardStep* output, std::size_t count) const;
     void exportRewardResultsOnStream(float* rewards, std::uint8_t* terminated, std::uint8_t* truncated,
                                      std::uint8_t* losses, double* contributions, std::size_t count, void* stream);
     void stepDecodedWithRewardsOnStream(void* stream);
     void configureFixedResets(const PlayerState* players, const app::ObservationActorMetadata* actors,
-                              const std::uint64_t* episodes, std::size_t count, std::uint64_t seed);
+                              const std::uint64_t* episodes, std::size_t count, std::uint64_t seed,
+                              const BridgeTerrainGeneration* terrain_generation = nullptr);
     void downloadFixedResetEpisodes(std::uint64_t* episodes, std::size_t count) const;
     void uploadFixedResetEpisodes(const std::uint64_t* episodes, std::size_t count);
     void resetFixedOnStream(const std::uint8_t* device_mask, std::size_t count, void* stream);
     void registerRewardBuffers(float* rewards, std::uint8_t* terminated, std::uint8_t* truncated,
                                std::uint8_t* losses, double* contributions, std::size_t count);
+    void registerBridgeBuffers(float* match, std::size_t match_count, std::uint8_t* voxels,
+                               std::size_t voxel_count, std::uint8_t* scored, std::size_t scored_count,
+                               double* task_terms, std::size_t task_count, int match_version);
     void registerResetMask(const std::uint8_t* device_mask, std::size_t count);
     void stepRegisteredOnStream(void* stream);
     void resetRegisteredOnStream(void* stream);

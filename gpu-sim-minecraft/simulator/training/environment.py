@@ -9,7 +9,7 @@ import sys
 import threading
 
 import numpy as np
-from simulator.training.contract import CATALOGUE_HASH, from_legacy, validate_contract
+from simulator.training.contract import CATALOGUE_HASH, from_legacy, validate_bridge_observation_descriptor, validate_contract
 from simulator.training.legacy import ACTION_NAMES, ACTION_SIZES, SCHEMA, SCHEMA_V2, SCHEMAS
 from simulator.training.timing import CollectionTimer
 
@@ -237,6 +237,7 @@ class Environment:
         self._cuda_resident_buffers = None
         self._cuda_resident_pointers = None
         self._cuda_resident_ready = False
+        self._cuda_bridge_observations = None
         self.bridge = None
         if bridge is not None:
             try:
@@ -525,10 +526,13 @@ class Environment:
         function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         function.restype = ctypes.c_int
         with torch.cuda.device(output.device):
-            stream = torch.cuda.current_stream(output.device)
-            output.record_stream(stream)
+            if self._cuda_bridge_observations is None:
+                stream = torch.cuda.current_stream(output.device)
+                output.record_stream(stream)
+            else:
+                stream = self._resident_stream()
             self._check(function(self._handle, stream.cuda_stream))
-        return output
+        return output if self._cuda_bridge_observations is None else self._cuda_bridge_observations
 
     def wait_cuda_observations(self):
         """Wait for the latest registered CUDA observation and report errors."""
@@ -610,6 +614,10 @@ class Environment:
             raise ValueError("CUDA batch contains a finished world; clear the action status and reset it before reuse")
         if status.value & 4:
             raise ValueError("Invalid CUDA reset mask; clear the action status before reuse")
+        if status.value & 8:
+            raise ValueError("Invalid CUDA Bridge observation; clear the action status before reuse")
+        if status.value & 16:
+            raise ValueError("CUDA reset episode counter cannot be incremented; clear the action status before reuse")
 
     def clear_cuda_action_status(self):
         """Clear the sticky CUDA action error after it has been inspected."""
@@ -624,11 +632,19 @@ class Environment:
         with torch.cuda.device(self._cuda_action_device):
             self._check(function(self._handle))
 
-    def register_cuda_resident(self):
+    def register_cuda_resident(self, bridge_descriptor=None):
         """Register fixed-reset CUDA step outputs; host-state operations become unavailable."""
         self._require_open()
         if self.bridge is not None:
-            raise RuntimeError("CUDA resident Bridge collection is not implemented")
+            if bridge_descriptor is None or validate_bridge_observation_descriptor(bridge_descriptor)["version"] != 3:
+                raise ValueError("CUDA resident Bridge requires a portable observation descriptor")
+            if self._cuda_resident_buffers is not None:
+                raise RuntimeError("CUDA resident Bridge buffers already registered; recreate the environment")
+            if (self.build_info.get("cuda_resident_bridge_version") != 1
+                    or getattr(self.native, "mcsim_register_cuda_bridge_buffers", None) is None):
+                raise RuntimeError("CUDA resident Bridge collection is not implemented")
+        elif bridge_descriptor is not None:
+            raise ValueError("Bridge observations require a Bridge environment")
         if self.device != "cuda":
             raise ValueError("CUDA resident stepping requires a CUDA environment")
         if self._cuda_observations is None or self._cuda_actions is None:
@@ -646,6 +662,13 @@ class Environment:
             "contributions": torch.empty((self.count, 2, len(REWARD_NAMES)), dtype=torch.float64, device=device),
             "reset_mask": torch.empty((self.count,), dtype=torch.uint8, device=device),
         }
+        if bridge_descriptor is not None:
+            buffers.update({
+                "bridge_match": torch.empty((self.count, 2, 17), dtype=torch.float32, device=device),
+                "bridge_voxels": torch.empty((self.count, 2, 5, 9, 9), dtype=torch.uint8, device=device),
+                "bridge_scored": torch.empty((self.count, 2), dtype=torch.uint8, device=device),
+                "bridge_reward_terms": torch.empty((self.count, 2, 4), dtype=torch.float64, device=device),
+            })
         self._cuda_resident_buffers = buffers
         self._cuda_resident_pointers = {name: output.data_ptr() for name, output in buffers.items()}
         self._cuda_resident_ready = False
@@ -655,12 +678,26 @@ class Environment:
         reset = self.native.mcsim_register_cuda_reset_mask
         reset.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
         reset.restype = ctypes.c_int
+        if bridge_descriptor is not None:
+            register_bridge = self.native.mcsim_register_cuda_bridge_buffers
+            register_bridge.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+                                        ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+                                        ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            register_bridge.restype = ctypes.c_int
         with torch.cuda.device(device):
             self._check(register(self._handle, buffers["rewards"].data_ptr(), buffers["terminated"].data_ptr(),
                                  buffers["truncated"].data_ptr(), buffers["losses"].data_ptr(),
                                  buffers["contributions"].data_ptr(), self.count))
+            if bridge_descriptor is not None:
+                self._check(register_bridge(self._handle, buffers["bridge_match"].data_ptr(), buffers["bridge_match"].numel(),
+                    buffers["bridge_voxels"].data_ptr(), buffers["bridge_voxels"].numel(),
+                    buffers["bridge_scored"].data_ptr(), buffers["bridge_scored"].numel(),
+                    buffers["bridge_reward_terms"].data_ptr(), buffers["bridge_reward_terms"].numel(), 2))
             self._check(reset(self._handle, buffers["reset_mask"].data_ptr(), self.count))
         self._cuda_resident_ready = True
+        if bridge_descriptor is not None:
+            self._cuda_bridge_observations = {"scalar": self._cuda_observations, "match": buffers["bridge_match"],
+                                              "voxels": buffers["bridge_voxels"]}
         return buffers
 
     def _resident_stream(self):
@@ -675,12 +712,23 @@ class Environment:
                   "reset_mask": (self.count,)}
         dtypes = {"rewards": torch.float32, "terminated": torch.uint8, "truncated": torch.uint8,
                   "losses": torch.uint8, "contributions": torch.float64, "reset_mask": torch.uint8}
+        if self._cuda_bridge_observations is not None:
+            shapes.update({"bridge_match": (self.count, 2, 17), "bridge_voxels": (self.count, 2, 5, 9, 9),
+                           "bridge_scored": (self.count, 2), "bridge_reward_terms": (self.count, 2, 4)})
+            dtypes.update({"bridge_match": torch.float32, "bridge_voxels": torch.uint8,
+                           "bridge_scored": torch.uint8, "bridge_reward_terms": torch.float64})
+            structured = self._cuda_bridge_observations
+            if (set(structured) != {"scalar", "match", "voxels"}
+                    or structured["scalar"] is not self._cuda_observations
+                    or structured["match"] is not buffers.get("bridge_match")
+                    or structured["voxels"] is not buffers.get("bridge_voxels")):
+                raise RuntimeError("Registered CUDA Bridge observations changed; recreate the environment")
         if set(buffers) != set(shapes):
             raise RuntimeError("Registered CUDA resident buffers changed; recreate the environment")
         for name, output in buffers.items():
             if (not isinstance(output, torch.Tensor) or output.data_ptr() != self._cuda_resident_pointers[name]
                     or output.device != self._cuda_observation_device or output.dtype != dtypes[name]
-                    or output.shape != shapes[name] or not output.is_contiguous()):
+                    or output.shape != shapes[name] or not output.is_contiguous() or output.requires_grad):
                 raise RuntimeError("Registered CUDA resident buffer changed; recreate the environment")
         if (self._cuda_actions.data_ptr() != self._cuda_action_pointer
                 or self._cuda_actions.device != self._cuda_action_device or self._cuda_actions.dtype != torch.int32
@@ -711,7 +759,8 @@ class Environment:
             function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             function.restype = ctypes.c_int
             self._check(function(self._handle, stream.cuda_stream))
-        return self._cuda_observations, self._cuda_resident_buffers
+        observations = self._cuda_observations if self._cuda_bridge_observations is None else self._cuda_bridge_observations
+        return observations, self._cuda_resident_buffers
 
     def reset_cuda_resident_async(self):
         """Reset worlds selected by the registered CUDA reset mask."""
@@ -726,7 +775,7 @@ class Environment:
             function.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             function.restype = ctypes.c_int
             self._check(function(self._handle, stream.cuda_stream))
-        return self._cuda_observations
+        return self._cuda_observations if self._cuda_bridge_observations is None else self._cuda_bridge_observations
 
     def cuda_reset_episodes(self):
         """Read fixed-reset episode counters at a checkpoint boundary."""
@@ -973,6 +1022,7 @@ class Environment:
             self._cuda_resident_buffers = None
             self._cuda_resident_pointers = None
             self._cuda_resident_ready = False
+            self._cuda_bridge_observations = None
             directory = getattr(self.native, "_dll_directory", None)
             if directory is not None:
                 directory.close()

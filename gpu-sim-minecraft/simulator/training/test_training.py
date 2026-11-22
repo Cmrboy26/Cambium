@@ -869,7 +869,7 @@ class TrainingChecks(unittest.TestCase):
             self.assertEqual(environment.replay_frame(0)["bridge"]["scores"], [0, 0])
             self.assertTrue(all(value == 0 for value in environment.step_reward_totals().values()))
             environment.set_rewards({})
-            with self.assertRaisesRegex(RuntimeError, "resident Bridge"):
+            with self.assertRaisesRegex(ValueError, "portable observation descriptor"):
                 environment.register_cuda_resident()
 
     def test_bridge_shared_combat_rewards_survive_respawn_and_timeout(self):

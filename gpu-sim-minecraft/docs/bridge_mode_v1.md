@@ -171,7 +171,7 @@ All stages and evaluations use fixed Bridge scenarios; their arenas, match rules
 and task rewards may differ. Host collection supports mixtures of
 `stationary_target`, `bridge_fixed_lane`, compatible structured
 checkpoint, current-policy and frozen self-play opponents. Mixed Bridge/duel
-plans, resident execution and live inference remain unsupported. The model's
+plans and general live inference remain unsupported. The model's
 descriptor is saved in checkpoint and snapshot metadata and v4 replay provenance.
 Resume restores the model, optimizer, RNG and sampler/pool/reset counters, then
 starts fresh episodes rather than restoring in-flight matches. Initialization and
@@ -223,6 +223,11 @@ native item tick can be called without Bridge match rules. Ordinary authored due
 environments do not currently enable these item actions or automatically append
 the task features to their policies.
 
+Version 3 has the same 17-feature layout and model architecture as version 2,
+but uses `sampling: current_state` and a distinct descriptor identity for host
+and CUDA-resident observations. Version-2 checkpoints are not interchangeable
+with version 3. Host evaluation still requires the declared host capabilities.
+
 Optional `task_rewards.opponent_score` pays when the opposing player scores.
 Nonnegative `toward` and `away` independently weight distance progress and
 retreat per 50 blocks; `away` is subtracted. Toward rewards only improvement
@@ -266,8 +271,8 @@ batch seed, world and reset counter. Selective resets affect only selected
 worlds, and restored reset counters reproduce the next terrain. Player respawns
 preserve the overlay. A nonterminal goal clears generated and player-placed
 blocks when `persist_blocks_on_goal` is false; it does not regenerate them.
-Full match resets regenerate the terrain. CPU and host-staged CUDA use the same
-generator; CUDA-resident Bridge remains unsupported. Native libraries advertise
+Full match resets regenerate the terrain. CPU, host-staged CUDA and resident CUDA
+use the same generator. Native libraries advertise
 `bridge_terrain_generation_version: 1`.
 
 ### Proposed Structured Terrain Observations

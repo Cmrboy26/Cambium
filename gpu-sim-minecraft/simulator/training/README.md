@@ -59,9 +59,9 @@ For direct combat with guaranteed sword/axe/shield, use
 The Python trainer defaults to host-staged collection. For a compatible plan,
 add `--device cuda --rollout-backend cuda-resident`; use `--rollout-backend auto`
 to record a host fallback when the plan is unsupported. The resident path supports
-one arena per stage, fixed/world-sampled spawns and loadouts, and stationary or
-current-policy self-play opponents. Existing bundled curricula may need a
-compatible plan before strict resident mode can be used. It does not implement Bridge mode. See the
+one arena per stage and fixed/world-sampled spawns and loadouts. Structured Bridge
+also supports fixed-lane runners, fresh checkpoints and frozen self-play with the
+portable version-3 observation descriptor. See the
 [resident interface and limits](AGENTS.md#training-architecture).
 
 ## Checkpoints

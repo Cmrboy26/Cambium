@@ -264,7 +264,6 @@ struct TrainingBatch {
 
     void prepareCudaResident() {
         if (gpu_resident_configured) return;
-        if (bridge_enabled) throw std::invalid_argument("CUDA resident Bridge collection is not implemented");
         prepareCudaActions();
         app::DuelRewardSettings settings;
         std::copy(weights.begin(), weights.end(), settings.weights);
@@ -289,7 +288,14 @@ struct TrainingBatch {
             }
         }
         gpu->configureRewards(settings, states.data(), states.size(), finished.data());
-        gpu->configureFixedResets(initial_players.data(), initial_actors.data(), episodes.data(), episodes.size(), seed);
+        if (bridge_enabled) {
+            const app::BridgeTaskRewardSettings task_settings{bridge_score_reward, bridge_opponent_score_reward,
+                                                              bridge_toward_reward, bridge_away_penalty};
+            gpu->configureBridgeRewards(task_settings, bridge_win_reward, bridge_loss_reward,
+                                        objective_progress.data(), objective_progress.size());
+        }
+        gpu->configureFixedResets(initial_players.data(), initial_actors.data(), episodes.data(), episodes.size(), seed,
+                                  bridge_terrain_generation_enabled ? &bridge_terrain_generation : nullptr);
         gpu_resident_configured = true;
     }
 #endif
@@ -1042,43 +1048,23 @@ struct TrainingBatch {
         std::copy(event_weights.begin(), event_weights.end(), reward_settings.event_weights);
         std::copy(shaping_weights.begin(), shaping_weights.end(), reward_settings.shaping_weights);
         reward_settings.max_ticks = max_ticks;
+        const app::BridgeTaskRewardSettings bridge_task_settings{bridge_score_reward, bridge_opponent_score_reward,
+                                      bridge_toward_reward, bridge_away_penalty};
         for (std::size_t environment = 0; environment < worlds.size(); ++environment) {
             const auto offset = environment * 2;
             if (bridge_enabled) {
                 const auto& events = bridge_events[environment];
                 if (!events.advanced) throw std::runtime_error("Bridge tick did not advance");
-                terminated[environment] = events.terminated;
-                truncated[environment] = !events.terminated && bridge_states[environment].ticks >= max_ticks;
-                finished[environment] = terminated[environment] || truncated[environment];
-                PlayerState combat_players[2]{players[offset], players[offset + 1]};
-                for (int player = 0; player < 2; ++player) {
-                    combat_players[player].last_attack = events.attacks[player];
-                    combat_players[player].weapon = events.attack_weapons[player];
-                }
                 app::DuelRewardState reward_state{{dealt_damage[offset] != 0, dealt_damage[offset + 1] != 0}};
-                auto shared = app::sharedRewardEvents(combat_players, worlds[environment], reward_settings, reward_state);
-                const bool timeout = truncated[environment] || (events.terminated
-                    && bridge_states[environment].ticks >= bridge_rules.max_ticks
-                    && bridge_states[environment].scores[0] < bridge_rules.goals_to_win
-                    && bridge_states[environment].scores[1] < bridge_rules.goals_to_win);
+                const auto result = app::bridgeRewards(players.data() + offset, worlds[environment], blocks[environment],
+                    bridge_rules, bridge_states[environment], events, reward_settings, bridge_task_settings,
+                    bridge_win_reward, bridge_loss_reward, reward_state, objective_progress.data() + offset);
+                terminated[environment] = result.shared.terminated;
+                truncated[environment] = result.shared.truncated;
+                finished[environment] = terminated[environment] || truncated[environment];
                 for (int player = 0; player < 2; ++player) {
                     const auto index = offset + player;
                     dealt_damage[index] = reward_state.dealt_damage[player];
-                    if (events.died[player]) app::addDuelReward(shared, player, 3, reward_settings.weights[3]);
-                    if (timeout) {
-                        app::addDuelReward(shared, player, 4, reward_settings.weights[4]);
-                        if (!reward_state.dealt_damage[player]) {
-                            app::addDuelReward(shared, player, 5, reward_settings.weights[5]);
-                        }
-                    }
-                    if (!finished[environment] && !events.round_reset && !events.respawn[0] && !events.respawn[1]
-                        && std::any_of(shaping_weights.begin(), shaping_weights.end(), [](float weight) { return weight != 0.0F; })) {
-                        float shaping[5]{};
-                        app::shapingRewards(players[index], players[offset + 1 - player],
-                            players[index].ordinary_arrow_count,
-                            blocks[environment], reward_settings.shaping_weights, shaping);
-                        for (int term = 0; term < 5; ++term) app::addDuelReward(shared, player, 13 + term, shaping[term]);
-                    }
                     selected_slots[index] = players[index].selected_weapon_slot;
                     const bool restored = !finished[environment]
                         && (events.round_reset || events.respawn[0] || events.respawn[1]);
@@ -1087,21 +1073,11 @@ struct TrainingBatch {
                         if (observed_opponent_disable[index] > 0) --observed_opponent_disable[index];
                         if (players[index].last_attack.shield_disabled) observed_opponent_disable[index] = 99;
                     }
-                    const bool teleported = events.round_reset || events.respawn[player];
-                    const auto progress = objective_progress[index].advance(players[index].position,
-                        teleported, events.round_reset && events.scored[player]);
                     auto& terms = bridge_reward_terms[index];
-                    terms = {events.scored[player] ? double(bridge_score_reward) : 0.0,
-                             events.scored[1 - player] ? double(bridge_opponent_score_reward) : 0.0,
-                             progress.toward / 50.0 * bridge_toward_reward,
-                             -progress.away / 50.0 * bridge_away_penalty};
-                    rewards[index] = static_cast<float>(terms[0] + terms[1] + terms[2] + terms[3]) + shared.rewards[player];
+                    std::copy_n(result.task[player].values, terms.size(), terms.begin());
+                    rewards[index] = result.rewards[player];
                     for (std::size_t term = 0; term < step_reward_totals[index].size(); ++term) {
-                        recordReward(index, term, shared.contributions[player][term]);
-                    }
-                    const auto winner = player == 0 ? BridgeOutcome::team0 : BridgeOutcome::team1;
-                    if (events.terminated && events.outcome != BridgeOutcome::draw) {
-                        rewards[index] += events.outcome == winner ? bridge_win_reward : bridge_loss_reward;
+                        recordReward(index, term, result.shared.contributions[player][term]);
                     }
                 }
                 continue;
@@ -1185,6 +1161,7 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"bridge_host_batch_version", 3},
         {"bridge_shared_reward_version", 1},
         {"bridge_local_voxels_version", 1},
+        {"bridge_host_match_features_version", 1},
         {"bridge_terrain_generation_version", 1},
         {"bridge_opponent_score_version", 1},
         {"bridge_objective_reward_version", 1},
@@ -1196,8 +1173,10 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"reward_inputs", {{"base", 10}, {"events", 2}, {"shaping", 5}}},
         {"reward_totals", {{"base", 13}, {"shaping", 5}}},
 #if defined(MCSIM_HAS_CUDA)
+    {"cuda_resident_bridge_version", 1},
         {"cuda_compiled", true}
 #else
+    {"cuda_resident_bridge_version", 0},
         {"cuda_compiled", false}
 #endif
     }.dump();
@@ -1450,6 +1429,31 @@ MCSIM_EXPORT int mcsim_observe(void* handle, float* observations) {
         batch.profileEnd(Observe, start);
     });
 }
+MCSIM_EXPORT int mcsim_bridge_match_features(void* handle, int version, float* output, std::size_t count) {
+    return protect([&] {
+        if (!handle || !output) throw std::invalid_argument("Null Bridge match feature argument");
+        const auto& batch = *static_cast<TrainingBatch*>(handle);
+        batch.requireHostState();
+        if (!batch.bridge_enabled || (version != 1 && version != 2)) {
+            throw std::invalid_argument("Unsupported Bridge match feature version or batch");
+        }
+        const auto features = version == 1 ? bridge_match_feature_count_v1 : bridge_match_feature_count_v2;
+        if (count != batch.players.size() * std::size_t(features)) {
+            throw std::invalid_argument("Invalid Bridge match feature buffer size");
+        }
+        std::vector<float> encoded(count);
+        for (std::size_t index = 0; index < batch.players.size(); ++index) {
+            const auto world = index / 2;
+            const int player = static_cast<int>(index % 2);
+            float* row = encoded.data() + index * features;
+            const bool valid = version == 1
+                ? bridgeMatchFeaturesV1(batch.bridge_rules, batch.bridge_states[world], player, row)
+                : bridgeMatchFeaturesV2(batch.players[index], batch.bridge_rules, batch.bridge_states[world], player, row);
+            if (!valid) throw std::runtime_error("Invalid Bridge match feature snapshot");
+        }
+        std::copy(encoded.begin(), encoded.end(), output);
+    });
+}
 MCSIM_EXPORT int mcsim_bridge_local_voxels(void* handle, std::uint8_t* output, std::size_t count) {
     return protect([&] {
         if (!handle || !output) throw std::invalid_argument("Null Bridge local voxel argument");
@@ -1638,6 +1642,33 @@ MCSIM_EXPORT int mcsim_register_cuda_step_outputs(void* handle, float* rewards, 
         static_cast<void>(contributions);
         static_cast<void>(worlds);
         throw std::invalid_argument("CUDA resident stepping requires a CUDA-enabled library");
+#endif
+    });
+}
+MCSIM_EXPORT int mcsim_register_cuda_bridge_buffers(void* handle, float* match, std::size_t match_count,
+                                                    std::uint8_t* voxels, std::size_t voxel_count,
+                                                    std::uint8_t* scored, std::size_t scored_count,
+                                                    double* task_terms, std::size_t task_count, int match_version) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null resident Bridge handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (!batch.bridge_enabled || !batch.gpu || !batch.gpu_resident_configured) {
+            throw std::invalid_argument("Prepare CUDA resident Bridge stepping first");
+        }
+        batch.gpu->registerBridgeBuffers(match, match_count, voxels, voxel_count, scored, scored_count,
+                                          task_terms, task_count, match_version);
+#else
+        static_cast<void>(match);
+        static_cast<void>(match_count);
+        static_cast<void>(voxels);
+        static_cast<void>(voxel_count);
+        static_cast<void>(scored);
+        static_cast<void>(scored_count);
+        static_cast<void>(task_terms);
+        static_cast<void>(task_count);
+        static_cast<void>(match_version);
+        throw std::invalid_argument("CUDA resident Bridge stepping requires a CUDA-enabled library");
 #endif
     });
 }

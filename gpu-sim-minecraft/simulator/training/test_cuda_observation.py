@@ -1,4 +1,5 @@
 import ctypes
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 import gc
 import json
@@ -12,7 +13,7 @@ import weakref
 import numpy as np
 import torch
 
-from simulator.training.contract import FEATURES
+from simulator.training.contract import FEATURES, bridge_observation_descriptor
 from simulator.training.environment import Environment, REWARD_NAMES, ROOT
 
 
@@ -104,6 +105,41 @@ class CUDAObservationChecks(unittest.TestCase):
             environment.register_cuda_observations()
         output = environment.observe_cuda_async()
         np.testing.assert_allclose(output.cpu().numpy(), expected, rtol=0, atol=1e-6)
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+                         and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_bridge_caged_aim_matches_cpu_and_cuda(self):
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        for player in scene["players"]:
+            player["yaw"] = 0
+            player["pitch"] = 0
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword"],
+                                 "selected": 0, "arrows": 0, "offhand": "minecraft:air"}
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "yaw", "values": [0, 20, -30]},
+                                {"name": "pitch", "values": [0, 5, -6]}]}
+        kit = {"slots": ["sword"], "blocks": 0, "golden_apples": 0}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, -2.9], "max": [1, 3, -2.4]},
+                            {"min": [0, 1, 2.4], "max": [1, 3, 2.9]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 2,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "kits": [kit, kit], "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge-caged-aim.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            with Environment(1, device="cpu", environment=path, contract=contract, max_ticks=100,
+                             bridge=bridge, library=os.environ["MCSIM_TEST_CPU_LIBRARY"]) as cpu, \
+                    Environment(1, device="cuda", environment=path, contract=contract, max_ticks=100,
+                                bridge=bridge, library=os.environ["MCSIM_TEST_CUDA_LIBRARY"]) as cuda:
+                actions = np.array([[[1, 1], [2, 2]]], dtype=np.int32)
+                cpu.step(actions)
+                cuda.step(actions)
+                expected = np.array([[[20.0, 5.0], [-30.0, -6.0]]])
+                np.testing.assert_array_equal(cpu.actor_task_state()[:, :, 3:5], expected)
+                np.testing.assert_array_equal(cuda.actor_task_state()[:, :, 3:5], expected)
 
     @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
                          and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
@@ -548,6 +584,185 @@ class CUDAObservationChecks(unittest.TestCase):
                 environment.register_cuda_observations()
             with self.assertRaisesRegex(RuntimeError, "Register a CUDA observation buffer"):
                 environment.observe_cuda_async()
+
+    def test_resident_bridge_requires_portable_descriptor_and_capability(self):
+        with Environment(1, library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+            with mock.patch.object(environment, "bridge", {}):
+                with self.assertRaisesRegex(ValueError, "portable observation descriptor"):
+                    environment.register_cuda_resident(bridge_observation_descriptor(2))
+                with self.assertRaisesRegex(RuntimeError, "not implemented"):
+                    environment.register_cuda_resident(bridge_observation_descriptor(3))
+                self.assertIsNone(environment._cuda_resident_buffers)
+                self.assertFalse(environment._cuda_resident_ready)
+
+    def test_resident_bridge_observation_status_is_reported(self):
+        with Environment(1, library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+            def status(_handle, pointer):
+                ctypes.cast(pointer, ctypes.POINTER(ctypes.c_int))[0] = 8
+                return 0
+
+            function = mock.Mock(side_effect=status)
+            with mock.patch.object(environment, "_cuda_actions", object()), \
+                 mock.patch.object(environment, "_cuda_action_device", "cuda"), \
+                 mock.patch.object(environment.native, "mcsim_cuda_action_status", function), \
+                 mock.patch.object(torch.cuda, "device", return_value=nullcontext()):
+                with self.assertRaisesRegex(ValueError, "Invalid CUDA Bridge observation"):
+                    environment.wait_cuda_actions()
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+                         and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_bridge_adapter_matches_cpu_through_reset(self):
+        from simulator.training.research import bridge_observation_inputs
+
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1,
+                    "observations": [{"feature": "relative.z"}, {"feature": "self.health_fraction"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "forward"]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, -2.9], "max": [1, 3, -2.4]},
+                            {"min": [0, 1, 2.4], "max": [1, 3, 2.9]}],
+                  "void_y": -2, "match": {"goals_to_win": 1, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3,
+                                   "opponent_score": -1, "toward": 0.25, "away": 0.1}}
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["players"][0]["position"][2] = 2.0
+        scene["players"][1]["position"][0] = -1.5
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "resident-bridge.json"
+        path.write_text(json.dumps(scene), encoding="utf-8")
+        descriptor = bridge_observation_descriptor(3)
+        options = {"environment": path, "contract": contract, "max_ticks": 20, "seed": 7, "bridge": bridge}
+        with Environment(2, device="cpu", library=os.environ["MCSIM_TEST_CPU_LIBRARY"], **options) as cpu, \
+             Environment(2, device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"], **options) as cuda:
+            cuda.register_cuda_observations()
+            actions = cuda.register_cuda_actions()
+            outputs = cuda.register_cuda_resident(descriptor)
+            stream = torch.cuda.Stream()
+
+            def compare(actual, scalar):
+                expected = bridge_observation_inputs(cpu, scalar, descriptor)
+                for name in expected:
+                    np.testing.assert_allclose(actual[name].cpu().numpy(), expected[name], rtol=0, atol=1e-6)
+
+            compare(cuda.observe_cuda_async(), cpu.observe())
+            host_actions = np.zeros((2, 2, 1), dtype=np.int32)
+            host_actions[0, 0, 0] = 1
+            saw_termination = False
+            for _ in range(20):
+                expected, rewards, terminated, truncated = cpu.step(host_actions)
+                states = cpu.bridge_state()
+                terms = cpu.bridge_reward_terms()
+                losses = cpu.losses(np.ones(2, dtype=bool))
+                with torch.cuda.stream(stream):
+                    actions.copy_(torch.as_tensor(host_actions, device=actions.device))
+                    actual, step_outputs = cuda.step_cuda_resident_async()
+                    captured = {name: value.clone() for name, value in step_outputs.items() if name != "reset_mask"}
+                    final = {name: value.clone() for name, value in actual.items()}
+                stream.synchronize()
+                cuda.wait_cuda_actions()
+                compare(final, expected)
+                np.testing.assert_allclose(captured["rewards"].cpu().numpy(), rewards, rtol=0, atol=1e-6)
+                np.testing.assert_array_equal(captured["terminated"].cpu().numpy(), terminated)
+                np.testing.assert_array_equal(captured["truncated"].cpu().numpy(), truncated)
+                np.testing.assert_array_equal(captured["losses"].cpu().numpy(), losses)
+                np.testing.assert_array_equal(captured["bridge_scored"].cpu().numpy(),
+                                              [state["scored"] for state in states])
+                np.testing.assert_allclose(captured["bridge_reward_terms"].cpu().numpy(), terms, rtol=0, atol=1e-6)
+                done = terminated | truncated
+                if done.any():
+                    saw_termination |= bool(terminated.any())
+                    reset_expected = cpu.reset(done)
+                    with torch.cuda.stream(stream):
+                        outputs["reset_mask"].copy_(torch.as_tensor(done, device=actions.device, dtype=torch.uint8))
+                        reset = {name: value.clone() for name, value in cuda.reset_cuda_resident_async().items()}
+                    stream.synchronize()
+                    cuda.wait_cuda_actions()
+                    compare(reset, reset_expected)
+            self.assertTrue(saw_termination)
+            observations = cuda.observe_cuda_async()
+            observations["match"] = torch.empty_like(observations["match"])
+            with self.assertRaisesRegex(RuntimeError, "Bridge observations changed"):
+                cuda.step_cuda_resident_async()
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+                         and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA, MCSIM_TEST_CPU_LIBRARY and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_bridge_building_and_items_match_cpu(self):
+        from simulator.training.research import bridge_observation_inputs
+
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["blocks"].append({"from": [0, 2, 1], "to": [0, 2, 1], "block": "minecraft:stone"})
+        scene["players"][1]["position"][0] = -2.5
+        scene["players"][0]["health"] = 10
+        for player in scene["players"]:
+            player["velocity"][1] = -0.0784000015258789
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air", "minecraft:air",
+                                             "minecraft:air"],
+                                 "selected": 1, "arrows": 0, "offhand": "minecraft:air"}
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "arena.ray_world_0"},
+                                                             {"feature": "self.health_fraction"}],
+                    "actions": [{"name": "weapon", "values": [0, 1, 2, 3]},
+                                {"name": "use_item", "values": [False, True]},
+                                {"name": "attack", "values": [False, True]}]}
+        kit = {"slots": ["sword", "blocks", "pickaxe", "golden_apple"], "blocks": 4, "golden_apples": 2}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+                  "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "kits": [kit, kit], "task_rewards": {"score": 2, "win": 5, "loss": -3},
+                  "building": {"zones": [{"min": [-3, 0, -3], "max": [4, 4, 4]}],
+                               "block_range": 4.5, "entity_range": 3.0,
+                               "hardness": 1.0, "mining_speed": 15.0, "correct_tool": True}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "resident-building.json"
+            path.write_text(json.dumps(scene))
+            options = {"environment": path, "contract": contract, "max_ticks": 100, "seed": 7, "bridge": bridge}
+            with Environment(2, device="cpu", library=os.environ["MCSIM_TEST_CPU_LIBRARY"], **options) as cpu, \
+                 Environment(2, device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"], **options) as cuda:
+                descriptor = bridge_observation_descriptor(3)
+                cuda.register_cuda_observations()
+                actions = cuda.register_cuda_actions()
+                outputs = cuda.register_cuda_resident(descriptor)
+                host_actions = np.zeros((2, 2, 3), dtype=np.int32)
+
+                def compare(actual, scalar):
+                    expected = bridge_observation_inputs(cpu, scalar, descriptor)
+                    for name in expected:
+                        np.testing.assert_allclose(actual[name].cpu().numpy(), expected[name], rtol=0, atol=1e-6)
+
+                def step():
+                    scalar, rewards, terminated, truncated = cpu.step(host_actions)
+                    actions.copy_(torch.as_tensor(host_actions, device=actions.device))
+                    actual, step_outputs = cuda.step_cuda_resident_async()
+                    cuda.wait_cuda_actions()
+                    compare(actual, scalar)
+                    np.testing.assert_allclose(step_outputs["rewards"].cpu().numpy(), rewards, rtol=0, atol=1e-6)
+                    self.assertFalse(terminated.any() or truncated.any())
+                    return cpu.bridge_state()
+
+                host_actions[0, 0] = [1, 1, 0]
+                self.assertTrue(step()[0]["placed"][0])
+                mask = np.array([False, True])
+                scalar = cpu.reset(mask)
+                outputs["reset_mask"].copy_(torch.as_tensor(mask, device=actions.device, dtype=torch.uint8))
+                compare(cuda.reset_cuda_resident_async(), scalar)
+                host_actions[0, 0] = [2, 0, 1]
+                for _ in range(3):
+                    states = step()
+                self.assertTrue(states[0]["broke"][0])
+                host_actions[0, 0] = [3, 1, 0]
+                for _ in range(35):
+                    step()
+                self.assertEqual(cpu.bridge_kits(0)[0]["golden_apples"], 1)
+                mask = np.array([True, False])
+                scalar = cpu.reset(mask)
+                outputs["reset_mask"].copy_(torch.as_tensor(mask, device=actions.device, dtype=torch.uint8))
+                compare(cuda.reset_cuda_resident_async(), scalar)
 
     @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
                          "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
@@ -1013,6 +1228,12 @@ class CUDAResidentChecks(unittest.TestCase):
             self.assertEqual(read(environment._handle, after.ctypes.data, 2), -1)
             expected = torch.tensor([0, -9223372036854775808, -1], dtype=torch.int64)
             environment.set_cuda_reset_episodes(expected)
+            torch.testing.assert_close(environment.cuda_reset_episodes(), expected)
+            buffers["reset_mask"].copy_(torch.tensor([1, 0, 1], device="cuda", dtype=torch.uint8))
+            environment.reset_cuda_resident_async()
+            with self.assertRaisesRegex(ValueError, "episode counter cannot be incremented"):
+                environment.wait_cuda_actions()
+            environment.clear_cuda_action_status()
             torch.testing.assert_close(environment.cuda_reset_episodes(), expected)
             with self.assertRaisesRegex(ValueError, "one entry per world"):
                 environment.set_cuda_reset_episodes(torch.zeros(2, dtype=torch.int64))

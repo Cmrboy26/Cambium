@@ -70,6 +70,141 @@ void checkObjectiveProgress() {
     near(delta.toward, 2, 1e-12, "new objective progress");
 }
 
+void checkBridgeRewards() {
+    using namespace minecraft_sim;
+    PlayerState players[2]{};
+    WorldState world{};
+    BridgeMatchRules rules;
+    rules.goals_to_win = 1;
+    rules.max_ticks = 100;
+    BridgeMatchState match;
+    match.ticks = 100;
+    match.scores[0] = 1;
+    BridgeTickEvents events;
+    events.scored[0] = true;
+    events.died[1] = true;
+    events.attacks[0].health_lost = 4;
+    events.terminated = true;
+    events.outcome = BridgeOutcome::team0;
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 100;
+    settings.weights[0] = 20;
+    settings.weights[1] = -20;
+    settings.weights[3] = -3;
+    settings.weights[4] = -4;
+    settings.weights[5] = -2;
+    app::BridgeTaskRewardSettings task{2, -1, 0.25F, 0.1F};
+    app::DuelRewardState reward_state;
+    ObjectiveProgress objectives[2];
+    for (auto& objective : objectives) objective.reset({}, {0, 0, 10});
+    const auto winning = app::bridgeRewards(players, world, {}, rules, match, events, settings, task,
+                                             10, -5, reward_state, objectives);
+    require(winning.shared.terminated && !winning.shared.truncated, "bridge win takes precedence over cutoff");
+    require(!winning.shared.lost[0] && winning.shared.lost[1], "bridge team0 win marks team1 loss");
+    near(winning.rewards[0], 16, 1e-6, "bridge winner reward");
+    near(winning.rewards[1], -13, 1e-6, "bridge loser reward");
+    near(winning.shared.contributions[1][3], -3, 1e-6, "bridge death contribution");
+    require(reward_state.dealt_damage[0] && !reward_state.dealt_damage[1], "bridge damage state survives tick");
+
+    events.outcome = BridgeOutcome::team1;
+    const auto opposite_win = app::bridgeRewards(players, world, {}, rules, match, events, settings, task,
+                                                  10, -5, reward_state, objectives);
+    require(opposite_win.shared.lost[0] && !opposite_win.shared.lost[1], "bridge team1 win marks team0 loss");
+
+    events = BridgeTickEvents{};
+    match.scores[0] = 0;
+    match.ticks = 20;
+    settings.max_ticks = 20;
+    const auto cutoff = app::bridgeRewards(players, world, {}, rules, match, events, settings, task,
+                                            10, -5, reward_state, objectives);
+    require(!cutoff.shared.terminated && cutoff.shared.truncated, "bridge external cutoff truncates");
+    require(!cutoff.shared.lost[0] && !cutoff.shared.lost[1], "bridge truncation has no match loser");
+    near(cutoff.rewards[0], -4, 1e-6, "bridge timeout after damage");
+    near(cutoff.rewards[1], -6, 1e-6, "bridge timeout without damage");
+
+    events.terminated = true;
+    events.outcome = BridgeOutcome::draw;
+    match.ticks = 100;
+    const auto draw = app::bridgeRewards(players, world, {}, rules, match, events, settings, task,
+                                          10, -5, reward_state, objectives);
+    require(draw.shared.terminated && !draw.shared.truncated, "bridge match clock ends as termination");
+    require(!draw.shared.lost[0] && !draw.shared.lost[1], "bridge draw has no match loser");
+    near(draw.rewards[0], -4, 1e-6, "bridge draw timeout after damage");
+    near(draw.rewards[1], -6, 1e-6, "bridge draw timeout without damage");
+}
+
+void checkBridgeMatchFeatures() {
+    using namespace minecraft_sim;
+    BridgeMatchRules rules;
+    rules.goals_to_win = 4;
+    rules.max_ticks = 100;
+    rules.cage_ticks = 20;
+    rules.arrow_refill_ticks = 8;
+    BridgeMatchState state;
+    state.scores[0] = 3;
+    state.scores[1] = 1;
+    state.ticks = 25;
+    state.cage_remaining = 5;
+    state.kits[0].blocks = 32;
+    state.kits[0].golden_apples = 16;
+    state.kits[0].arrows = 1;
+    state.kits[0].arrow_refill_elapsed = 4;
+    state.kits[0].selected_slot = 6;
+    state.kits[1].blocks = 8;
+    float features[bridge_match_feature_count_v1]{};
+    require(bridgeMatchFeaturesV1(rules, state, 0, features), "encode bridge match features");
+    const float expected[bridge_match_feature_count_v1]{0.75F, 0.25F, 0.75F, 0.25F, 0.5F,
+                                                        0.25F, 1.0F / 64, 0.5F, 1.0F, 0.75F};
+    for (int index = 0; index < bridge_match_feature_count_v1; ++index) {
+        near(features[index], expected[index], 1e-7, "bridge match feature value");
+    }
+    rules.cage_ticks = 0;
+    rules.arrow_refill_ticks = 0;
+    state.cage_remaining = 0;
+    state.ticks = 110;
+    require(bridgeMatchFeaturesV1(rules, state, 1, features), "encode opposite bridge seat");
+    near(features[0], 0.25, 1e-7, "opposite own score");
+    near(features[1], 0.75, 1e-7, "opposite opponent score");
+    near(features[2], 0, 1e-7, "expired bridge clock");
+    near(features[4], 0.125, 1e-7, "opposite block count");
+    near(features[8], 0, 1e-7, "disabled arrow refill");
+    require(!bridgeMatchFeaturesV1(rules, state, 2, features), "reject invalid bridge seat");
+    rules.goals_to_win = 0;
+    require(!bridgeMatchFeaturesV1(rules, state, 0, features), "reject invalid bridge goal limit");
+}
+
+void checkBridgeMatchFeaturesV2() {
+    using namespace minecraft_sim;
+    BridgeMatchRules rules;
+    rules.goals[1] = {{9, -1, -1}, {11, 1, 1}};
+    BridgeMatchState state;
+    state.kits[0].building.break_progress = 0.5F;
+    state.kits[0].building.use_delay = 2;
+    state.kits[0].building.break_delay = 5;
+    PlayerState actor;
+    actor.golden_apple_use_ticks = 16;
+    actor.yaw = 90;
+    actor.pitch = 45;
+    float features[bridge_match_feature_count_v2]{};
+    require(bridgeMatchFeaturesV2(actor, rules, state, 0, features), "encode v2 bridge features");
+    near(features[10], 0.5, 1e-7, "bridge eating progress");
+    near(features[11], 0.5, 1e-7, "bridge mining progress");
+    near(features[12], -1, 1e-7, "bridge objective yaw wrap");
+    near(features[13], -0.5, 1e-7, "bridge objective pitch");
+    near(features[14], 0.2, 1e-7, "bridge objective distance");
+    near(features[15], 0.5, 1e-7, "bridge use delay");
+    near(features[16], 1, 1e-7, "bridge mining delay");
+    actor.position = {10, 0, 0};
+    require(bridgeMatchFeaturesV2(actor, rules, state, 0, features), "encode zero-distance objective");
+    near(features[12], 0, 1e-7, "zero-distance objective yaw");
+    near(features[13], 0, 1e-7, "zero-distance objective pitch");
+    near(features[14], 0, 1e-7, "zero-distance objective distance");
+    state.kits[0].building.use_delay = 5;
+    features[0] = 123;
+    require(!bridgeMatchFeaturesV2(actor, rules, state, 0, features), "reject invalid bridge item delay");
+    near(features[0], 123, 0, "invalid bridge features leave output untouched");
+}
+
 void checkBridgeTerrainGeneration() {
     using namespace minecraft_sim;
     std::array<Block, 7 * 3 * 12> base{};
@@ -2453,6 +2588,9 @@ int main(int argc, char** argv) {
         checkBridgeLocalVoxels();
         checkBridgeTerrainGeneration();
         checkObjectiveProgress();
+        checkBridgeRewards();
+        checkBridgeMatchFeatures();
+        checkBridgeMatchFeaturesV2();
         checkCompositeWorldConsumers();
         checkPolicyFixtures();
         checkEquipmentObservation();

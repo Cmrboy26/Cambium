@@ -68,7 +68,7 @@ def bridge_observation_inputs(environment, scalar, descriptor=None, states=None)
                 kit["arrow_refill_elapsed"] / max(1, match["arrow_refill_ticks"]),
                 float(match["arrow_refill_ticks"] > 0), kit["selected_slot"] / 8,
             )
-    if version == 2:
+    if version >= 2:
         goals = environment.bridge["goals"]
         targets = np.asarray([(np.asarray(goals[1 - player]["min"]) + goals[1 - player]["max"]) / 2
                               for player in (0, 1)], dtype=np.float64)
@@ -138,8 +138,11 @@ def resident_unsupported(plan, device):
         return "CUDA resident collection requires --device cuda"
     for stage in plan["stages"]:
         scenario = stage["scenario"]
-        if scenario.get("bridge") is not None:
-            return f"Stage {stage['name']!r} uses Bridge, which requires host collection"
+        bridge = scenario.get("bridge") is not None
+        if bridge:
+            descriptor = plan.get("bridge_observation")
+            if descriptor is None or validate_bridge_observation_descriptor(descriptor)["version"] != 3:
+                return f"Stage {stage['name']!r} requires a portable Bridge observation descriptor"
         if len(scenario["arenas"]) != 1:
             return f"Stage {stage['name']!r} has multiple arenas"
         for component in ("spawns", "equipment"):
@@ -147,8 +150,12 @@ def resident_unsupported(plan, device):
                 return f"Stage {stage['name']!r} has per-episode {component} sampling"
         for entry in stage["opponents"]:
             definition = plan["opponents"][entry["id"]]
-            if not (definition["type"] == "self_play" or
-                    definition["type"] == "scripted" and definition.get("controller") == "stationary_target"):
+            supported = (definition["type"] == "self_play" or
+                         definition["type"] == "scripted" and definition.get("controller") == "stationary_target")
+            if bridge:
+                supported = (supported or definition["type"] in ("checkpoint", "frozen_self_play") or
+                             definition["type"] == "scripted" and definition.get("controller") == "bridge_fixed_lane")
+            if not supported:
                 return f"Stage {stage['name']!r} has unsupported opponent {entry['id']!r}"
     return None
 
@@ -600,6 +607,26 @@ class ResidentFixedLane:
         return actions, valid
 
 
+def _resident_bridge_observations(model, observations, count, device):
+    if set(observations) != {"scalar", "match", "voxels"}:
+        raise ValueError("Resident Bridge observations require scalar, match and voxels")
+    shapes = {"scalar": (count, 2, model.observation_dim),
+              "match": (count, 2, model.match_dim), "voxels": (count, 2, 5, 9, 9)}
+    dtypes = {"scalar": torch.float32, "match": torch.float32, "voxels": torch.uint8}
+    for name, value in observations.items():
+        if (not isinstance(value, torch.Tensor) or value.shape != shapes[name]
+                or value.dtype != dtypes[name] or value.device != device):
+            raise ValueError(f"Invalid resident Bridge {name} observation buffer")
+    scalar_finite = torch.isfinite(observations["scalar"])
+    match_finite = torch.isfinite(observations["match"])
+    valid = (scalar_finite.all(dim=(1, 2)) & match_finite.all(dim=(1, 2))
+             & (observations["voxels"] < 5).all(dim=(1, 2, 3, 4)))
+    safe = {"scalar": torch.where(scalar_finite, observations["scalar"], 0),
+            "match": torch.where(match_finite, observations["match"], 0),
+            "voxels": observations["voxels"].clamp(max=4)}
+    return safe, valid
+
+
 class ResidentOpponentPool:
     def __init__(self, pool, device, seed):
         if not pool.mixture:
@@ -678,16 +705,24 @@ class ResidentOpponentPool:
 
     def act(self, model, observations, action_names, fixed):
         slots = self.learner_slots
-        current = observations[self.indices, slots]
-        other = observations[self.indices, 1 - slots]
+        if isinstance(observations, dict):
+            safe, input_valid = _resident_bridge_observations(model, observations, self.count, self.device)
+            current = {name: value[self.indices, slots] for name, value in safe.items()}
+            other = {name: value[self.indices, 1 - slots] for name, value in safe.items()}
+            other_scalar = other["scalar"]
+        else:
+            current = observations[self.indices, slots]
+            other = observations[self.indices, 1 - slots]
+            other_scalar = other
+            input_valid = torch.isfinite(observations).all(dim=(1, 2))
         learner, log_probs, values, valid = resident_policy_actions(
             model, current, action_names, fixed, self.learner_rng)
-        valid = valid & torch.isfinite(observations).all(dim=(1, 2))
+        valid = valid & input_valid
         opponent = torch.zeros_like(learner)
         for index, controller, neutral in self.controllers:
             selected = self.assignments == index
             if index in self.lanes:
-                actions, opponent_valid = self.lanes[index].act(other, selected)
+                actions, opponent_valid = self.lanes[index].act(other_scalar, selected)
                 valid = valid & (~selected | opponent_valid)
             elif index in self.frozen:
                 actions = torch.zeros_like(learner)
@@ -730,7 +765,7 @@ class ResidentOpponentPool:
 
 
 class ResidentCollector:
-    def __init__(self, worlds, pool, seed):
+    def __init__(self, worlds, pool, seed, bridge_descriptor=None):
         if worlds.device != "cuda" or len(worlds.groups) != 1 or len(worlds.sampler.scenario["arenas"]) != 1:
             raise ValueError("Resident rollout requires one CUDA arena batch")
         for component in ("spawns", "equipment"):
@@ -747,7 +782,8 @@ class ResidentCollector:
         self.lengths = torch.zeros(worlds.count, dtype=torch.int64, device=self.device)
         environment.register_cuda_observations()
         self.actions = environment.register_cuda_actions()
-        self.buffers = environment.register_cuda_resident()
+        self.buffers = (environment.register_cuda_resident(bridge_descriptor) if bridge_descriptor is not None
+                else environment.register_cuda_resident())
         self.observations = environment.observe_cuda_async()
         self.pool.reset(torch.ones(worlds.count, dtype=torch.bool, device=self.device))
 
@@ -763,7 +799,11 @@ class ResidentCollector:
         rollout = {name: torch.empty(shape, dtype=torch.bool if name in ("terminated", "truncated")
                                     else torch.float32, device=self.device)
                    for name in ("log_probs", "values", "next_values", "rewards", "terminated", "truncated")}
-        rollout["observations"] = torch.empty((*shape, worlds.observation_dim), device=self.device)
+        if isinstance(self.observations, dict):
+            rollout["observations"] = {
+                name: value.new_empty((*shape, *value.shape[2:])) for name, value in self.observations.items()}
+        else:
+            rollout["observations"] = torch.empty((*shape, worlds.observation_dim), device=self.device)
         rollout["actions"] = torch.empty((*shape, worlds.action_count), dtype=torch.long, device=self.device)
         rollout["fixed_actions"] = fixed.copy()
         event_returns = torch.empty(shape, dtype=torch.float64, device=self.device)
@@ -772,13 +812,22 @@ class ResidentCollector:
         event_opponents = torch.empty(shape, dtype=torch.long, device=self.device)
         event_slots = torch.empty(shape, dtype=torch.long, device=self.device)
         reward_totals = torch.zeros(len(REWARD_NAMES), dtype=torch.float64, device=self.device)
+        bridge = isinstance(self.observations, dict)
+        if bridge:
+            bridge_goals = torch.zeros(2, dtype=torch.int64, device=self.device)
+            bridge_task_totals = torch.zeros(4, dtype=torch.float64, device=self.device)
+            bridge_outcomes = dict.fromkeys(("win", "loss", "draw"), 0)
         valid = torch.ones((), dtype=torch.bool, device=self.device)
         for step in range(steps):
             with timer.phase("learner_opponent_inference", cuda=True):
                 current, actions, log_probs, values, combined, finite = pool.act(
                     model, self.observations, worlds.action_names, fixed)
                 valid &= finite.all() & torch.isfinite(log_probs).all()
-                rollout["observations"][step].copy_(current)
+                if isinstance(current, dict):
+                    for name, value in current.items():
+                        rollout["observations"][name][step].copy_(value)
+                else:
+                    rollout["observations"][step].copy_(current)
                 rollout["actions"][step].copy_(actions)
                 rollout["log_probs"][step].copy_(log_probs)
                 rollout["values"][step].copy_(values)
@@ -790,15 +839,37 @@ class ResidentCollector:
                 terminated = outputs["terminated"].bool()
                 truncated = outputs["truncated"].bool()
                 done = terminated | truncated
-                _, next_values = model(final[pool.indices, slots])
+                if isinstance(final, dict):
+                    safe_final, final_valid = _resident_bridge_observations(model, final, worlds.count, self.device)
+                    valid &= final_valid.all()
+                    next_inputs = {name: value[pool.indices, slots] for name, value in safe_final.items()}
+                else:
+                    valid &= torch.isfinite(final).all()
+                    next_inputs = final[pool.indices, slots]
+                _, next_values = model(next_inputs)
                 next_finite = torch.isfinite(next_values)
-                valid &= (next_finite.all() & torch.isfinite(final).all() & torch.isfinite(rewards).all()
+                valid &= (next_finite.all() & torch.isfinite(rewards).all()
                           & torch.isfinite(outputs["contributions"]).all())
                 rollout["next_values"][step].copy_(torch.where(next_finite, next_values, 0))
                 rollout["rewards"][step].copy_(rewards)
                 rollout["terminated"][step].copy_(terminated)
                 rollout["truncated"][step].copy_(truncated)
                 reward_totals += outputs["contributions"][pool.indices, slots].sum(dim=0)
+                if bridge:
+                    scored = outputs.get("bridge_scored")
+                    task_terms = outputs.get("bridge_reward_terms")
+                    if (not isinstance(scored, torch.Tensor) or scored.shape != (worlds.count, 2)
+                            or scored.dtype != torch.uint8 or scored.device != self.device):
+                        raise ValueError("Invalid resident Bridge scored buffer")
+                    if (not isinstance(task_terms, torch.Tensor) or task_terms.shape != (worlds.count, 2, 4)
+                            or task_terms.dtype != torch.float64 or task_terms.device != self.device):
+                        raise ValueError("Invalid resident Bridge reward terms buffer")
+                    valid &= (scored <= 1).all() & torch.isfinite(task_terms).all()
+                    valid &= ((outputs["losses"] <= 1).all() & (outputs["losses"].sum(dim=1) <= 1).all()
+                              & ((outputs["losses"] == 0) | terminated.unsqueeze(1)).all())
+                    bridge_goals += torch.stack((scored[pool.indices, slots].sum(),
+                                                 scored[pool.indices, 1 - slots].sum()))
+                    bridge_task_totals += task_terms[pool.indices, slots].sum(dim=0)
             with timer.phase("episode_bookkeeping", cuda=True):
                 self.returns += rewards.to(torch.float64)
                 self.lengths += 1
@@ -819,7 +890,7 @@ class ResidentCollector:
             valid &= torch.isfinite(rollout["advantages"]).all() & torch.isfinite(rollout["returns"]).all()
         self.environment.wait_cuda_actions()
         if not valid.item():
-            raise ValueError("Resident rollout encountered invalid observations, rewards or policy outputs")
+            raise ValueError("Resident rollout encountered invalid observations, rewards or nonfinite policy outputs")
         terminated = rollout["terminated"].cpu().numpy()
         truncated = rollout["truncated"].cpu().numpy()
         returns, lengths = event_returns.cpu().numpy(), event_lengths.cpu().numpy()
@@ -831,11 +902,21 @@ class ResidentCollector:
                        else "loss" if loss[slot] else "win")
             episode = {"return": float(returns[step, world]), "length": int(lengths[step, world]),
                        "outcome": outcome, "opponent": pool.names[int(opponents[step, world])]}
+            if bridge and outcome != "timeout":
+                bridge_outcomes[outcome] += 1
             metrics = worlds.episode_metrics
             metrics.history.append(episode)
             metrics.accumulate(metrics.rollout_totals, episode)
             metrics.accumulate(metrics.opponent_totals.setdefault(episode["opponent"], {}), episode)
         rollout["reward_types"] = dict(zip(REWARD_NAMES, reward_totals.cpu().tolist()))
+        if bridge:
+            goals_for, goals_against = bridge_goals.cpu().tolist()
+            rollout["bridge_events"] = {
+                "bridge_goals_for": goals_for, "bridge_goals_against": goals_against,
+                "bridge_wins": bridge_outcomes["win"], "bridge_losses": bridge_outcomes["loss"],
+                "bridge_draws": bridge_outcomes["draw"],
+                **dict(zip(("bridge_reward_score", "bridge_reward_opponent_score",
+                            "bridge_reward_toward", "bridge_reward_away"), bridge_task_totals.cpu().tolist()))}
         rollout["episode_metrics"] = {**worlds.episode_metrics.snapshot(),
                                       "training_rollout": worlds.episode_metrics.rollout_snapshot()}
         pool.pool.assignments[:] = pool.assignments.cpu().numpy()
@@ -1473,7 +1554,8 @@ def run(options, checkpoint=None):
     try:
         if rollout_backend == "cuda-resident" and any(worlds.build_info.get(name) != 1 for name in (
             "cuda_async_observation_version", "cuda_action_decode_version", "cuda_resident_step_version",
-            "cuda_resident_episode_version")):
+            "cuda_resident_episode_version", *(() if worlds.bridge_scenario is None else
+                                               ("cuda_resident_bridge_version",)))):
             reason = "Native library lacks the required resident CUDA capabilities"
             if requested_backend == "cuda-resident":
                 raise ValueError(f"CUDA resident rollout unavailable: {reason}")
@@ -1523,7 +1605,7 @@ def run(options, checkpoint=None):
         worlds.episode_metrics = EpisodeMetrics(options.envs, saved.get("episode_history", ()))
         resident = None
         if rollout_backend == "cuda-resident":
-            resident = ResidentCollector(worlds, pool, plan["seed"] + stage_index)
+            resident = ResidentCollector(worlds, pool, plan["seed"] + stage_index, descriptor)
             if checkpoint is not None:
                 if "resident_rng" not in saved or "resident_episodes" not in saved:
                     raise ValueError("Resident checkpoint is missing sampler or native episode state")
@@ -1760,7 +1842,7 @@ def run(options, checkpoint=None):
                     stage = next_stage
                     pool.configure(stage["opponents"], stage["controls"])
                     if resident is not None:
-                        resident = ResidentCollector(worlds, pool, plan["seed"] + stage_index)
+                        resident = ResidentCollector(worlds, pool, plan["seed"] + stage_index, descriptor)
                         observations = resident.observations
                     else:
                         observations = worlds.observe()

@@ -1,4 +1,5 @@
 #include "minecraft_sim/cuda_backend.hpp"
+#include "minecraft_sim/bridge_observation.hpp"
 #include "minecraft_sim/projectiles.hpp"
 #include "minecraft_sim/terrain_budget.hpp"
 #include "../apps/actions.hpp"
@@ -242,6 +243,29 @@ __global__ void observeConfiguredEnvironments(BatchView batch, const app::Observ
     }
 }
 
+__global__ void observeBridgeEnvironments(BatchView batch, const BridgeMatchRules* rules,
+                                          const BridgeMatchState* matches, int match_version,
+                                          float* match_output, std::uint8_t* voxel_output, int* status) {
+    const auto index = blockIdx.x * blockDim.x + threadIdx.x;
+    const auto count = static_cast<unsigned int>(batch.environment_count * batch.players_per_environment);
+    if (index >= count || *status != 0) return;
+    const auto world = index / 2;
+    const int player = static_cast<int>(index % 2);
+    const int features = match_version == 1 ? bridge_match_feature_count_v1 : bridge_match_feature_count_v2;
+    auto* match = match_output + std::size_t(index) * features;
+    auto* voxels = voxel_output + std::size_t(index) * bridge_local_voxel_count;
+    const auto& actor = batch.players[index];
+    const bool match_valid = match_version == 1
+        ? bridgeMatchFeaturesV1(*rules, matches[world], player, match)
+        : bridgeMatchFeaturesV2(actor, *rules, matches[world], player, match);
+    const bool voxels_valid = bridgeLocalVoxels(batch.block_worlds[world], actor.position, actor.yaw, player, voxels);
+    if (!match_valid || !voxels_valid) {
+        for (int feature = 0; feature < features; ++feature) match[feature] = 0.0F;
+        for (int voxel = 0; voxel < bridge_local_voxel_count; ++voxel) voxels[voxel] = 0;
+        atomicOr(status, 8);
+    }
+}
+
 __global__ void evaluateDuelRewards(BatchView batch, const app::DuelRewardSettings* settings,
                                     app::DuelRewardState* states, app::DuelRewardStep* results,
                                     std::uint8_t* finished, const int* action_status) {
@@ -251,6 +275,29 @@ __global__ void evaluateDuelRewards(BatchView batch, const app::DuelRewardSettin
     results[index] = app::duelRewards(batch.players + std::size_t(index) * 2, batch.worlds[index], blocks,
                                       batch.projectile_states[index], *settings, states[index]);
     finished[index] = results[index].terminated || results[index].truncated;
+}
+
+__global__ void evaluateBridgeRewards(BatchView batch, const app::DuelRewardSettings* settings,
+                                      app::DuelRewardState* states, app::DuelRewardStep* results,
+                                      std::uint8_t* finished, const int* action_status,
+                                      const BridgeMatchRules* rules, const BridgeMatchState* matches,
+                                      const BridgeTickEvents* events, ObjectiveProgress* objectives,
+                                      app::BridgeTaskRewardSettings task_settings,
+                                      float win_reward, float loss_reward,
+                                      app::BridgeTaskRewardTerms* task_results) {
+    const auto index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= static_cast<unsigned int>(batch.environment_count) || (action_status && *action_status != 0)) return;
+    const auto offset = std::size_t(index) * 2;
+    const auto blocks = batch.block_worlds ? batch.block_worlds[index] : BlockWorldView{};
+    const auto result = app::bridgeRewards(batch.players + offset, batch.worlds[index], blocks,
+        *rules, matches[index], events[index], *settings, task_settings, win_reward, loss_reward,
+        states[index], objectives + offset);
+    results[index] = result.shared;
+    for (int player = 0; player < 2; ++player) {
+        results[index].rewards[player] = result.rewards[player];
+        task_results[offset + player] = result.task[player];
+    }
+    finished[index] = result.shared.terminated || result.shared.truncated;
 }
 
 __global__ void exportDuelRewards(BatchView batch, const app::DuelRewardStep* results, const int* action_status,
@@ -269,9 +316,23 @@ __global__ void exportDuelRewards(BatchView batch, const app::DuelRewardStep* re
     }
 }
 
-__global__ void validateResetMask(BatchView batch, const std::uint8_t* mask, int* status) {
+__global__ void exportBridgeRewards(BatchView batch, const BridgeTickEvents* events,
+                                    const app::BridgeTaskRewardTerms* task_results, const int* action_status,
+                                    std::uint8_t* scored, double* task_terms) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < static_cast<unsigned int>(batch.environment_count) && mask[index] > 1) atomicOr(status, 4);
+    if (index >= static_cast<unsigned int>(batch.environment_count) || *action_status != 0) return;
+    for (int player = 0; player < 2; ++player) {
+        const auto actor = std::size_t(index) * 2 + player;
+        scored[actor] = events[index].scored[player];
+        for (int term = 0; term < 4; ++term) task_terms[actor * 4 + term] = task_results[actor].values[term];
+    }
+}
+
+__global__ void validateResetMask(BatchView batch, const std::uint8_t* mask, const std::uint64_t* episodes, int* status) {
+    const auto index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= static_cast<unsigned int>(batch.environment_count)) return;
+    if (mask[index] > 1) atomicOr(status, 4);
+    else if (mask[index] && episodes[index] == ~std::uint64_t{0}) atomicOr(status, 16);
 }
 
 __global__ void resetFixedWorlds(BatchView batch, const std::uint8_t* mask,
@@ -280,7 +341,10 @@ __global__ void resetFixedWorlds(BatchView batch, const std::uint8_t* mask,
                                  app::ObservationActorMetadata* actors,
                                  std::uint64_t* episodes, std::uint64_t seed,
                                  app::DuelRewardState* reward_states, std::uint8_t* finished,
-                                 ArrowObservationSummary* summaries, const int* status) {
+                                 ArrowObservationSummary* summaries, const int* status,
+                                 const BridgeMatchRules* bridge_rules, BridgeMatchState* bridge_states,
+                                 BridgeTickEvents* bridge_events, ObjectiveProgress* bridge_objectives,
+                                 bool generate_terrain, BridgeTerrainGeneration terrain_generation) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= static_cast<unsigned int>(batch.environment_count) || *status != 0 || !mask[index]) return;
     if (batch.block_worlds) batch.block_worlds[index].resetPlacedBlocks(TerrainReset::match);
@@ -292,6 +356,11 @@ __global__ void resetFixedWorlds(BatchView batch, const std::uint8_t* mask,
         + episode * 1000033ULL);
     reward_states[index] = {};
     finished[index] = 0;
+    if (bridge_rules) {
+        bridge_states[index] = initialBridgeMatch(*bridge_rules);
+        bridge_states[index].episodes = episode + 1;
+        bridge_events[index] = {};
+    }
     for (int player = 0; player < batch.players_per_environment; ++player) {
         const auto actor = index * batch.players_per_environment + player;
         batch.players[actor] = initial_players[actor];
@@ -301,9 +370,20 @@ __global__ void resetFixedWorlds(BatchView batch, const std::uint8_t* mask,
         actors[actor] = initial_actors[actor];
         actors[actor].observed_opponent_disable = 0;
         batch.projectile_states[index].bows[player].ordinary_arrows = batch.players[actor].ordinary_arrow_count;
+        if (bridge_rules) {
+            resetBridgeKit(bridge_states[index], *bridge_rules, initial_players[actor], player);
+            const auto& goal = bridge_rules->goals[1 - player];
+            const Vec3 target{(goal.lower.x + goal.upper.x) / 2.0, (goal.lower.y + goal.upper.y) / 2.0,
+                              (goal.lower.z + goal.upper.z) / 2.0};
+            bridge_objectives[actor].reset(batch.players[actor].position, target);
+        }
         if (summaries) {
             summaries[actor] = summarizeArrowObservation(batch.players[actor], batch.projectile_states[index], player);
         }
+    }
+    if (generate_terrain) {
+        generateBridgeTerrain(batch.block_worlds[index], terrain_generation,
+                              bridgeTerrainSeed(batch.players[index * batch.players_per_environment].random.state));
     }
 }
 
@@ -393,10 +473,17 @@ struct CudaBatch::Storage {
     DeviceBuffer<app::DuelRewardState> reward_states;
     DeviceBuffer<app::DuelRewardStep> reward_results;
     DeviceBuffer<std::uint8_t> reward_finished;
+    DeviceBuffer<ObjectiveProgress> bridge_objectives;
+    DeviceBuffer<app::BridgeTaskRewardTerms> bridge_task_results;
+    app::BridgeTaskRewardSettings bridge_task_settings;
+    float bridge_win_reward = 0.0F;
+    float bridge_loss_reward = 0.0F;
     DeviceBuffer<PlayerState> fixed_reset_players;
     DeviceBuffer<app::ObservationActorMetadata> fixed_reset_actors;
     DeviceBuffer<std::uint64_t> fixed_reset_episodes;
     std::uint64_t fixed_reset_seed = 0;
+    bool fixed_reset_generate_terrain = false;
+    BridgeTerrainGeneration fixed_reset_terrain;
     DeviceBuffer<int> reset_ids;
     DeviceBuffer<PlayerState> reset_players;
     DeviceBuffer<Block> cells;
@@ -418,6 +505,11 @@ struct CudaBatch::Storage {
     std::uint8_t* registered_truncated = nullptr;
     std::uint8_t* registered_losses = nullptr;
     double* registered_contributions = nullptr;
+    float* registered_bridge_match = nullptr;
+    std::uint8_t* registered_bridge_voxels = nullptr;
+    std::uint8_t* registered_bridge_scored = nullptr;
+    double* registered_bridge_task_terms = nullptr;
+    int registered_bridge_match_version = 0;
     const std::uint8_t* registered_reset_mask = nullptr;
 
     ~Storage() {
@@ -702,6 +794,9 @@ void CudaBatch::decodeActionsOnStream(const std::int32_t* device_actions, std::s
     const auto cuda_stream = static_cast<cudaStream_t>(stream);
     rejectEventManagedGraphCapture(cuda_stream);
     checkCuda(cudaStreamWaitEvent(cuda_stream, storage_->observation_state_ready, 0));
+    if (storage_->registered_bridge_match && storage_->observation_read_pending) {
+        checkCuda(cudaStreamWaitEvent(cuda_stream, storage_->observation_read_done, 0));
+    }
     const auto players = static_cast<unsigned int>(storage_->players.count);
     const auto blocks = (players + threads_per_block - 1) / threads_per_block;
     validateActions<<<blocks, threads_per_block, 0, cuda_stream>>>(storage_->view,
@@ -743,6 +838,9 @@ int CudaBatch::actionStatus() const {
     if (!storage_->action_status.data) throw std::invalid_argument("CUDA actions are not configured");
     validateCurrentDevice(storage_->device);
     checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    if (storage_->registered_bridge_match && storage_->observation_read_pending) {
+        checkCuda(cudaEventSynchronize(storage_->observation_read_done));
+    }
     int status = 0;
     storage_->action_status.download(&status);
     return status;
@@ -752,6 +850,9 @@ void CudaBatch::clearActionStatus() {
     if (!storage_->action_status.data) throw std::invalid_argument("CUDA actions are not configured");
     validateCurrentDevice(storage_->device);
     checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    if (storage_->registered_bridge_match && storage_->observation_read_pending) {
+        checkCuda(cudaEventSynchronize(storage_->observation_read_done));
+    }
     checkCuda(cudaMemset(storage_->action_status.data, 0, sizeof(int)));
     checkCuda(cudaEventRecord(storage_->observation_state_ready, nullptr));
 }
@@ -787,17 +888,49 @@ void CudaBatch::configureRewards(const app::DuelRewardSettings& settings,
     checkCuda(cudaEventRecord(storage_->observation_state_ready, nullptr));
 }
 
+void CudaBatch::configureBridgeRewards(const app::BridgeTaskRewardSettings& settings, float win_reward,
+                                       float loss_reward, const ObjectiveProgress* objectives, std::size_t count) {
+    if (!storage_->bridge_rules.data || !storage_->reward_settings.data || storage_->bridge_objectives.data
+        || !objectives || count != storage_->players.count
+        || !std::isfinite(settings.score) || !std::isfinite(settings.opponent_score)
+        || !std::isfinite(settings.toward) || !std::isfinite(settings.away)
+        || !std::isfinite(win_reward) || !std::isfinite(loss_reward)) {
+        throw std::invalid_argument("Invalid CUDA Bridge reward configuration");
+    }
+    validateCurrentDevice(storage_->device);
+    checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    storage_->bridge_objectives.allocate(count);
+    storage_->bridge_task_results.allocate(count);
+    storage_->bridge_objectives.upload(objectives);
+    storage_->bridge_task_settings = settings;
+    storage_->bridge_win_reward = win_reward;
+    storage_->bridge_loss_reward = loss_reward;
+    checkCuda(cudaEventRecord(storage_->observation_state_ready, nullptr));
+}
+
 void CudaBatch::evaluateRewardsOnStream(void* stream) {
     if (!storage_->reward_settings.data) throw std::invalid_argument("CUDA duel rewards are not configured");
+    if (storage_->bridge_rules.data && !storage_->bridge_objectives.data) {
+        throw std::invalid_argument("CUDA Bridge rewards are not configured");
+    }
     validateCurrentDevice(storage_->device);
     const auto cuda_stream = static_cast<cudaStream_t>(stream);
     rejectEventManagedGraphCapture(cuda_stream);
     checkCuda(cudaStreamWaitEvent(cuda_stream, storage_->observation_state_ready, 0));
     const auto environments = static_cast<unsigned int>(storage_->view.environment_count);
-    evaluateDuelRewards<<<(environments + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
-                          cuda_stream>>>(storage_->view, storage_->reward_settings.data, storage_->reward_states.data,
-                                         storage_->reward_results.data, storage_->reward_finished.data,
-                                         storage_->action_status.data);
+    if (storage_->bridge_rules.data) {
+        evaluateBridgeRewards<<<(environments + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
+                                cuda_stream>>>(storage_->view, storage_->reward_settings.data, storage_->reward_states.data,
+            storage_->reward_results.data, storage_->reward_finished.data, storage_->action_status.data,
+            storage_->bridge_rules.data, storage_->bridge_states.data, storage_->bridge_events.data,
+            storage_->bridge_objectives.data, storage_->bridge_task_settings, storage_->bridge_win_reward,
+            storage_->bridge_loss_reward, storage_->bridge_task_results.data);
+    } else {
+        evaluateDuelRewards<<<(environments + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
+                              cuda_stream>>>(storage_->view, storage_->reward_settings.data, storage_->reward_states.data,
+                                             storage_->reward_results.data, storage_->reward_finished.data,
+                                             storage_->action_status.data);
+    }
     checkCuda(cudaGetLastError());
     const auto status = cudaEventRecord(storage_->observation_state_ready, cuda_stream);
     if (status != cudaSuccess) {
@@ -837,9 +970,12 @@ void CudaBatch::exportRewardResultsOnStream(float* rewards, std::uint8_t* termin
 }
 
 void CudaBatch::configureFixedResets(const PlayerState* players, const app::ObservationActorMetadata* actors,
-                                     const std::uint64_t* episodes, std::size_t count, std::uint64_t seed) {
+                                     const std::uint64_t* episodes, std::size_t count, std::uint64_t seed,
+                                     const BridgeTerrainGeneration* terrain_generation) {
     if (storage_->fixed_reset_players.data || !storage_->reward_settings.data || !storage_->action_status.data
-        || !players || !actors || !episodes || count != static_cast<std::size_t>(storage_->view.environment_count)) {
+        || !players || !actors || !episodes || count != static_cast<std::size_t>(storage_->view.environment_count)
+        || (storage_->bridge_rules.data && !storage_->bridge_objectives.data)
+        || (terrain_generation && !storage_->bridge_rules.data)) {
         throw std::invalid_argument("Invalid fixed CUDA reset configuration");
     }
     validateCurrentDevice(storage_->device);
@@ -858,6 +994,8 @@ void CudaBatch::configureFixedResets(const PlayerState* players, const app::Obse
     storage_->fixed_reset_actors.upload(actors);
     storage_->fixed_reset_episodes.upload(episodes);
     storage_->fixed_reset_seed = seed;
+    storage_->fixed_reset_generate_terrain = terrain_generation != nullptr;
+    if (terrain_generation) storage_->fixed_reset_terrain = *terrain_generation;
     checkCuda(cudaEventRecord(storage_->observation_state_ready, nullptr));
 }
 
@@ -895,12 +1033,14 @@ void CudaBatch::resetFixedOnStream(const std::uint8_t* device_mask, std::size_t 
     const auto environments = static_cast<unsigned int>(storage_->view.environment_count);
     const auto blocks = (environments + threads_per_block - 1) / threads_per_block;
     validateResetMask<<<blocks, threads_per_block, 0, cuda_stream>>>(storage_->view, device_mask,
-                                                                     storage_->action_status.data);
+        storage_->fixed_reset_episodes.data, storage_->action_status.data);
     checkCuda(cudaGetLastError());
     resetFixedWorlds<<<blocks, threads_per_block, 0, cuda_stream>>>(storage_->view, device_mask,
         storage_->fixed_reset_players.data, storage_->fixed_reset_actors.data, storage_->observation_actors.data,
         storage_->fixed_reset_episodes.data, storage_->fixed_reset_seed, storage_->reward_states.data,
-        storage_->reward_finished.data, storage_->arrow_summaries.data, storage_->action_status.data);
+        storage_->reward_finished.data, storage_->arrow_summaries.data, storage_->action_status.data,
+        storage_->bridge_rules.data, storage_->bridge_states.data, storage_->bridge_events.data,
+        storage_->bridge_objectives.data, storage_->fixed_reset_generate_terrain, storage_->fixed_reset_terrain);
     const auto reset_status = cudaGetLastError();
     if (reset_status != cudaSuccess) {
         cudaStreamSynchronize(cuda_stream);
@@ -930,6 +1070,30 @@ void CudaBatch::registerRewardBuffers(float* rewards, std::uint8_t* terminated, 
     storage_->registered_contributions = contributions;
 }
 
+void CudaBatch::registerBridgeBuffers(float* match, std::size_t match_count, std::uint8_t* voxels,
+                                      std::size_t voxel_count, std::uint8_t* scored, std::size_t scored_count,
+                                      double* task_terms, std::size_t task_count, int match_version) {
+    const auto features = match_version == 1 ? bridge_match_feature_count_v1 : bridge_match_feature_count_v2;
+    if (!storage_->bridge_objectives.data || !storage_->action_status.data
+        || !match || !voxels || !scored || !task_terms || (match_version != 1 && match_version != 2)
+        || match_count != checkedProduct(storage_->players.count, std::size_t(features))
+        || voxel_count != checkedProduct(storage_->players.count, std::size_t(bridge_local_voxel_count))
+        || scored_count != storage_->players.count || task_count != checkedProduct(storage_->players.count, 4)) {
+        throw std::invalid_argument("Invalid CUDA resident Bridge buffers");
+    }
+    validateDevicePointer(match, storage_->device);
+    validateDevicePointer(voxels, storage_->device);
+    validateDevicePointer(scored, storage_->device);
+    validateDevicePointer(task_terms, storage_->device);
+    checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    if (storage_->observation_read_pending) checkCuda(cudaEventSynchronize(storage_->observation_read_done));
+    storage_->registered_bridge_match = match;
+    storage_->registered_bridge_voxels = voxels;
+    storage_->registered_bridge_scored = scored;
+    storage_->registered_bridge_task_terms = task_terms;
+    storage_->registered_bridge_match_version = match_version;
+}
+
 void CudaBatch::registerResetMask(const std::uint8_t* device_mask, std::size_t count) {
     if (!device_mask || !storage_->fixed_reset_players.data
         || count != static_cast<std::size_t>(storage_->view.environment_count)) {
@@ -943,17 +1107,33 @@ void CudaBatch::registerResetMask(const std::uint8_t* device_mask, std::size_t c
 void CudaBatch::stepRegisteredOnStream(void* stream) {
     if (!storage_->registered_actions || !storage_->registered_observation || !storage_->registered_rewards
         || !storage_->registered_terminated || !storage_->registered_truncated || !storage_->registered_losses
-        || !storage_->registered_contributions) throw std::invalid_argument("Register CUDA step buffers before use");
+        || !storage_->registered_contributions || (storage_->bridge_rules.data && !storage_->registered_bridge_match)) {
+        throw std::invalid_argument("Register CUDA step buffers before use");
+    }
     decodeRegisteredActionsOnStream(stream);
     stepDecodedWithRewardsOnStream(stream);
     exportRewardResultsOnStream(storage_->registered_rewards, storage_->registered_terminated,
         storage_->registered_truncated, storage_->registered_losses, storage_->registered_contributions,
         static_cast<std::size_t>(storage_->view.environment_count), stream);
+    if (storage_->bridge_rules.data) {
+        const auto count = static_cast<unsigned int>(storage_->view.environment_count);
+        const auto cuda_stream = static_cast<cudaStream_t>(stream);
+        exportBridgeRewards<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block, 0, cuda_stream>>>(
+            storage_->view, storage_->bridge_events.data, storage_->bridge_task_results.data,
+            storage_->action_status.data, storage_->registered_bridge_scored, storage_->registered_bridge_task_terms);
+        checkCuda(cudaGetLastError());
+        const auto status = cudaEventRecord(storage_->observation_state_ready, cuda_stream);
+        if (status != cudaSuccess) {
+            cudaStreamSynchronize(cuda_stream);
+            checkCuda(status);
+        }
+    }
     observeRegisteredOnStream(stream);
 }
 
 void CudaBatch::resetRegisteredOnStream(void* stream) {
-    if (!storage_->registered_reset_mask || !storage_->registered_observation) {
+    if (!storage_->registered_reset_mask || !storage_->registered_observation
+        || (storage_->bridge_rules.data && !storage_->registered_bridge_match)) {
         throw std::invalid_argument("Register CUDA reset and observation buffers before use");
     }
     resetFixedOnStream(storage_->registered_reset_mask,
@@ -984,8 +1164,8 @@ void CudaBatch::advanceOnStream(int ticks, void* stream, bool check_action_statu
     if (ticks <= 0) {
         throw std::invalid_argument("Tick count must be positive");
     }
-    if (storage_->bridge_rules.data && (ticks != 1 || check_action_status)) {
-        throw std::invalid_argument("Bridge supports only single-tick host-staged stepping");
+    if (storage_->bridge_rules.data && (ticks != 1 || (check_action_status && !storage_->bridge_objectives.data))) {
+        throw std::invalid_argument("Bridge requires a single tick and configured resident rewards");
     }
     const auto cuda_stream = static_cast<cudaStream_t>(stream);
     if (storage_->observation_state_ready) {
@@ -1096,6 +1276,20 @@ void CudaBatch::observeRegisteredOnStream(void* stream) const {
     }
     validateCurrentDevice(storage_->device);
     observeConfiguredOnStream(storage_->registered_observation, storage_->registered_observation_count, stream);
+    if (storage_->registered_bridge_match) {
+        const auto players = static_cast<unsigned int>(storage_->players.count);
+        const auto cuda_stream = static_cast<cudaStream_t>(stream);
+        observeBridgeEnvironments<<<(players + threads_per_block - 1) / threads_per_block, threads_per_block, 0,
+                                   cuda_stream>>>(storage_->view, storage_->bridge_rules.data,
+            storage_->bridge_states.data, storage_->registered_bridge_match_version,
+            storage_->registered_bridge_match, storage_->registered_bridge_voxels, storage_->action_status.data);
+        checkCuda(cudaGetLastError());
+        const auto status = cudaEventRecord(storage_->observation_read_done, cuda_stream);
+        if (status != cudaSuccess) {
+            cudaStreamSynchronize(cuda_stream);
+            checkCuda(status);
+        }
+    }
 }
 
 void CudaBatch::waitForConfiguredObservations() {

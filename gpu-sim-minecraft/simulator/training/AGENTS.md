@@ -22,8 +22,8 @@ Bridge experiment. The research collector also accepts the fixed, static
 [authored Bridge plan](../setups/curricula/bridge/static-lane.json). CPU and CUDA batches use the shared
 Bridge tick and own match state independently per world. CUDA transfers controls,
 player state, match state and compact ordered terrain edit events through the
-host; it does not transfer a terrain grid per tick. Resident Bridge collection
-is explicitly rejected. Normal duel batches are unchanged.
+host in host-staged mode; it does not transfer a terrain grid per tick. The opt-in
+resident path also supports structured Bridge as described below. Normal duel batches are unchanged.
 
 Authored Bridge environments place this configuration in their `bridge` field;
 the resolved scenario retains it separately from the native scene. The supported
@@ -56,8 +56,8 @@ and evaluations may use different fixed Bridge configurations, including task
 rewards and match rules. A changed Bridge scenario recreates worlds at the stage
 boundary; evaluation uses its own batch. Replay
 export runs a separate sampled match; it is not a recording of an in-progress
-training world. Sampling, `task_override.max_ticks` and resident collection are
-rejected. Fabric has experimental absolute Bridge replay; input replay and live
+training world. Per-episode sampling and `task_override.max_ticks` are rejected.
+Fabric has experimental absolute Bridge replay; input replay and live
 Bridge matches remain unsupported. Bridge checkpoints preserve reset counters
 and resume with fresh episodes; checkpoints missing those counters cannot be resumed.
 Structured opponent sampling retains independent checkpointed per-actor RNG streams,
@@ -69,6 +69,8 @@ version-2 structured observation are specified in
 [Bridge mode](../../docs/bridge_mode_v1.md). `toward` and `away` are nonnegative
 independent weights; zero disables either term. The version-2 input requires
 `actor_task_state_version: 1` and uses new, incompatible model weights. The
+portable version-3 descriptor retains the version-2 feature layout but has a
+distinct checkpoint identity and supports host and resident sampling. The
 native item tick and actor-state/geometry encoders can be reused by other task
 implementations, but ordinary authored duel plans do not yet enable those item
 mechanics or append the new features to their policy contract.
@@ -237,7 +239,9 @@ decode actions.
 
 `Environment.register_cuda_resident()` registers rewards, termination,
 truncation, losses, contribution and reset-mask tensors after registering
-observations and actions. `step_cuda_resident_async()` advances one tick and
+observations and actions. Bridge additionally requires the portable version-3
+descriptor and registers match, voxel, score and task-reward tensors.
+`step_cuda_resident_async()` advances one tick and
 returns the registered observations and outputs; `reset_cuda_resident_async()`
 resets the worlds selected by the uint8 mask and overwrites observations.
 Outputs are reusable aliases: consume or copy final observations and rewards
@@ -246,14 +250,16 @@ registered device and alive until the environment closes; same-stream ordering
 and cross-stream consumer obligations are the same as for observations.
 The reset snapshots the initial per-world spawn/loadout and does not resample.
 Once activated, host state-dependent operations are rejected. The sticky status
-also reports finished-world and invalid-reset-mask errors via
+also reports finished-world, invalid-reset-mask, observation-encoding and
+reset-counter-overflow errors via
 `wait_cuda_actions()`. Check errors before using a rollout; setup, boundary
 checks, and close may synchronize. Graph capture is not supported.
 
 Use `--rollout-backend cuda-resident` with `--device cuda` for the opt-in PPO
-path. It requires one arena per stage, fixed or world-sampled spawns/loadouts,
-and only `stationary_target` and current-policy `self_play` opponents in every
-stage. Other opponents, multi-arena stages, and per-episode spawn/equipment
+path. It requires one arena per stage and fixed or world-sampled spawns/loadouts.
+Duel stages support `stationary_target` and current-policy `self_play`.
+Portable structured Bridge stages also support `bridge_fixed_lane`, compatible
+checkpoint opponents and frozen self-play. Other opponents, multi-arena stages, and per-episode spawn/equipment
 sampling remain on the host path. `--rollout-backend auto` selects the resident
 path only when supported and otherwise logs and records its fallback reason;
 `host` is the default. Eligibility is checked before activation, not as a
@@ -1240,6 +1246,37 @@ to reuse it as a frozen opponent. They are not automatically added to mixtures.
 Use `latest.pt` for resume; its embedded plan restores pending save rules without
 requiring the authored JSON. Resuming from an older checkpoint can replace a
 same-named save when its trigger is reached again.
+
+### Fresh bduel5 Opponents
+
+The [bootstrap plan](../setups/curricula/colten/bduel5-bootstrap.json) has no
+checkpoint opponents. Its building stage saves three unrestricted-control
+policies at stage updates 20, 40 and 60. Before that, a guided gap-5 stage holds
+the block slot and use action while the policy learns movement and aim. The
+guided environment starts both players looking downward and limits placements
+to the gap at bridge height. Its unassisted evaluation releases those controls
+and restores the original spawn and building rules; the following gap-5 stage
+also requires unrestricted success from both seats. For example, on a CUDA node
+with a current training library, run from the project root:
+
+```sh
+.venv-rosie/bin/python -B -m simulator.training.train \
+  --plan simulator/setups/curricula/colten/bduel5-bootstrap.json \
+  --device cuda --rollout-backend cuda-resident --start-stage building-generated \
+  --envs 256 --rollout-steps 16 --updates 60 --threads 4 --replay-every 0 \
+  --library /path/to/minecraft_sim_training.so \
+  --output simulator/training/runs/bduel5-fresh-bootstrap-gap-guided
+```
+
+The [fresh curriculum](../setups/curricula/colten/bduel5-fresh.json) resolves
+all three snapshots from that output and adds the same guided gap-5 stage to
+bduel5's stage mixtures and evaluation panels. Generate the snapshots before validating or submitting it;
+the compiler hashes every checkpoint during plan resolution. Do not reuse a
+nonempty output directory. Skipping to the building stage trains from random
+initial weights; use the earlier bootstrap stages when desired. These snapshots
+do not establish opponent strength or comparability with the historical panels.
+The portable descriptor requires fresh compatible checkpoints. T4 functional
+checks have passed; H100 tracing and matched performance validation remain open.
 
 ## Training Dashboard
 

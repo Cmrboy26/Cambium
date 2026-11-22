@@ -23,13 +23,32 @@ namespace {
 constexpr int feature_count = 102;
 constexpr int scenario_count = 3;
 
+template <typename Value>
+struct DeviceArray {
+    Value* data = nullptr;
+    explicit DeviceArray(std::size_t count) {
+        if (cudaMalloc(reinterpret_cast<void**>(&data), count * sizeof(Value)) != cudaSuccess) {
+            throw std::runtime_error("CUDA test allocation failed");
+        }
+    }
+    ~DeviceArray() { cudaFree(data); }
+    DeviceArray(const DeviceArray&) = delete;
+    DeviceArray& operator=(const DeviceArray&) = delete;
+};
+
+__global__ void bridgeTickScenario(minecraft_sim::BatchView batch, int* results) {
+    const auto environment = blockIdx.x * blockDim.x + threadIdx.x;
+    if (environment >= static_cast<unsigned int>(batch.environment_count)) return;
+    results[environment] = bridge_match_checks::tick(batch.math);
+}
+
 __global__ void orderedTerrainScenario(minecraft_sim::BatchView batch, int* results) {
     using namespace minecraft_sim;
     const auto environment = blockIdx.x * blockDim.x + threadIdx.x;
     if (environment >= static_cast<unsigned int>(batch.environment_count)) return;
     const auto blocks = batch.block_worlds[environment];
     bool result = bridge_match_checks::outcomes() && bridge_match_checks::lifecycle()
-        && bridge_match_checks::selectedWorldReset() && bridge_match_checks::tick(batch.math)
+        && bridge_match_checks::selectedWorldReset()
         && bridge_match_checks::completeMatch(batch.math) && bridge_match_checks::externalCutoff(batch.math)
         && bridge_match_checks::kitsAndRefill(batch.math)
         && bridge_match_checks::building(batch.math)
@@ -68,12 +87,28 @@ bool checkOrderedTerrainEdits() {
     CudaBatch device(host);
     int* device_results = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&device_results), environments * sizeof(int)) != cudaSuccess) return false;
-    orderedTerrainScenario<<<(environments + CudaBatch::threads_per_block - 1) / CudaBatch::threads_per_block,
-                             CudaBatch::threads_per_block>>>(device.deviceView(), device_results);
+    bridgeTickScenario<<<(environments + CudaBatch::threads_per_block - 1) / CudaBatch::threads_per_block,
+                         CudaBatch::threads_per_block>>>(device.deviceView(), device_results);
     std::array<int, environments> results{};
     bool success = cudaGetLastError() == cudaSuccess
         && cudaMemcpy(results.data(), device_results, sizeof(results), cudaMemcpyDeviceToHost) == cudaSuccess;
     for (const int result : results) success = success && result == 1;
+    if (!success) {
+        std::cerr << "CUDA Bridge tick check failed\n";
+        cudaFree(device_results);
+        return false;
+    }
+    orderedTerrainScenario<<<(environments + CudaBatch::threads_per_block - 1) / CudaBatch::threads_per_block,
+                             CudaBatch::threads_per_block>>>(device.deviceView(), device_results);
+    success = cudaGetLastError() == cudaSuccess
+        && cudaMemcpy(results.data(), device_results, sizeof(results), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (std::size_t index = 0; index < results.size(); ++index) {
+        if (results[index] != 1) {
+            std::cerr << "Ordered terrain check failed in world " << index << ": " << results[index] << '\n';
+            success = false;
+            break;
+        }
+    }
     cudaFree(device_results);
     return success;
 }
@@ -116,7 +151,10 @@ bool checkMutableTerrain() {
                    terrain.data(), {sine.data()}, nullptr};
     bool budget_rejected = false;
     try { CudaBatch too_large(host, false, 71); } catch (const std::invalid_argument&) { budget_rejected = true; }
-    if (!budget_rejected) return false;
+    if (!budget_rejected) {
+        std::cerr << "Mutable terrain budget was not rejected\n";
+        return false;
+    }
     CudaBatch exact_budget(host, false, 72);
     CudaBatch device(host);
     double* output = nullptr;
@@ -127,21 +165,30 @@ bool checkMutableTerrain() {
         return cudaGetLastError() == cudaSuccess
             && cudaMemcpy(actual.data(), output, sizeof(actual), cudaMemcpyDeviceToHost) == cudaSuccess;
     };
-    bool result = sample(0) && actual[0] == 1.0 && actual[1] == 1.0
+    const auto checked = [&](bool passed, const char* phase) {
+        if (!passed) {
+            std::cerr << "Mutable terrain " << phase << " failed; values:";
+            for (double value : actual) std::cerr << ' ' << value;
+            std::cerr << '\n';
+        }
+        return passed;
+    };
+    bool result = checked(sample(0) && actual[0] == 1.0 && actual[1] == 1.0
         && actual[2] == 0.0 && actual[3] == 0.0 && actual[4] == 0.0
-        && actual[7] == 1.0 && actual[8] == 1.0 && actual[10] == 1.0;
-    result = result && sample(1) && actual[0] == 0.5 && actual[1] == 1.0
-        && actual[2] == 1.0 && actual[3] == 0.0 && actual[5] == 1.0 && actual[9] == 1.0;
-    result = result && sample(2) && actual[0] == 0.5 && actual[1] == 0.75
-        && actual[4] == 1.0 && actual[6] == 2.0 && actual[9] == 1.0;
+        && actual[7] == 1.0 && actual[8] == 1.0 && actual[10] == 1.0, "initial");
+    result = result && checked(sample(1) && actual[0] == 0.5 && actual[1] == 1.0
+        && actual[2] == 1.0 && actual[3] == 0.0 && actual[5] == 1.0 && actual[9] == 1.0, "first edit");
+    result = result && checked(sample(2) && actual[0] == 0.5 && actual[1] == 0.75
+        && actual[4] == 1.0 && actual[6] == 2.0 && actual[9] == 1.0, "second edit");
     const int first = 0;
     device.resetEnvironments(&first, 1, players.data());
-    result = result && sample(0) && actual[0] == 1.0 && actual[1] == 0.75
+    result = result && checked(sample(0) && actual[0] == 1.0 && actual[1] == 0.75
         && actual[2] == 0.0 && actual[4] == 1.0 && actual[5] == 0.0
-        && actual[6] == 2.0 && actual[10] == 1.0;
+        && actual[6] == 2.0 && actual[10] == 1.0, "first reset");
     const int second = 1;
     device.resetEnvironments(&second, 1, players.data() + 2);
-    result = result && sample(0) && actual[0] == 1.0 && actual[1] == 1.0 && actual[6] == 0.0;
+    result = result && checked(sample(0) && actual[0] == 1.0 && actual[1] == 1.0 && actual[6] == 0.0,
+                               "second reset");
     cudaFree(output);
     return result;
 }
@@ -587,6 +634,169 @@ bool checkBatchedDuelRewardParity() {
     }
     result = result && matches();
     cudaStreamDestroy(stream);
+    return result;
+}
+
+bool checkResidentBridge(int version) {
+    using namespace minecraft_sim;
+    constexpr int environments = 2;
+    constexpr int actor_count = environments * 2;
+    const int features = version == 1 ? bridge_match_feature_count_v1 : bridge_match_feature_count_v2;
+    std::array<Block, 6 * 5 * 12> cells{};
+    for (int z = 0; z < 12; ++z) {
+        for (int x = 0; x < 6; ++x) cells[z * 30 + x] = Block::solid;
+    }
+    for (int z = 4; z < 8; ++z) {
+        for (int x : {1, 2, 4, 5}) cells[z * 30 + x] = Block::air;
+    }
+    TerrainOverlays terrain({cells.data(), 6, 5, 12, -3, 0, -6}, environments);
+    std::array<PlayerState, actor_count> players{};
+    std::array<Controls, actor_count> queued{}, held{};
+    std::array<WorldState, environments> worlds{};
+    std::array<ProjectileWorldState, environments> projectiles{};
+    std::array<ArrowState, environments * projectile_arrow_capacity> arrows{};
+    std::array<app::ObservationActorMetadata, actor_count> actors{};
+    std::array<BridgeInitialPlayers, environments> initial{};
+    std::array<BridgeMatchState, environments> matches{};
+    std::array<app::DuelRewardState, environments> reward_states{};
+    std::array<ObjectiveProgress, actor_count> objectives{};
+    BridgeMatchRules rules;
+    rules.goals[0] = {{-1.0, 0.5, -5.0}, {1.0, 3.0, -4.0}};
+    rules.goals[1] = {{0.0, 0.5, 1.5}, {1.0, 3.0, 2.8}};
+    rules.goals_to_win = 1;
+    rules.max_ticks = 100;
+    rules.cage_ticks = 0;
+    rules.void_y = -10;
+    for (int environment = 0; environment < environments; ++environment) {
+        projectiles[environment].arrows = arrows.data() + environment * projectile_arrow_capacity;
+        projectiles[environment].arrow_capacity = projectile_arrow_capacity;
+        matches[environment] = initialBridgeMatch(rules);
+        matches[environment].episodes = 1;
+        for (int player = 0; player < 2; ++player) {
+            const int actor = environment * 2 + player;
+            players[actor].position = {0.5, 1.0, player == 0 ? (environment == 0 ? 2.0 : 0.0) : -3.0};
+            initial[environment].players[player] = players[actor];
+            resetBridgeKit(matches[environment], rules, players[actor], player);
+            actors[actor].slot_count = 1;
+            actors[actor].slots[0] = WeaponItem::diamond_sword;
+            const auto& goal = rules.goals[1 - player];
+            objectives[actor].reset(players[actor].position,
+                {(goal.lower.x + goal.upper.x) / 2.0, (goal.lower.y + goal.upper.y) / 2.0,
+                 (goal.lower.z + goal.upper.z) / 2.0});
+        }
+    }
+    const auto initial_players = players;
+    const BridgeTerrainGeneration generation{0, 0, -2, 2, 4};
+    for (int environment = 0; environment < environments; ++environment) {
+        if (!generateBridgeTerrain(terrain.view(environment), generation,
+                                   bridgeTerrainSeed(players[environment * 2].random.state))) return false;
+    }
+    const auto sine = makeSineTable();
+    BatchView host{players.data(), queued.data(), held.data(), worlds.data(), environments, 2,
+                   terrain.data(), {sine.data()}, projectiles.data()};
+    DeviceArray<std::int32_t> actions(actor_count);
+    DeviceArray<std::uint8_t> mask(environments), terminated(environments), truncated(environments), losses(actor_count);
+    DeviceArray<std::uint8_t> scored(actor_count), voxels(actor_count * bridge_local_voxel_count);
+    DeviceArray<float> scalar(actor_count), rewards(actor_count), match(actor_count * features);
+    DeviceArray<double> contributions(actor_count * 18), task_terms(actor_count * 4);
+    CudaBatch device(host);
+    device.configureBridge(rules, initial.data(), matches.data(), environments, 1);
+    const app::ObservationProjection projection{0, 1.0F, 0.0F, -1.0F, 1.0F, false};
+    device.configureObservations(&projection, 1, actors.data(), actors.size());
+    app::ActionHead head;
+    head.kind = 0;
+    head.count = 1;
+    device.configureActions(&head, 1);
+    app::DuelRewardSettings settings;
+    settings.max_ticks = 1;
+    settings.weights[4] = -1.0F;
+    const app::BridgeTaskRewardSettings task_settings{2.0F, -1.0F, 0.25F, 0.1F};
+    device.configureRewards(settings, reward_states.data(), reward_states.size());
+    device.configureBridgeRewards(task_settings, 10.0F, -5.0F, objectives.data(), objectives.size());
+    const std::array<std::uint64_t, environments> episodes{1, 1};
+    device.configureFixedResets(initial_players.data(), actors.data(), episodes.data(), episodes.size(), 123, &generation);
+    if (cudaMemset(actions.data, 0, actor_count * sizeof(std::int32_t)) != cudaSuccess) return false;
+    device.registerActionBuffer(actions.data, actor_count);
+    device.registerConfiguredObservationBuffer(scalar.data, actor_count);
+    device.registerRewardBuffers(rewards.data, terminated.data, truncated.data, losses.data, contributions.data, environments);
+    device.registerBridgeBuffers(match.data, actor_count * features, voxels.data, actor_count * bridge_local_voxel_count,
+                                 scored.data, actor_count, task_terms.data, actor_count * 4, version);
+    device.registerResetMask(mask.data, environments);
+    std::array<BridgeTickEvents, environments> expected_events{};
+    std::array<app::BridgeRewardStep, environments> expected_rewards{};
+    for (int environment = 0; environment < environments; ++environment) {
+        expected_events[environment] = processBridgeWorldTick(host.world(environment), projectiles[environment],
+            initial[environment].players, rules, matches[environment], settings.max_ticks);
+        expected_rewards[environment] = app::bridgeRewards(players.data() + environment * 2, worlds[environment],
+            terrain.view(environment), rules, matches[environment], expected_events[environment], settings, task_settings,
+            10.0F, -5.0F, reward_states[environment], objectives.data() + environment * 2);
+    }
+    device.stepRegisteredOnStream(nullptr);
+    if (device.actionStatus() != 0) return false;
+    std::array<float, actor_count> actual_rewards{};
+    std::array<std::uint8_t, environments> actual_terminated{}, actual_truncated{};
+    std::array<std::uint8_t, actor_count> actual_scored{}, actual_losses{};
+    std::vector<float> actual_match(actor_count * features);
+    std::vector<std::uint8_t> actual_voxels(actor_count * bridge_local_voxel_count);
+    std::array<double, actor_count * 4> actual_terms{};
+    if (cudaMemcpy(actual_rewards.data(), rewards.data, sizeof(actual_rewards), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpy(actual_terminated.data(), terminated.data, sizeof(actual_terminated), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpy(actual_truncated.data(), truncated.data, sizeof(actual_truncated), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpy(actual_losses.data(), losses.data, sizeof(actual_losses), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpy(actual_scored.data(), scored.data, sizeof(actual_scored), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpy(actual_match.data(), match.data, actual_match.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpy(actual_voxels.data(), voxels.data, actual_voxels.size(), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpy(actual_terms.data(), task_terms.data, sizeof(actual_terms), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    bool result = expected_rewards[0].shared.terminated && expected_rewards[1].shared.truncated;
+    for (int environment = 0; environment < environments; ++environment) {
+        result = result && actual_terminated[environment] == expected_rewards[environment].shared.terminated
+            && actual_truncated[environment] == expected_rewards[environment].shared.truncated;
+        for (int player = 0; player < 2; ++player) {
+            const int actor = environment * 2 + player;
+            std::array<float, bridge_match_feature_count_v2> expected_match{};
+            std::array<std::uint8_t, bridge_local_voxel_count> expected_voxels{};
+            const bool valid_match = version == 1
+                ? bridgeMatchFeaturesV1(rules, matches[environment], player, expected_match.data())
+                : bridgeMatchFeaturesV2(players[actor], rules, matches[environment], player, expected_match.data());
+            result = result && valid_match && bridgeLocalVoxels(terrain.view(environment), players[actor].position,
+                players[actor].yaw, player, expected_voxels.data())
+                && actual_scored[actor] == expected_events[environment].scored[player]
+                && actual_losses[actor] == expected_rewards[environment].shared.lost[player]
+                && std::abs(actual_rewards[actor] - expected_rewards[environment].rewards[player]) < 1e-5F;
+            for (int feature = 0; feature < features; ++feature) {
+                result = result && std::abs(actual_match[actor * features + feature] - expected_match[feature]) < 1e-5F;
+            }
+            for (int voxel = 0; voxel < bridge_local_voxel_count; ++voxel) {
+                result = result && actual_voxels[actor * bridge_local_voxel_count + voxel] == expected_voxels[voxel];
+            }
+            for (int term = 0; term < 4; ++term) {
+                result = result && std::abs(actual_terms[actor * 4 + term]
+                    - expected_rewards[environment].task[player].values[term]) < 1e-5;
+            }
+        }
+    }
+    const std::array<std::uint8_t, environments> selected{1, 0};
+    if (cudaMemcpy(mask.data, selected.data(), selected.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    device.resetRegisteredOnStream(nullptr);
+    std::array<BridgeMatchState, environments> reset_matches{};
+    std::array<BridgeTickEvents, environments> reset_events{};
+    device.downloadBridge(reset_matches.data(), reset_events.data(), environments);
+    result = result && device.actionStatus() == 0 && reset_matches[0].ticks == 0 && reset_matches[0].episodes == 2
+        && reset_matches[0].scores[0] == 0 && reset_matches[1].ticks == matches[1].ticks
+        && reset_matches[1].episodes == matches[1].episodes && reset_events[1].advanced;
+    terrain.view(0).resetPlacedBlocks(TerrainReset::match);
+    LegacyRandom reset_random;
+    reset_random.setSeed(123 + 1000033ULL);
+    result = result && generateBridgeTerrain(terrain.view(0), generation, bridgeTerrainSeed(reset_random.state));
+    std::array<BlockWorldView, environments> device_blocks{};
+    std::array<PlacedBlock, cells.size()> actual_overlay{};
+    result = result && cudaMemcpy(device_blocks.data(), device.deviceView().block_worlds, sizeof(device_blocks),
+                                  cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int environment = 0; environment < environments; ++environment) {
+        result = result && cudaMemcpy(actual_overlay.data(), device_blocks[environment].overlay, sizeof(actual_overlay),
+                                      cudaMemcpyDeviceToHost) == cudaSuccess;
+        result = result && std::equal(actual_overlay.begin(), actual_overlay.end(), terrain.view(environment).overlay);
+    }
     return result;
 }
 
@@ -1041,8 +1251,16 @@ bool checkBatchedDeviceActions() {
 int main() {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) return 77;
-    if (!checkMutableTerrain() || !checkStaticTerrainSharing() || !checkOrderedTerrainEdits()) {
+    if (!checkMutableTerrain()) {
         std::cerr << "CUDA mutable terrain isolation check failed\n";
+        return 1;
+    }
+    if (!checkStaticTerrainSharing()) {
+        std::cerr << "CUDA static terrain sharing check failed\n";
+        return 1;
+    }
+    if (!checkOrderedTerrainEdits()) {
+        std::cerr << "CUDA ordered terrain edits check failed\n";
         return 1;
     }
     if (!checkCompositeWorldConsumers()) {
@@ -1106,6 +1324,10 @@ int main() {
     }
     if (!checkFinishedWorldProtection()) {
         std::cerr << "CUDA finished-world protection check failed\n";
+        return 1;
+    }
+    if (!checkResidentBridge(1) || !checkResidentBridge(2)) {
+        std::cerr << "CUDA resident Bridge parity check failed\n";
         return 1;
     }
     if (!checkConfiguredObservations()) {

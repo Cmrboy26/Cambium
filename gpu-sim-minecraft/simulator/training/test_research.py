@@ -1,4 +1,5 @@
 import contextlib
+import ctypes
 from copy import deepcopy
 import hashlib
 import io
@@ -20,13 +21,13 @@ from backend.fast_rl_model import ActorCritic, BridgeActorCritic
 from simulator.training.analyze_metrics import main as analyze_metrics
 from simulator.training._test_plans import TEST_SETUPS, example_plan
 from simulator.training.contract import bridge_observation_descriptor, from_legacy, resolve_players, resolve_scenario, validate_contract
-from simulator.training.environment import Environment, ROOT, SCHEMA, SCHEMA_V2, load_library
+from simulator.training.environment import Environment, REWARD_NAMES, ROOT, SCHEMA, SCHEMA_V2, load_library
 from simulator.training.controllers import CheckpointController
 from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGACY_V2
 from simulator.training.plans import EpisodeSampler, advance_rule, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
 from simulator.training.research import (BehaviorEvaluation, EpisodeMetrics, OpponentPool,
-                                         ResidentOpponentPool, SampledWorlds, bridge_observation_inputs,
+                                         ResidentCollector, ResidentOpponentPool, SampledWorlds, bridge_observation_inputs,
                                          collect, evaluate, export_replay,
                                          requires_new_worlds, research_metadata, resident_unsupported)
 from simulator.training.serve import Policy
@@ -43,6 +44,63 @@ def short_plan():
 
 
 class BridgeResearchChecks(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_bridge_stage_resume_and_checkpoint_opponents(self):
+        source = ROOT / "simulator/setups/curricula/colten/bduel5-bootstrap.json"
+        plan = json.loads(source.read_text())
+        for field in ("policy", "environment"):
+            plan[field] = str((source.parent / plan[field]).resolve())
+        for stage in plan["stages"]:
+            if "environment" in stage:
+                stage["environment"] = str((source.parent / stage["environment"]).resolve())
+            stage.pop("evaluations", None)
+            stage.pop("snapshots", None)
+        plan["learner"].update(hidden_dim=16, epochs=1, minibatch_size=8)
+        plan["stages"] = plan["stages"][:2]
+        plan["stages"][0]["advance"] = {"updates": 1}
+        plan["stages"][1]["advance"] = {"updates": 3}
+        plan["stages"][1]["evaluations"] = {
+            "held": {"every_updates": 1, "worlds": 2, "episodes": 2, "seed": 9}}
+        plan["snapshots"] = [{"name": "baseline", "at_updates": 0}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            output = root / "run"
+            common = ["--device", "cuda", "--rollout-backend", "cuda-resident", "--threads", "1",
+                      "--library", os.environ["MCSIM_TEST_CUDA_LIBRARY"], "--updates", "1", "--replay-every", "0"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(plan_path), "--output", str(output), "--envs", "8",
+                                       "--rollout-steps", "4", "--max-ticks", "3", *common]), 0)
+                boundary = torch.load(output / "latest.pt", weights_only=True)
+                self.assertEqual(boundary["research"]["stage_index"], 1)
+                self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+            rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([row["stage"] for row in rows], ["target-clear", "runners-generated"])
+            self.assertEqual(rows[1]["evaluations"]["held"]["episodes"], 2)
+            self.assertGreater(rows[1]["timeouts"], 0)
+            resumed = torch.load(output / "latest.pt", weights_only=True)
+            self.assertEqual(resumed["research"]["rollout_backend"], "cuda-resident")
+            self.assertEqual(resumed["metadata"]["bridge_observation"], bridge_observation_descriptor(3))
+
+            mixed = deepcopy(plan)
+            mixed.pop("snapshots")
+            mixed["opponents"]["baseline"] = {"type": "checkpoint", "path": str(output / "snapshots/baseline.pt")}
+            mixed["opponents"]["current"] = {"type": "self_play"}
+            mixed["mixtures"]["all"] = [{"id": name, "weight": 1} for name in mixed["opponents"]]
+            mixed["stages"] = [deepcopy(plan["stages"][1])]
+            mixed["stages"][0]["opponents"] = "all"
+            mixed["stages"][0].pop("evaluations")
+            mixed_path = root / "mixed.json"
+            mixed_path.write_text(json.dumps(mixed))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--plan", str(mixed_path), "--output", str(root / "mixed-run"), "--envs", "8",
+                                       "--rollout-steps", "4", "--max-ticks", "3", *common]), 0)
+            result = torch.load(root / "mixed-run/latest.pt", weights_only=True)
+            self.assertEqual(result["metadata"]["bridge_observation"], bridge_observation_descriptor(3))
+            self.assertEqual(result["research"]["rollout_backend"], "cuda-resident")
+
     def test_reward_only_stage_transition_and_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -451,7 +509,8 @@ register_model("external_bridge_test", 1, factory)
                          self.assertRaisesRegex(ValueError, "structured Bridge model descriptor"):
                         main(["--plan", str(selected_plan), flag, str(checkpoint_path),
                               "--output", str(root / "incompatible"), *common])
-            for invalid in (None, bridge_observation_descriptor(), {**plan["bridge_observation"], "version": 3},
+            for invalid in (None, bridge_observation_descriptor(), bridge_observation_descriptor(3),
+                            {**plan["bridge_observation"], "version": 3},
                             {**plan["bridge_observation"], "old_field": True}):
                 broken = deepcopy(first)
                 broken["metadata"]["bridge_observation"] = invalid
@@ -573,10 +632,43 @@ register_model("external_bridge_test", 1, factory)
         actor_state = np.array([[[0, 1, 0, 0, 0, 16, 0.25, 2, 1], [0, 1, 0, 180, 0, 8, 0.75, 4, 5]]], dtype=np.float64)
         with patch.object(environment, "actor_task_state", return_value=actor_state):
             inputs = worlds.bridge_observations(scalar, bridge_observation_descriptor(2))
+            portable = worlds.bridge_observations(scalar, bridge_observation_descriptor(3))
         self.assertEqual(inputs["match"].shape, (1, 2, 17))
+        for name in inputs:
+            np.testing.assert_array_equal(portable[name], inputs[name])
+        self.assertNotEqual(bridge_observation_descriptor(2), bridge_observation_descriptor(3))
         np.testing.assert_allclose(inputs["match"][0, :, 10:12], [[0.5, 0.25], [0.75, 0.75]])
         np.testing.assert_allclose(inputs["match"][0, :, 15:], [[0.5, 0.2], [1, 1]])
         self.assertTrue(np.isfinite(inputs["match"]).all())
+
+    def test_native_match_features_match_host_for_both_versions(self):
+        worlds = self.worlds(count=3)
+        environment = worlds.groups[0][1]
+        players = [deepcopy(environment.episode_scenario(index)["players"]) for index in range(3)]
+        for index, pair in enumerate(players):
+            pair[0]["yaw"], pair[1]["yaw"] = (0, 45, 90)[index], (180, -45, -90)[index]
+            pair[0]["pitch"], pair[1]["pitch"] = -30, 30
+        environment.reset_players(players, [True, True, True])
+        function = environment.native.mcsim_bridge_match_features
+        function.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        actions = np.zeros((3, 2, 1), dtype=np.int64)
+        actions[0, 0, 0] = 1
+        actions[1, 1, 0] = 2
+        for _ in range(20):
+            scalar = worlds.observe()
+            for version, count in ((1, 10), (2, 17)):
+                expected = bridge_observation_inputs(environment, scalar, bridge_observation_descriptor(version))["match"]
+                actual = np.empty((3, 2, count), dtype=np.float32)
+                self.assertEqual(function(environment._handle, version, actual.ctypes.data, actual.size), 0)
+                np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6)
+            _, _, terminated, truncated = worlds.step(actions)
+            if (terminated | truncated).any():
+                break
+        invalid = np.full((3, 2, 17), 123, dtype=np.float32)
+        self.assertNotEqual(function(environment._handle, 3, invalid.ctypes.data, invalid.size), 0)
+        self.assertNotEqual(function(environment._handle, 2, invalid.ctypes.data, invalid.size - 1), 0)
+        np.testing.assert_array_equal(invalid, np.full_like(invalid, 123))
 
     def test_v2_rollout_uses_task_state_for_both_seats(self):
         self.scenario["bridge"]["task_rewards"].update(opponent_score=-1, toward=0.25, away=0)
@@ -1758,6 +1850,10 @@ register_model("external_bridge_test", 1, factory)
     def test_unsupported_paths_are_explicit(self):
         plan = {"stages": [self.stage], "opponents": self.definitions, "policy": self.contract}
         self.assertIn("Bridge", resident_unsupported(plan, "cuda"))
+        plan["bridge_observation"] = bridge_observation_descriptor(3)
+        self.assertIsNone(resident_unsupported(plan, "cuda"))
+        plan["opponents"] = {"target": {"type": "scripted", "controller": "basic_melee"}}
+        self.assertIn("unsupported opponent", resident_unsupported(plan, "cuda"))
         plan, suite, options = self.evaluation_inputs()
         for definition in ({"type": "scripted", "controller": "basic_melee"},
                            {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"speed": 1}}):
@@ -1968,6 +2064,193 @@ class ResidentPolicyChecks(unittest.TestCase):
 
 
 class ResidentOpponentChecks(unittest.TestCase):
+    def test_structured_resident_collector_preserves_final_observations(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]}]})
+        model = BridgeActorCritic(1, bridge_observation_descriptor(2), 8, {"movement": 2})
+        pool = OpponentPool({"target": {"type": "scripted", "controller": "stationary_target"}},
+                            contract, 2, "cpu", 17, learner=model)
+        pool.configure([{"id": "target", "weight": 1}])
+        resident_pool = ResidentOpponentPool(pool, "cpu", 17)
+        resident_pool.reset(torch.ones(2, dtype=torch.bool))
+        resident_pool.learner_slots.copy_(torch.tensor([0, 1]))
+        initial = {"scalar": torch.tensor([[[0.1], [0.2]], [[0.3], [0.4]]]),
+                   "match": torch.zeros(2, 2, 17),
+                   "voxels": torch.zeros(2, 2, 5, 9, 9, dtype=torch.uint8)}
+        final = {name: value.clone() for name, value in initial.items()}
+        final["match"][:, :, 0] = torch.tensor([[0.5, 0.6], [0.7, 0.8]])
+        final["voxels"][:, :, 0, 0, 0] = torch.tensor([[1, 2], [3, 4]], dtype=torch.uint8)
+        final_inputs = {name: value[torch.arange(2), resident_pool.learner_slots].clone()
+                        for name, value in final.items()}
+        with torch.no_grad():
+            _, expected_values = model(final_inputs)
+
+        class FakeEnvironment:
+            def __init__(self):
+                self.outputs = {"rewards": torch.tensor([[1.0, -1.0], [-2.0, 2.0]]),
+                                "terminated": torch.tensor([0, 1], dtype=torch.uint8),
+                                "truncated": torch.tensor([1, 0], dtype=torch.uint8),
+                                "losses": torch.tensor([[0, 0], [1, 0]], dtype=torch.uint8),
+                                "contributions": torch.zeros(2, 2, len(REWARD_NAMES), dtype=torch.float64),
+                                "bridge_scored": torch.tensor([[1, 0], [1, 0]], dtype=torch.uint8),
+                                "bridge_reward_terms": torch.tensor(
+                                    [[[1, 2, 3, 4], [0, 0, 0, 0]],
+                                     [[0, 0, 0, 0], [10, 20, 30, 40]]], dtype=torch.float64),
+                                "reset_mask": torch.zeros(2, dtype=torch.uint8)}
+
+            def step_cuda_resident_async(self):
+                return final, self.outputs
+
+            def reset_cuda_resident_async(self):
+                for value in final.values():
+                    value.zero_()
+                return final
+
+            def wait_cuda_actions(self):
+                return None
+
+        collector = ResidentCollector.__new__(ResidentCollector)
+        collector.worlds = SimpleNamespace(count=2, observation_dim=1, action_count=1,
+                                           action_names=contract["action_names"], episode_metrics=EpisodeMetrics(2))
+        collector.environment = FakeEnvironment()
+        collector.pool = resident_pool
+        collector.device = torch.device("cpu")
+        collector.returns = torch.zeros(2, dtype=torch.float64)
+        collector.lengths = torch.zeros(2, dtype=torch.int64)
+        collector.actions = torch.empty(2, 2, 1, dtype=torch.int32)
+        collector.observations = initial
+        rollout, _, endings, timeouts = collector.collect(model, 1, {})
+        self.assertEqual((endings, timeouts), (1, 1))
+        self.assertEqual(rollout["observations"]["voxels"].dtype, torch.uint8)
+        for name, value in initial.items():
+            torch.testing.assert_close(rollout["observations"][name][0], value[torch.arange(2), [0, 1]])
+        torch.testing.assert_close(rollout["next_values"][0], expected_values)
+        expected_advantages = (rollout["rewards"][0] + 0.99 * expected_values * torch.tensor([1, 0])
+                               - rollout["values"][0])
+        torch.testing.assert_close(rollout["advantages"][0], expected_advantages)
+        self.assertEqual(rollout["bridge_events"], {
+            "bridge_goals_for": 1, "bridge_goals_against": 1,
+            "bridge_wins": 1, "bridge_losses": 0, "bridge_draws": 0,
+            "bridge_reward_score": 11.0, "bridge_reward_opponent_score": 22.0,
+            "bridge_reward_toward": 33.0, "bridge_reward_away": 44.0})
+        torch.testing.assert_close(collector.environment.outputs["reset_mask"], torch.ones(2, dtype=torch.uint8))
+        outputs = collector.environment.outputs
+        resident_pool.learner_slots.copy_(torch.tensor([0, 1]))
+        outputs["terminated"].fill_(1)
+        outputs["truncated"].zero_()
+        outputs["losses"].copy_(torch.tensor([[1, 0], [0, 0]], dtype=torch.uint8))
+        completed, _, endings, timeouts = collector.collect(model, 1, {})
+        self.assertEqual((endings, timeouts), (2, 0))
+        self.assertEqual(tuple(completed["bridge_events"][name] for name in
+                               ("bridge_wins", "bridge_losses", "bridge_draws")), (0, 1, 1))
+        resident_pool.learner_slots.copy_(torch.tensor([0, 1]))
+        with patch.object(resident_pool, "reset"):
+            repeated, _, _, _ = collector.collect(model, 2, {})
+        self.assertEqual(tuple(repeated["bridge_events"][name] for name in
+                               ("bridge_goals_for", "bridge_goals_against", "bridge_losses", "bridge_draws")),
+                         (2, 2, 2, 2))
+        self.assertEqual(repeated["bridge_events"]["bridge_reward_toward"], 66.0)
+        outputs["losses"][0].fill_(1)
+        with self.assertRaisesRegex(ValueError, "invalid observations"):
+            collector.collect(model, 1, {})
+        outputs["losses"][0].copy_(torch.tensor([1, 0], dtype=torch.uint8))
+        for name, value in (("bridge_scored", 2), ("bridge_reward_terms", float("inf"))):
+            target = outputs[name][0, 0].view(-1)[0]
+            previous = target.item()
+            target.fill_(value)
+            with self.assertRaisesRegex(ValueError, "invalid observations"):
+                collector.collect(model, 1, {})
+            target.fill_(previous)
+        for name, value in (("bridge_scored", torch.zeros(2, 2, dtype=torch.float32)),
+                            ("bridge_reward_terms", torch.zeros(2, 4, dtype=torch.float64))):
+            previous = outputs[name]
+            outputs[name] = value
+            with self.assertRaisesRegex(ValueError, "Invalid resident Bridge"):
+                collector.collect(model, 1, {})
+            outputs[name] = previous
+        for name, value in (("scalar", float("inf")), ("match", float("nan")), ("voxels", 5)):
+            collector.observations = {key: torch.zeros_like(tensor) for key, tensor in final.items()}
+            final[name][0, 0].view(-1)[0] = value
+            with self.assertRaisesRegex(ValueError, "invalid observations"):
+                collector.collect(model, 1, {})
+        before = [parameter.detach().clone() for parameter in model.parameters()]
+        statistics = optimize(model, torch.optim.Adam(model.parameters(), lr=3e-4), rollout, 1, 2)
+        self.assertTrue(np.isfinite(list(statistics.values())).all())
+        self.assertTrue(any(not torch.equal(old, new) for old, new in zip(before, model.parameters(), strict=True)))
+
+    def test_structured_resident_pool_routes_both_seats_and_opponent_types(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "yaw", "values": [-2, 0, 2]}]})
+        sizes = dict(zip(contract["action_names"], contract["action_sizes"]))
+        model = BridgeActorCritic(1, bridge_observation_descriptor(2), 8, sizes)
+        definitions = {"target": {"type": "scripted", "controller": "stationary_target"},
+                       "lane": {"type": "scripted", "controller": "bridge_fixed_lane"},
+                       "current": {"type": "self_play", "deterministic": True},
+                       "past": {"type": "frozen_self_play", "deterministic": True, "every_updates": 1}}
+        pool = OpponentPool(definitions, contract, 4, "cpu", 17, learner=model)
+        pool.configure([{"id": name, "weight": 1} for name in definitions])
+        pool.capture(model, 0, {"fixed": {}}, force=True)
+        resident = ResidentOpponentPool(pool, "cpu", 17)
+        resident.reset(torch.ones(4, dtype=torch.bool))
+        resident.assignments.copy_(torch.arange(4))
+        resident.learner_slots.copy_(torch.tensor([0, 1, 0, 1]))
+        observations = {"scalar": torch.zeros(4, 2, 1), "match": torch.randn(4, 2, 17),
+                        "voxels": torch.zeros(4, 2, 5, 9, 9, dtype=torch.uint8)}
+        current, learner, _, _, joint, valid = resident.act(model, observations, contract["action_names"], {})
+        indices = torch.arange(4)
+        for name, value in observations.items():
+            torch.testing.assert_close(current[name], value[indices, resident.learner_slots])
+        torch.testing.assert_close(joint[indices, resident.learner_slots], learner)
+        self.assertTrue(valid.all())
+        for index in (2, 3):
+            other = {name: value[[index], 1 - resident.learner_slots[[index]]] for name, value in observations.items()}
+            expected, _, _, _ = resident_policy_actions(model, other, contract["action_names"], deterministic=True)
+            torch.testing.assert_close(joint[[index], 1 - resident.learner_slots[[index]]], expected)
+        observations["voxels"][1, 0, 0, 0, 0] = 5
+        self.assertFalse(resident.act(model, observations, contract["action_names"], {})[-1][1])
+        observations["voxels"][1, 0, 0, 0, 0] = 0
+        observations["match"][2, 1, 0] = float("nan")
+        self.assertFalse(resident.act(model, observations, contract["action_names"], {})[-1][2])
+        with self.assertRaisesRegex(ValueError, "match observation buffer"):
+            resident.act(model, {**observations, "match": torch.zeros(4, 2, 10)}, contract["action_names"], {})
+
+    def test_structured_checkpoint_opponent_uses_saved_fixed_controls(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "yaw", "values": [-2, 0, 2]}]})
+        descriptor = bridge_observation_descriptor(2)
+        sizes = dict(zip(contract["action_names"], contract["action_sizes"]))
+        learner = BridgeActorCritic(1, descriptor, 8, sizes)
+        opponent = BridgeActorCritic(1, descriptor, 8, sizes)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "opponent.pt"
+            metadata = {"contract": contract, "hidden_dim": 8, "players_per_environment": 2,
+                        "learner": "opponent_pool", "bridge_observation": descriptor,
+                        "scenario": {"experimental_bridge": {"mode": {"name": "bridge", "version": 1}}},
+                        "controls": {"fixed": {"movement": "forward"}}}
+            torch.save({"format": "minecraft_sim_ppo", "version": 1, "metadata": metadata,
+                        "model": opponent.state_dict()}, path)
+            pool = OpponentPool({"checkpoint": {"type": "checkpoint", "path": str(path),
+                                                "deterministic": True}}, contract, 2, "cpu", 17, learner=learner)
+            pool.configure([{"id": "checkpoint", "weight": 1}])
+            resident = ResidentOpponentPool(pool, "cpu", 17)
+            resident.reset(torch.ones(2, dtype=torch.bool))
+            resident.learner_slots.copy_(torch.tensor([0, 1]))
+            observations = {"scalar": torch.zeros(2, 2, 1), "match": torch.randn(2, 2, 17),
+                            "voxels": torch.zeros(2, 2, 5, 9, 9, dtype=torch.uint8)}
+            _, _, _, _, joint, valid = resident.act(learner, observations, contract["action_names"], {})
+            other = {name: value[torch.arange(2), 1 - resident.learner_slots] for name, value in observations.items()}
+            expected = pool.controllers["checkpoint"].act({name: value.numpy() for name, value in other.items()})
+            np.testing.assert_array_equal(joint[torch.arange(2), 1 - resident.learner_slots].numpy(), expected)
+            self.assertTrue(valid.all())
+
     def test_fixed_lane_actions_match_host_across_seats_and_resets(self):
         contract = validate_contract({
             "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,

@@ -1,0 +1,96 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "bduel5-bootstrap",
+  "seed": 42,
+  "policy": "../../policies/bridge/building-items.json",
+  "environment": "../../environments/bridge/progression-narrow-objectives-no-blocks.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 1024},
+  "bridge_observation": {
+    "format": "minecraft_sim_bridge_observation", "version": 3,
+    "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1, "actor_task_state_version": 1},
+    "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
+    "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
+      "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress", "refill_enabled", "own_selected_slot",
+      "own_eating_progress", "own_mining_progress", "objective_yaw_error", "objective_pitch_error", "objective_distance",
+      "own_use_cooldown", "own_mining_cooldown"],
+    "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)", "64", "64", "64",
+      "max(1,arrow_refill_ticks)", "1", "8", "32_ticks", "1", "180_degrees", "90_degrees", "50_blocks_clipped",
+      "4_ticks", "5_ticks"],
+    "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_state",
+    "model": "bridge_voxel_actor_critic_v2"
+  },
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "runner-sneak-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"sneak": true, "jump": true}},
+    "runner-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true}},
+    "past-self": {"type": "frozen_self_play", "every_updates": 20}
+  },
+  "mixtures": {
+    "target": [{"id": "target", "weight": 1}],
+    "runner-sneak": [{"id": "runner-sneak-jump", "weight": 1}],
+    "runner-jump": [{"id": "runner-jump", "weight": 1}],
+    "runners": [{"id": "runner-sneak-jump", "weight": 1}, {"id": "runner-jump", "weight": 4}],
+    "mixed": [{"id": "runner-sneak-jump", "weight": 1}, {"id": "runner-jump", "weight": 4},
+              {"id": "past-self", "weight": 1}]
+  },
+  "stages": [
+    {
+      "name": "target-clear", "opponents": "target",
+      "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
+      "evaluations": {"target-clear": {"every_updates": 20, "worlds": 16, "episodes": 64, "seed": 1729}},
+      "advance": {"all": [{"updates": 20}, {"evaluation": {"suite": "target-clear", "metric": "min_seat_win_rate", "at_least": 0.75}}]}
+    },
+    {
+      "name": "runners-generated", "environment": "../../environments/bridge/progression-narrow-generated-4-no-blocks.json",
+      "opponents": "runners", "controls": {"fixed": {}}, "task_override": {"rewards": {"doing_damage": 1}},
+      "evaluations": {
+        "sneak-generated": {"overrides": {"opponents": "runner-sneak"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 1729},
+        "jump-generated": {"overrides": {"opponents": "runner-jump"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 2718},
+        "sneak-clear": {"overrides": {"opponents": "runner-sneak", "environment": "../../environments/bridge/progression-narrow-objectives-no-blocks.json"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 3141},
+        "jump-clear": {"overrides": {"opponents": "runner-jump", "environment": "../../environments/bridge/progression-narrow-objectives-no-blocks.json"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 1618}
+      },
+      "advance": {"all": [{"updates": 50},
+        {"evaluation": {"suite": "sneak-generated", "metric": "min_seat_win_rate", "at_least": 0.625}},
+        {"evaluation": {"suite": "jump-generated", "metric": "min_seat_win_rate", "at_least": 0.625}},
+        {"evaluation": {"suite": "sneak-clear", "metric": "min_seat_win_rate", "at_least": 0.625}},
+        {"evaluation": {"suite": "jump-clear", "metric": "min_seat_win_rate", "at_least": 0.625}}]}
+    },
+    {
+      "name": "gap-5-assisted", "environment": "../../environments/colten/bridge-gap-5-assisted.json",
+      "opponents": "target", "controls": {"fixed": {"weapon": 3, "use_item": true, "attack": false}},
+      "evaluations": {
+        "gap-5-assisted": {"every_updates": 20, "worlds": 16, "episodes": 64, "seed": 1729},
+        "gap-5-unassisted": {"overrides": {"environment": "../../environments/colten/bridge-gap-5.json", "controls": {"fixed": {"weapon": null, "use_item": null, "attack": null}}}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 2718}
+      },
+      "advance": {"all": [{"updates": 50},
+        {"evaluation": {"suite": "gap-5-assisted", "metric": "min_seat_win_rate", "at_least": 0.25}}]}
+    },
+    {
+      "name": "gap-5", "environment": "../../environments/colten/bridge-gap-5.json",
+      "opponents": "target", "controls": {"fixed": {}},
+      "evaluations": {
+        "gap-5-target": {"every_updates": 20, "worlds": 16, "episodes": 64, "seed": 1729},
+        "gap-5-no-blocks": {"overrides": {"environment": "../../environments/colten/bridge-gap-5-no-blocks.json"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 1729},
+        "gap-5-clear": {"overrides": {"environment": "../../environments/bridge/progression-narrow-objectives.json"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 2718}
+      },
+      "advance": {"all": [{"updates": 100},
+        {"evaluation": {"suite": "gap-5-target", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "gap-5-clear", "metric": "min_seat_win_rate", "at_least": 0.75}}]}
+    },
+    {
+      "name": "building-generated", "environment": "../../environments/bridge/progression-narrow-generated.json",
+      "opponents": "mixed", "controls": {"fixed": {}}, "task_override": {"rewards": {"doing_damage": 1}},
+      "evaluations": {
+        "building-sneak-generated": {"overrides": {"opponents": "runner-sneak"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 1729},
+        "building-jump-generated": {"overrides": {"opponents": "runner-jump"}, "every_updates": 20, "worlds": 16, "episodes": 64, "seed": 2718}
+      },
+      "advance": {"all": [{"updates": 100},
+        {"evaluation": {"suite": "building-sneak-generated", "metric": "min_seat_win_rate", "at_least": 0.625}},
+        {"evaluation": {"suite": "building-jump-generated", "metric": "min_seat_win_rate", "at_least": 0.625}}]},
+      "snapshots": [{"name": "fresh-20", "at_updates": 20},
+                    {"name": "fresh-40", "at_updates": 40},
+                    {"name": "fresh-60", "at_updates": 60}]
+    }
+  ]
+}

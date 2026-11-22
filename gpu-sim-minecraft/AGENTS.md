@@ -68,9 +68,9 @@ instance names, usernames and checkout locations are not.
 - `recorded_sessions/`: captured sessions and comparison artifacts for validation.
 
 The default training path stages CUDA controls and state through host memory.
-An opt-in GPU-resident PPO path supports a limited existing-duel workload; see
+An opt-in GPU-resident PPO path supports limited duel and structured Bridge workloads; see
 the [training guide](simulator/training/AGENTS.md#training-architecture) for
-its supported configurations and fallback. It does not implement Bridge mode.
+its supported configurations and fallback.
 
 ## Behavioral References
 

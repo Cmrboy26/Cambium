@@ -1,11 +1,33 @@
 #pragma once
 
 #include "minecraft_sim/core.hpp"
+#include "minecraft_sim/bridge_match.hpp"
+#include "minecraft_sim/objective_progress.hpp"
 
 #include <cmath>
 #include <type_traits>
 
 namespace minecraft_sim::app {
+
+struct BridgeTaskRewardSettings {
+    float score = 0.0F;
+    float opponent_score = 0.0F;
+    float toward = 0.0F;
+    float away = 0.0F;
+};
+
+struct BridgeTaskRewardTerms {
+    double values[4]{};
+};
+
+MCSIM_HD inline BridgeTaskRewardTerms bridgeTaskRewardTerms(
+        bool scored, bool opponent_scored, ObjectiveProgressDelta progress,
+        const BridgeTaskRewardSettings& settings) {
+    return {{scored ? double(settings.score) : 0.0,
+             opponent_scored ? double(settings.opponent_score) : 0.0,
+             progress.toward / 50.0 * settings.toward,
+             -progress.away / 50.0 * settings.away}};
+}
 
 MCSIM_HD inline double rewardClamp(double value, double lower, double upper) {
     return value < lower ? lower : (upper < value ? upper : value);
@@ -125,6 +147,61 @@ MCSIM_HD inline DuelRewardStep sharedRewardEvents(const PlayerState* players, co
         if (actor.last_attack.shield_disabled) addDuelReward(result, player, 7, settings.weights[7]);
         if (actor.last_attack.blocked_damage > 0.0F && weaponAttributes(actor.weapon).disable_shield_seconds == 0.0F) {
             addDuelReward(result, 1 - player, 10, settings.block_weight);
+        }
+    }
+    return result;
+}
+
+struct BridgeRewardStep {
+    DuelRewardStep shared;
+    BridgeTaskRewardTerms task[2];
+    float rewards[2]{};
+};
+
+MCSIM_HD inline BridgeRewardStep bridgeRewards(
+        const PlayerState* players, const WorldState& world, BlockWorldView blocks,
+        const BridgeMatchRules& rules, const BridgeMatchState& match, const BridgeTickEvents& events,
+        const DuelRewardSettings& settings, const BridgeTaskRewardSettings& task_settings,
+        float win_reward, float loss_reward, DuelRewardState& reward_state, ObjectiveProgress* objectives) {
+    PlayerState combat_players[2]{players[0], players[1]};
+    for (int player = 0; player < 2; ++player) {
+        combat_players[player].last_attack = events.attacks[player];
+        combat_players[player].weapon = events.attack_weapons[player];
+    }
+    BridgeRewardStep result;
+    result.shared = sharedRewardEvents(combat_players, world, settings, reward_state);
+    result.shared.terminated = events.terminated;
+    result.shared.truncated = !events.terminated && match.ticks >= settings.max_ticks;
+    const bool finished = result.shared.terminated || result.shared.truncated;
+    const bool timeout = result.shared.truncated || (events.terminated && match.ticks >= rules.max_ticks
+        && match.scores[0] < rules.goals_to_win && match.scores[1] < rules.goals_to_win);
+    bool has_shaping = false;
+    for (int term = 0; term < 5; ++term) has_shaping |= settings.shaping_weights[term] != 0.0F;
+    for (int player = 0; player < 2; ++player) {
+        if (events.died[player]) addDuelReward(result.shared, player, 3, settings.weights[3]);
+        if (timeout) {
+            addDuelReward(result.shared, player, 4, settings.weights[4]);
+            if (!reward_state.dealt_damage[player]) addDuelReward(result.shared, player, 5, settings.weights[5]);
+        }
+        if (!finished && !events.round_reset && !events.respawn[0] && !events.respawn[1] && has_shaping) {
+            float shaping[5]{};
+            shapingRewards(players[player], players[1 - player], players[player].ordinary_arrow_count,
+                           blocks, settings.shaping_weights, shaping);
+            for (int term = 0; term < 5; ++term) addDuelReward(result.shared, player, 13 + term, shaping[term]);
+        }
+        const bool teleported = events.round_reset || events.respawn[player];
+        const auto progress = objectives[player].advance(players[player].position, teleported,
+                                                         events.round_reset && events.scored[player]);
+        result.task[player] = bridgeTaskRewardTerms(events.scored[player], events.scored[1 - player],
+                                                    progress, task_settings);
+        const auto& terms = result.task[player].values;
+        result.rewards[player] = static_cast<float>(terms[0] + terms[1] + terms[2] + terms[3])
+            + result.shared.rewards[player];
+        const auto winner = player == 0 ? BridgeOutcome::team0 : BridgeOutcome::team1;
+        const auto opponent = player == 0 ? BridgeOutcome::team1 : BridgeOutcome::team0;
+        result.shared.lost[player] = events.terminated && events.outcome == opponent;
+        if (events.terminated && events.outcome != BridgeOutcome::draw) {
+            result.rewards[player] += events.outcome == winner ? win_reward : loss_reward;
         }
     }
     return result;

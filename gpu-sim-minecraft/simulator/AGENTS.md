@@ -110,9 +110,14 @@ full-cube targeting, placement and configurable mining for per-world overlays.
 Golden apples have experimental held-use, absorption and regeneration behavior;
 pickaxe entity combat, general effects, fluids, special block shapes and item
 durability are unsupported. Fixed authored setups and website replay support the
-experimental subset; resident collection, Fabric replay and live integration
-remain unimplemented.
+experimental subset; resident collection supports portable structured Bridge plans.
+Fabric replay and live integration remain experimental.
 See the [training guide](training/AGENTS.md#experimental-bridge-batches).
+
+`mcsim_bridge_match_features` is a host diagnostic for the shared v1/v2 match
+feature encoders, advertised by `bridge_host_match_features_version: 1`. It
+is separate from resident Bridge observation registration. Functional parity has
+T4 coverage; final H100 validation remains outstanding.
 
 ## CUDA Stream Execution
 
