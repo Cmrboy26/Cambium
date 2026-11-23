@@ -57,14 +57,21 @@ the build path before opening the lock, and releases/closes the lock before
 training. Keep this persistent lock file; deleting it can split lock ownership.
 
 Select `--rollout-backend host|cuda-resident|auto` with `rosie/submit.sh`, or
-set `SIM_ROLLOUT_BACKEND` for `train.sbatch` and `train-local.sh`. The default is
-`host`. `cuda-resident` rejects unsupported plans; `auto` reports its reason when
-falling back to host. Portable structured Bridge plans can use resident collection;
-shared GPU sweeps currently use host collection.
+set `SIM_ROLLOUT_BACKEND` for `train.sbatch` and `train-local.sh`. Interactive
+submission recommends `cuda-resident` for compatible plans and otherwise uses
+`host`; an explicit flag overrides that recommendation. Line mode and direct
+launchers default to `host`. `cuda-resident` rejects unsupported plans; `auto`
+reports its reason when falling back to host. GPU-node library capabilities
+are checked again at startup. Portable structured Bridge plans can use resident
+collection; shared GPU sweeps currently use host collection.
 
-Each job copies the completed `minecraft_sim_training.so` into a unique private
-directory under `SLURM_TMPDIR`, falling back to `TMPDIR` and then `/tmp`. The
-copy is read-only and Python's `--library` points to it, not the shared output.
+Each Slurm job tries to create a unique private directory under `SLURM_TMPDIR`,
+`TMPDIR`, `/tmp`, and finally the checkout's `simulator` directory, in that
+order. Failed locations are reported before trying the next one. The launcher
+exports the private directory as `TMPDIR` for build and training processes.
+Local training uses `TMPDIR` or `/tmp`. Each job copies the completed
+`minecraft_sim_training.so` into its private directory; the copy is read-only
+and Python's `--library` points to it, not the shared output.
 Later builds cannot change an already-running job's library. The private
 directory is removed on normal/error exit and handled termination; forced
 SIGKILL/node failure may leave scratch for site cleanup. Build/copy/lock failures
@@ -125,12 +132,14 @@ and stage progress instead; resume requires the original plan and compatible
 world-count, rollout, and model settings, and cannot be combined with
 initialization or stage selection. Checkpoint controls, stage selection, and a
 custom save cadence are not supported in shared-GPU sweep mode.
-The wizard changes to the project root. Choose GPU and plan first (Enter accepts
-their defaults), then use the editable terminal form: Up/Down or Tab/Shift+Tab
-select a row, type to edit, Ctrl+U clears its value, and Ctrl+C/Ctrl+D cancel.
-Values start populated; use the usual Left/Right/Home/End/Backspace editing keys.
-Enter moves to the next row; Enter on the bottom **Submit** row authorizes the
-selected jobs, without a second confirmation prompt. Errors leave the form open.
+The wizard changes to the project root. Choose the GPU, then type to filter
+curriculum paths; Up/Down selects a match and Enter opens it. In the editable
+terminal form, Up/Down or Tab/Shift+Tab selects a row, type to edit, Ctrl+U
+clears its value, and Ctrl+C/Ctrl+D cancels. Left/Right cycles the backend,
+workload preset and duration preset; other fields use ordinary editing keys.
+Enter moves to the next row; Enter on **Submit** validates settings and shows a
+review and command preview. Confirm explicitly to start or submit. Errors leave
+the form open.
 The form scrolls on shorter terminals and keeps Submit visible. `--dry-run` uses
 the same form but only previews commands, submitting/writing nothing. Install the
 updated training requirements for `prompt-toolkit` (or rerun `rosie/setup.sh`).
@@ -143,21 +152,29 @@ filename remain distinguishable; submission retains the full selected path.
 After selection, the wizard runs `python -m simulator.training.validate_plans`
 on that file before reading defaults or prompting for training settings, including
 in `--dry-run` mode. Invalid JSON, missing references or invalid plan semantics
-abort with the validator's diagnostic and submit nothing. Only the selected
-plan is checked, so another person's unfinished curriculum does not block yours.
+show the validator's diagnostic and submit nothing; interactive mode can return
+to the picker. Only the selected plan is checked, so another person's unfinished
+curriculum does not block yours.
 This uses `.venv-rosie/bin/python`, falling back to `python3` on `PATH`; that
 interpreter needs the training Python requirements. Validation does not load the
 native library, train, compile CUDA or submit a job. Run the validator without
 paths separately to check all curricula.
 
-| Preset | Partition | GPU / CUDA architecture | Worlds | Rollout | Wall-Time |
+| GPU | Partition | GPU / CUDA architecture | Large worlds | Rollout | Wall-Time |
 | --- | --- | --- | --- | --- | --- |
 | `h100` (default) | `dgxh100` | H100 / 90 | 8,192 | 128 | 1 day |
 | `v100` | `dgx` | V100 / 70 | 2,048 | 128 | 1 day |
 | `teaching` | `teaching` | T4 / 75 | 256 | 64 | 2 hours |
 
-World counts are starting points, not benchmarked optima. Each job requests one
-GPU, eight CPUs and 24 GB host RAM by default. Other prompts cover plan selection,
+Interactive workload presets use small = large/16, medium = large/4 and large =
+the world counts in the table (rounded down, minimum one). Medium is the default
+for fresh interactive runs. Duration presets independently set the maximum update
+count to short = min(20, standard), standard = plan-derived default, or extended
+= twice standard. A short cap can stop before completing a curriculum stage;
+evaluation gates can also require more than the standard cap. Manual edits mark
+the affected preset custom. These are starting points, not benchmarked optima.
+Line mode retains the table's world defaults. Each job requests one GPU, eight
+CPUs and 24 GB host RAM by default. Other prompts cover plan selection,
 job name, update cap, learner settings, CPU threads, replay cadence, checkpoint
 controls and profiling/checkpoint intervals. Learner defaults come from the
 selected plan; the default update cap sums plain update budgets, or falls back

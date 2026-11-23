@@ -1,0 +1,36 @@
+{
+  "format": "minecraft_sim_environment",
+  "version": 2,
+  "minecraft": "26.3",
+  "name": "cbridge2-intro",
+  "arena": "../../arenas/colten/cbridge2.json",
+  "players": {
+    "shared": {"loadout": {"weapons": ["minecraft:diamond_sword", "minecraft:bow", "minecraft:air", "minecraft:air", "minecraft:air"],
+                            "selected": 0, "offhand": "minecraft:air", "arrows": 1}},
+    "overrides": [{"position": [0.5, 1, -17.5], "yaw": 0}, {"position": [0.5, 1, 16.5], "yaw": 180}]
+  },
+  "task": {"max_ticks": 2200, "rewards": {"win_speed": 0.1, "episode_timeout": -0.1}},
+  "bridge": {
+    "mode": {"name": "bridge", "version": 1},
+    "goals": [{"min": [-2, 1, -19], "max": [2, 3, -18]},
+              {"min": [-2, 1, 17], "max": [2, 3, 18]}],
+    "void_y": -3,
+    "match": {"goals_to_win": 3, "max_ticks": 1800, "cage_ticks": 40,
+              "persist_blocks_on_goal": true, "arrow_refill_ticks": 80},
+    "task_rewards": {"score": 1, "opponent_score": -1, "win": 5, "loss": -5, "draw": -5, "toward": 3, "away": 0},
+    "kits": [
+      {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", "empty", "empty", "empty", "empty"], "blocks": 64, "golden_apples": 2},
+      {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", "empty", "empty", "empty", "empty"], "blocks": 64, "golden_apples": 2}
+    ],
+    "building": {"zones": [{"min": [-5, 0, -16], "max": [6, 4, 15]}],
+                 "block_range": 4.5, "entity_range": 3.0, "hardness": 0.8,
+                 "mining_speed": 1.0, "correct_tool": true},
+    "terrain_generation": {
+      "bridge": {"min": [0, 0, -15], "max": [1, 1, 15]},
+      "patterns": [
+        {"location": "top", "type": "constant", "value": 1, "percent": 0.12},
+        {"location": "side", "type": "random", "min": 1, "max": 2, "percent": 0.25}
+      ]
+    }
+  }
+}

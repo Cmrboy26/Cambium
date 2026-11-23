@@ -69,6 +69,7 @@ public:
     void resetFixedOnStream(const std::uint8_t* device_mask, std::size_t count, void* stream);
     void registerRewardBuffers(float* rewards, std::uint8_t* terminated, std::uint8_t* truncated,
                                std::uint8_t* losses, double* contributions, std::size_t count);
+    void registerBehaviorBuffer(float* events, std::size_t count);
     void registerBridgeBuffers(float* match, std::size_t match_count, std::uint8_t* voxels,
                                std::size_t voxel_count, std::uint8_t* scored, std::size_t scored_count,
                                double* task_terms, std::size_t task_count, int match_version);

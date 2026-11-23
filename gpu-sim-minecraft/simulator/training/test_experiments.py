@@ -368,6 +368,8 @@ class ExperimentChecks(unittest.TestCase):
             lambda value: value["match"].update(persist_blocks_on_goal=1),
             lambda value: value["match"].update(arrow_refill_ticks=1),
             lambda value: value["task_rewards"].update(score=float("inf")),
+            lambda value: value["task_rewards"].update(draw=float("inf")),
+            lambda value: value["task_rewards"].update(draw=True),
             lambda value: value["task_rewards"].update(score=True),
             lambda value: value["task_rewards"].update(score=3.4028234663852886e38,
                                                         win=3.4028234663852886e38),
@@ -753,19 +755,20 @@ class ExperimentChecks(unittest.TestCase):
         self.bridge_setup()
         self.environment["task"]["rewards"] = {"taking_damage": -1}
         self.write()
-        self.raw["stages"][0]["task_override"] = {"rewards": {"doing_damage": 1, "no_damage_penalty": -2}}
+        self.raw["stages"][0]["task_override"] = {"rewards": {"doing_damage": 1, "no_damage_penalty": -2, "win_speed": 0.1}}
         self.raw["stages"][0]["evaluations"] = {"held": {"every_updates": 1, "episodes": 2, "seed": 1,
             "overrides": {"task_override": {"rewards": {"missed_attack": -0.5}}}}}
         resolved = self.resolve()
         weights = resolved["stages"][0]["rewards"]["weights"]
         self.assertEqual(weights["doing_damage"], 1)
         self.assertEqual(weights["no_damage_penalty"], -2)
+        self.assertEqual(weights["win_speed"], 0.1)
         self.assertEqual(weights["taking_damage"], 0)
         evaluation = resolved["stages"][0]["evaluations"]["held"]["rewards"]["weights"]
         self.assertEqual(evaluation["missed_attack"], -0.5)
         self.assertEqual(evaluation["doing_damage"], 0)
         self.assertEqual(resolve_plan(resolved), resolved)
-        for name in ("won_duel", "win_speed"):
+        for name in ("won_duel",):
             self.raw["stages"][0]["task_override"] = {"rewards": {name: 1}}
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "duel win rewards"):
                 self.resolve()

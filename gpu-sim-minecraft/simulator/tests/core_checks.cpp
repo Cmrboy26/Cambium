@@ -93,7 +93,7 @@ void checkBridgeRewards() {
     settings.weights[3] = -3;
     settings.weights[4] = -4;
     settings.weights[5] = -2;
-    app::BridgeTaskRewardSettings task{2, -1, 0.25F, 0.1F};
+    app::BridgeTaskRewardSettings task{2, -1, 0.25F, 0.1F, -5};
     app::DuelRewardState reward_state;
     ObjectiveProgress objectives[2];
     for (auto& objective : objectives) objective.reset({}, {0, 0, 10});
@@ -105,6 +105,15 @@ void checkBridgeRewards() {
     near(winning.rewards[1], -13, 1e-6, "bridge loser reward");
     near(winning.shared.contributions[1][3], -3, 1e-6, "bridge death contribution");
     require(reward_state.dealt_damage[0] && !reward_state.dealt_damage[1], "bridge damage state survives tick");
+
+    settings.weights[8] = 0.2F;
+    match.ticks = 50;
+    const auto fast_win = app::bridgeRewards(players, world, {}, rules, match, events, settings, task,
+                                              10, -5, reward_state, objectives);
+    near(fast_win.shared.contributions[0][8], 0.1, 1e-6, "bridge win speed contribution");
+    near(fast_win.shared.contributions[1][8], 0, 1e-6, "bridge loser has no speed bonus");
+    settings.weights[8] = 0;
+    match.ticks = 100;
 
     events.outcome = BridgeOutcome::team1;
     const auto opposite_win = app::bridgeRewards(players, world, {}, rules, match, events, settings, task,
@@ -129,8 +138,13 @@ void checkBridgeRewards() {
                                           10, -5, reward_state, objectives);
     require(draw.shared.terminated && !draw.shared.truncated, "bridge match clock ends as termination");
     require(!draw.shared.lost[0] && !draw.shared.lost[1], "bridge draw has no match loser");
-    near(draw.rewards[0], -4, 1e-6, "bridge draw timeout after damage");
-    near(draw.rewards[1], -6, 1e-6, "bridge draw timeout without damage");
+    near(draw.rewards[0], -9, 1e-6, "bridge draw timeout after damage");
+    near(draw.rewards[1], -11, 1e-6, "bridge draw timeout without damage");
+    match.ticks = 50;
+    const auto early_draw = app::bridgeRewards(players, world, {}, rules, match, events, settings, task,
+                                                10, -5, reward_state, objectives);
+    near(early_draw.rewards[0], -5, 1e-6, "bridge early draw reward");
+    near(early_draw.rewards[1], -5, 1e-6, "bridge early draw reward for both players");
 }
 
 void checkBridgeMatchFeatures() {
@@ -236,6 +250,57 @@ void checkBridgeTerrainGeneration() {
     require(placed > 0 && differs, "bridge terrain varies across seeds");
     const BridgeTerrainGeneration invalid{0, 0, -7, 5, 4};
     require(!generateBridgeTerrain(terrain.view(0), invalid, 42), "reject invalid bridge terrain region");
+
+    TerrainOverlays patterned(view, 3);
+    BridgeTerrainGeneration patterns{0, 0, -5, 5, 0};
+    patterns.bridge_end_x = 1;
+    patterns.pattern_count = 3;
+    patterns.patterns[0] = {0, 0, 0, 2, 1 << 24};
+    patterns.patterns[1] = {1, 1, 1, 1, 1 << 24};
+    patterns.patterns[2] = {0, 2, 0, 2, 1 << 24};
+    require(generateBridgeTerrain(patterned.view(0), patterns, 42), "generate patterned bridge terrain");
+    require(generateBridgeTerrain(patterned.view(1), patterns, 42), "repeat patterned bridge terrain");
+    require(generateBridgeTerrain(patterned.view(2), patterns, 43), "alternate patterned bridge terrain");
+    bool pattern_differs = false;
+    for (int z = -5; z < 5; ++z) {
+        require(patterned.view(0).solid(-1, 0, z) && patterned.view(0).solid(1, 0, z),
+                "constant side pattern touches the bridge");
+        for (int x = -3; x <= 3; ++x) {
+            for (int y = 0; y < 3; ++y) {
+                const auto index = view.cellIndex(x, y, z);
+                require(patterned.view(0).overlay[index] == patterned.view(1).overlay[index],
+                        "pattern seed repeatability");
+                pattern_differs |= patterned.view(0).overlay[index] != patterned.view(2).overlay[index];
+            }
+        }
+    }
+    require(patterned.view(0).solid(0, 2, -1), "half-sine adds blocks near the middle");
+    require(pattern_differs, "patterned terrain varies across seeds");
+    LegacyRandom pattern_random;
+    for (int position = 0; position < 5; ++position) {
+        const int expected[]{0, 1, 2, 1, 0};
+        require(bridgePatternExtent(patterns.patterns[2], position, 5, pattern_random) == expected[position],
+                "half-sine endpoints and midpoint");
+    }
+    BridgeTerrainGeneration noise{0, 0, -5, 5, 0};
+    noise.bridge_end_x = 1;
+    noise.pattern_count = 1;
+    noise.patterns[0] = {0, 0, 0, 2, 3 * (1 << 22)};
+    TerrainOverlays random_terrain(view, 2);
+    require(generateBridgeTerrain(random_terrain.view(0), noise, 42), "generate random top pattern");
+    require(generateBridgeTerrain(random_terrain.view(1), noise, 43), "generate alternate random top pattern");
+    bool different_shape = false;
+    for (int z = -5; z < 5; ++z) {
+        for (int y = 1; y <= 2; ++y) {
+            different_shape |= random_terrain.view(0).solid(0, y, z) != random_terrain.view(1).solid(0, y, z);
+        }
+    }
+    require(different_shape, "random top geometry varies across seeds");
+    patterns.patterns[0].probability = 0;
+    patterns.pattern_count = 1;
+    TerrainOverlays empty(view, 1);
+    require(generateBridgeTerrain(empty.view(0), patterns, 42), "zero probability pattern is valid");
+    require(!empty.view(0).solid(0, 1, 0), "zero probability leaves the lane clear");
 }
 
 void checkBridgeLocalVoxels() {

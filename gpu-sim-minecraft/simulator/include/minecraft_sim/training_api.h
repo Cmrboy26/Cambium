@@ -74,6 +74,7 @@ int mcsim_clear_cuda_action_status(void* handle);
    contributions [worlds,2,18]. Activating this mode disables host-state APIs. */
 int mcsim_register_cuda_step_outputs(void* handle, float* rewards, uint8_t* terminated,
                                      uint8_t* truncated, uint8_t* losses, double* contributions, size_t worlds);
+int mcsim_register_cuda_behavior_events(void* handle, float* events, size_t count);
 /* Resident Bridge: caller-owned match [worlds,2,10|17], voxel
    [worlds,2,5,9,9], scored [worlds,2] and task terms [worlds,2,4] buffers.
    Counts are elements, and version selects the match feature layout. */

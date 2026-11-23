@@ -38,6 +38,7 @@ class DashboardChecks(unittest.TestCase):
                 self.opponent_disclosure = None
                 self.smoothing_control = None
                 self.window_modes = []
+                self.performance_modes = []
                 self.window_controls = {}
                 self.pages = {}
                 self.navigation = {}
@@ -54,6 +55,8 @@ class DashboardChecks(unittest.TestCase):
                     self.smoothing_control = (tag, attributes)
                 if attributes.get("name") == "window-mode":
                     self.window_modes.append(attributes["value"])
+                if attributes.get("name") == "performance-mode":
+                    self.performance_modes.append(attributes["value"])
                 if attributes.get("id", "").startswith("window-"):
                     self.window_controls[attributes["id"]] = (tag, attributes)
                 if tag == "a":
@@ -98,6 +101,8 @@ class DashboardChecks(unittest.TestCase):
                  "max": "1000", "step": "1", "value": "0", "aria-valuetext": "Off"}))
         self.assertIn("smooth-value", page.ids)
         self.assertEqual(page.window_modes, ["latest", "range", "stage", "all"])
+        self.assertEqual(page.performance_modes, ["benchmark", "training", "opponents"])
+        self.assertIn("opponent-comparison", page.ids)
         self.assertEqual(page.window_controls["window-size"][1]["type"], "range")
         for bound in ("start", "end"):
             self.assertEqual(page.window_controls[f"window-{bound}"][1]["type"], "number")
@@ -971,6 +976,38 @@ assert.equal(evaluate(`duration(90000)`),'1d 1h');
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for performance chart checks")
+    def test_opponent_window_aggregation_weights_episodes_and_preserves_missing_data(self):
+        script = Path(__file__).with_name("dashboard") / "dashboard.js"
+        result = subprocess.run(["node", "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const context = vm.createContext({document:{getElementById(){return null;}}, Intl});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('function renderPerformanceMode')[0],context);
+const rows = [
+    {training_opponents:{alpha:{training_episodes:999,training_win_rate:1}}, training_rollout:{training_episodes:2,
+        training_opponents:{alpha:{training_episodes:2,training_win_rate:.5,training_loss_rate:.5,
+            training_timeout_rate:0,training_draw_rate:0,training_return:4,training_length:10}}}},
+    {training_rollout:{training_episodes:8,training_opponents:{alpha:{training_episodes:8,training_win_rate:1,
+        training_loss_rate:0,training_timeout_rate:0,training_draw_rate:0,training_return:-1,training_length:20}}}},
+    {training_rollout:{training_episodes:3,training_opponents:{beta:{training_episodes:3,training_win_rate:0}}}},
+    {training_rollout:{training_episodes:4,source:'recovered_rewards',training_opponents:{}}},
+    {training_episodes:1000,training_opponents:{alpha:{training_win_rate:1}}}
+];
+context.rows=rows;
+const result=JSON.parse(JSON.stringify(vm.runInContext('aggregateOpponents(rows)',context)));
+assert.equal(result.incompleteUpdates,3);
+assert.equal(result.opponents[0].name,'alpha');
+assert.equal(result.opponents[0].episodes,10);
+assert.equal(result.opponents[0].training_win_rate,.9);
+assert.equal(result.opponents[0].training_return,0);
+assert.equal(result.opponents[0].training_length,18);
+assert.equal(result.opponents[1].training_win_rate,0);
+assert.equal(result.opponents[1].training_return,null);
+""", str(script)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for performance chart checks")
     def test_performance_metrics_and_selection_dom(self):
         script = Path(__file__).with_name("dashboard") / "dashboard.js"
         self.assertNotIn('id="training-aggregation', script.with_name("index.html").read_text())
@@ -1220,6 +1257,40 @@ vm.runInContext(`chartAxis='update'; smoothing=1; windowMode='all'; records=[
 ]; redrawCharts();`,context);
 assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[0].data.map(point=>point.y)"),[4,7,3,null]);
 assert.deepEqual(evaluate("charts.get('duels-chart').data.datasets[1].data.map(point=>point.y)"),[2,1,0,1]);
+vm.runInContext(`performanceMode='opponents'; selectedOpponent=''; configuration=null;
+    chartAxis='update'; smoothing=1; windowMode='all'; records=[
+    {update:10,stage:'warmup',stage_index:0,training_rollout:{training_episodes:3,training_opponents:{
+        alpha:{training_episodes:2,training_win_rate:.5,training_loss_rate:.5,training_timeout_rate:0,training_draw_rate:0,training_return:4,training_length:10},
+        '<opponent>':{training_episodes:1,training_win_rate:0,training_loss_rate:1,training_timeout_rate:0,training_draw_rate:0,training_return:-2,training_length:5}}}},
+    {update:20,stage:'fight',stage_index:1,training_opponents:{alpha:{training_episodes:1000,training_win_rate:0}},
+        training_rollout:{training_episodes:8,training_opponents:{alpha:{training_episodes:8,training_win_rate:1,training_loss_rate:0,
+            training_timeout_rate:0,training_draw_rate:0,training_return:-1,training_length:20}}}},
+    {update:30,stage:'fight',stage_index:1,training_rollout:{source:'recovered_rewards',training_episodes:4,training_opponents:{}}},
+    {update:40,stage:'fight',stage_index:1,training_rollout:{training_episodes:0,training_opponents:{}}}
+]; renderPerformance(); redrawCharts();`,context);
+assert.equal(document.getElementById('opponent-performance').hidden,false);
+assert.equal(document.getElementById('training-performance').hidden,true);
+assert.equal(document.getElementById('benchmark-performance').hidden,true);
+assert.equal(document.getElementById('training-summary-win').hidden,false,'Opponent mode retains overview training summaries');
+assert.equal(document.getElementById('training-summary-return').hidden,false);
+const comparison=()=>document.getElementById('opponent-comparison').children[0].children.map(row=>row.children.map(cell=>cell.textContent));
+assert.deepEqual(comparison(),[['<opponent>','1','0%','100%','0%','0%','-2','5'],['alpha','10','90%','10%','0%','0%','0','18']]);
+assert.match(document.getElementById('opponent-comparison-status').textContent,/11 recorded episodes.*1 updates with incomplete/);
+assert.deepEqual(evaluate("charts.get('opponent-win-chart').data.datasets.map(dataset=>[dataset.label,dataset.data.map(point=>point.y)])"),
+    [['<opponent>',[0,null,null,null]],['alpha',[50,100,null,null]]]);
+assert.equal(evaluate("charts.get('opponent-win-chart').options.scales.y.max"),100);
+assert.equal(document.getElementById('opponent-win-chart-empty').hidden,true);
+vm.runInContext("charts.get('opponent-win-chart').setDatasetVisibility(1,false); windowMode='range'; windowStart=20; windowEnd=30; redrawCharts();",context);
+assert.deepEqual(comparison(),[['alpha','8','100%','0%','0%','0%','-1','20']]);
+assert.match(document.getElementById('opponent-comparison-status').textContent,/8 recorded episodes.*1 updates with incomplete/);
+assert.equal(evaluate("charts.get('opponent-win-chart').isDatasetVisible(0)"),false,'Visibility must follow opponent names across windows');
+vm.runInContext("windowMode='stage'; windowStage='0'; document.getElementById('window-stage').value='0'; redrawCharts();",context);
+assert.deepEqual(comparison(),[['<opponent>','1','0%','100%','0%','0%','-2','5'],['alpha','2','50%','50%','0%','0%','4','10']]);
+vm.runInContext("windowMode='latest'; windowSize=1; redrawCharts();",context);
+assert.match(comparison()[0][0],/No per-opponent episodes/);
+assert.equal(document.getElementById('opponent-win-chart-empty').hidden,false);
+vm.runInContext("windowMode='all'; redrawCharts();",context);
+assert.equal(evaluate("charts.get('opponent-win-chart').isDatasetVisible(1)"),false,'Refresh and window changes preserve legend selection');
 """, str(script), json.dumps(CATALOG)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 

@@ -93,6 +93,29 @@ def decoded(contract, actions, name):
 
 
 class ScriptedChecks(unittest.TestCase):
+    def test_bridge_fixed_lane_places_blocks_while_jumping(self):
+        contract = policy(observations=[{"feature": "self.yaw_fraction"}, {"feature": "self.pitch_fraction"}], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "yaw", "values": [-2, 0, 2]},
+            {"name": "pitch", "values": [-10, 0, 10]},
+            {"name": "jump", "values": [False, True]},
+            {"name": "weapon", "values": [0, 3]},
+            {"name": "use_item", "values": [False, True]},
+        ])
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane",
+                      "options": {"jump": True, "place_blocks": True, "block_slot": 3}}
+        controller = create_controller(definition, contract, 2)
+        actions = controller.act(observations(contract, 2, **{"self.yaw_fraction": [0, 1],
+                                                              "self.pitch_fraction": [0, 1]}))
+        self.assertEqual(decoded(contract, actions, "movement").tolist(), ["forward", "forward"])
+        self.assertEqual(decoded(contract, actions, "jump").tolist(), [True, True])
+        self.assertEqual(decoded(contract, actions, "pitch").tolist(), [10, 0])
+        self.assertEqual(decoded(contract, actions, "weapon").tolist(), [3, 3])
+        self.assertEqual(decoded(contract, actions, "use_item").tolist(), [True, True])
+        with self.assertRaises(ValueError):
+            create_controller({"type": "scripted", "controller": "bridge_fixed_lane",
+                               "options": {"place_blocks": True}}, contract, 1)
+
     def test_bridge_fixed_lane_jump_and_sneak_options(self):
         contract = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
             {"name": "movement", "values": ["neutral", "forward"]},

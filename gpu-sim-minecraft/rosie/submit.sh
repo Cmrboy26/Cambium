@@ -7,6 +7,7 @@ DRY_RUN=false
 LOCAL=false
 PROFILE_EVERY=0
 ROLLOUT_BACKEND=host
+BACKEND_EXPLICIT=false
 SHARED_GPU=false
 MAX_PARALLEL=0
 LINE_MODE=false
@@ -27,6 +28,7 @@ while (( $# )); do
                 exit 1
             fi
             ROLLOUT_BACKEND="$2"
+            BACKEND_EXPLICIT=true
             shift 2 ;;
         --initialize|--resume|--start-stage|--save-every)
             if (( $# < 2 )); then printf 'Expected a value after %s.\n' "$1" >&2; exit 1; fi
@@ -100,7 +102,8 @@ read_form_values() {
                 SWEEP_VARIABLE="$value" ;;
             SWEEP_LABEL) SWEEP_LABEL="$value" ;;
             SWEEP_VALUE) SWEEP_VALUES+=("$value") ;;
-            JOB_NAME|TIME|ENVS|UPDATES|ROLLOUT|HIDDEN|EPOCHS|MINIBATCH|LR|CPUS|MEMORY|THREADS|REPLAY|PROFILE_EVERY|SAVE_EVERY|RESUME|INITIALIZE|START_STAGE|DEPENDENCY|GAMMA|GAE_LAMBDA|CLIP_EPS|VF_COEF|ENT_COEF|MAX_GRAD_NORM)
+            WORKLOAD_PRESET|DURATION_PRESET) : ;;
+            JOB_NAME|ROLLOUT_BACKEND|TIME|ENVS|UPDATES|ROLLOUT|HIDDEN|EPOCHS|MINIBATCH|LR|CPUS|MEMORY|THREADS|REPLAY|PROFILE_EVERY|SAVE_EVERY|RESUME|INITIALIZE|START_STAGE|DEPENDENCY|GAMMA|GAE_LAMBDA|CLIP_EPS|VF_COEF|ENT_COEF|MAX_GRAD_NORM)
                 printf -v "$key" '%s' "$value" ;;
             *) printf 'Unexpected form setting; nothing submitted.\n' >&2; exit 1 ;;
         esac
@@ -188,26 +191,6 @@ else
     esac
 fi
 
-shopt -s nullglob globstar
-PLANS=(simulator/setups/curricula/**/*.json)
-if (( ${#PLANS[@]} == 0 )); then
-    printf 'No training plans found.\n' >&2
-    exit 1
-fi
-DEFAULT_PLAN=1
-printf '\nTraining plans:\n'
-for index in "${!PLANS[@]}"; do
-    printf '  %d) %s\n' "$((index + 1))" "${PLANS[index]#simulator/setups/curricula/}"
-    if [[ "${PLANS[index]##*/}" == shield-axe-curriculum.json ]]; then
-        DEFAULT_PLAN=$((index + 1))
-    fi
-done
-while true; do
-    prompt PLAN_INDEX 'Plan number' "$DEFAULT_PLAN" '^[1-9][0-9]{0,3}$'
-    if (( PLAN_INDEX <= ${#PLANS[@]} )); then break; fi
-    printf 'Choose one of the listed plans.\n' >&2
-done
-PLAN="${PLANS[PLAN_INDEX - 1]}"
 PYTHON="$ROOT/.venv-rosie/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
     PYTHON="$(command -v python3 || true)"
@@ -216,10 +199,42 @@ if [[ -z "$PYTHON" ]]; then
     printf 'Python 3 with the training requirements is required to validate training plans.\n' >&2
     exit 1
 fi
-printf '\nValidating selected training plan: %s\n' "$PLAN"
-if ! "$PYTHON" -m simulator.training.validate_plans "$PLAN"; then
-    printf 'Selected training plan validation failed; nothing submitted.\n' >&2
-    exit 1
+validate_selected_plan() {
+    printf '\nValidating selected training plan: %s\n' "$PLAN"
+    if ! "$PYTHON" -m simulator.training.validate_plans "$PLAN"; then
+        printf 'Selected training plan validation failed; nothing submitted.\n' >&2
+        return 1
+    fi
+}
+if [[ -t 0 && -t 2 ]] && ! "$LINE_MODE"; then
+    while true; do
+        if ! PLAN="$("$PYTHON" -B -m simulator.training.submit_form --choose-plan)"; then exit 1; fi
+        if validate_selected_plan; then break; fi
+        prompt RETRY_PLAN 'Choose another plan? (y/n)' y '^[yYnN]$'
+        if [[ "$RETRY_PLAN" != [yY] ]]; then exit 1; fi
+    done
+else
+    shopt -s nullglob globstar
+    PLANS=(simulator/setups/curricula/**/*.json)
+    if (( ${#PLANS[@]} == 0 )); then
+        printf 'No training plans found.\n' >&2
+        exit 1
+    fi
+    DEFAULT_PLAN=1
+    printf '\nTraining plans:\n'
+    for index in "${!PLANS[@]}"; do
+        printf '  %d) %s\n' "$((index + 1))" "${PLANS[index]#simulator/setups/curricula/}"
+        if [[ "${PLANS[index]##*/}" == shield-axe-curriculum.json ]]; then
+            DEFAULT_PLAN=$((index + 1))
+        fi
+    done
+    while true; do
+        prompt PLAN_INDEX 'Plan number' "$DEFAULT_PLAN" '^[1-9][0-9]{0,3}$'
+        if (( PLAN_INDEX <= ${#PLANS[@]} )); then break; fi
+        printf 'Choose one of the listed plans.\n' >&2
+    done
+    PLAN="${PLANS[PLAN_INDEX - 1]}"
+    if ! validate_selected_plan; then exit 1; fi
 fi
 if "$LOCAL" && ! "$DRY_RUN"; then
     for tool in cmake nvcc flock nvidia-smi; do
@@ -256,7 +271,7 @@ fi
 read -r UPDATES_DEFAULT HIDDEN_DEFAULT EPOCHS_DEFAULT MINIBATCH_DEFAULT LR_DEFAULT GAMMA GAE_LAMBDA CLIP_EPS VF_COEF ENT_COEF MAX_GRAD_NORM REPLAY_DEFAULT <<< "$DEFAULTS"
 
 FORM_USED=false
-FORM_ARGS=(--plan "$PLAN" --envs-default "$ENVS_DEFAULT" --rollout-default "$ROLLOUT_DEFAULT"
+FORM_ARGS=(--plan "$PLAN" --backend-default "$ROLLOUT_BACKEND" --envs-default "$ENVS_DEFAULT" --rollout-default "$ROLLOUT_DEFAULT"
     --time-default "$TIME_DEFAULT" --max-parallel "$MAX_PARALLEL"
     --profile-every-default "$PROFILE_EVERY" --save-every-default "$SAVE_EVERY"
     --resume-default "$RESUME" --initialize-default "$INITIALIZE" --start-stage-default "$START_STAGE"
@@ -264,12 +279,27 @@ FORM_ARGS=(--plan "$PLAN" --envs-default "$ENVS_DEFAULT" --rollout-default "$ROL
 if "$LOCAL"; then FORM_ARGS+=(--local); fi
 if [[ -t 0 && -t 2 ]] && ! "$LINE_MODE"; then
     if "$SHARED_GPU"; then FORM_ARGS+=(--shared-gpu); fi
+    if ! "$BACKEND_EXPLICIT" && ! "$SHARED_GPU"; then FORM_ARGS+=(--recommend-backend); fi
     if ! FORM_DATA="$("$PYTHON" -B -m simulator.training.submit_form "${FORM_ARGS[@]}")"; then exit 1; fi
     read_form_values "$FORM_DATA"
     FORM_USED=true
 elif (( ${#LEARNER_OVERRIDES[@]} )); then
     if ! FORM_DATA="$("$PYTHON" -B -m simulator.training.submit_form "${FORM_ARGS[@]}" --learner-only)"; then exit 1; fi
     read_form_values "$FORM_DATA"
+fi
+
+if ! "$FORM_USED" && [[ "$ROLLOUT_BACKEND" != host ]]; then
+    if ! "$PYTHON" - "$PLAN" "$ROLLOUT_BACKEND" <<'PY'
+import sys
+from simulator.training.plans import load_plan
+from simulator.training.submit_form import backend_status, resident_reason
+
+reason = resident_reason(load_plan(sys.argv[1]))
+print(backend_status(sys.argv[2], reason))
+if sys.argv[2] == "cuda-resident" and reason:
+    raise SystemExit("Selected rollout backend is incompatible; nothing submitted.")
+PY
+    then exit 1; fi
 fi
 
 if [[ -n "$RESUME" && -n "$INITIALIZE" ]]; then
@@ -311,7 +341,7 @@ then
     printf 'Selected start stage is invalid; nothing submitted.\n' >&2
     exit 1
 fi
-if [[ "$START_STAGE" != "$DEFAULT_START_STAGE" && "$UPDATES" == "$UPDATES_DEFAULT" ]]; then
+if ! "$FORM_USED" && [[ "$START_STAGE" != "$DEFAULT_START_STAGE" && "$UPDATES" == "$UPDATES_DEFAULT" ]]; then
     if ! UPDATED_UPDATES_DEFAULT="$("$PYTHON" - "$PLAN" "$START_STAGE" <<'PY'
 import sys
 from simulator.training.plans import load_plan
@@ -419,11 +449,13 @@ PY
     printf '\nShared-GPU sweep: %s, %d trials, max parallel=%s (0 means all).\n' "$PARAMETER" "${#SWEEP_VALUES[@]}" "$MAX_PARALLEL"
     printf 'Allocation: %s, CPUs=%s, RAM=%s; GPU memory is shared, not guaranteed per trial.\n' "$GRES" "$CPUS" "$MEMORY"
     printf 'Training threads per trial: %s (or selected values for a thread sweep).\n' "$THREADS"
+    printf 'Review: plan=%s backend=host worlds=%s rollout=%s updates=%s replay interval=%s\n' \
+        "$PLAN" "$ENVS" "$ROLLOUT" "$UPDATES" "$REPLAY"
     printf 'Submission command:\n  '
     printf '%q ' "${SHARED_COMMAND[@]}"
     printf '\n'
     if "$DRY_RUN"; then printf 'Dry run: nothing submitted or written.\n'; exit 0; fi
-    if "$FORM_USED"; then CONFIRM=y; else prompt CONFIRM 'Submit 1 shared-GPU sweep job? (y/n)' n '^[yYnN]$'; fi
+    prompt CONFIRM 'Submit 1 shared-GPU sweep job? (y/n)' n '^[yYnN]$'
     if [[ "$CONFIRM" != [yY] ]]; then printf 'Cancelled; nothing submitted.\n'; exit 0; fi
     if ! command -v sbatch >/dev/null 2>&1; then printf 'sbatch is unavailable.\n' >&2; exit 1; fi
     "${PREPARE[@]}"
@@ -517,9 +549,21 @@ prepare_local_command() {
 }
 
 if "$LOCAL"; then
-    printf '\nLocal working directory: %s\nFresh run; inherited SIM_* settings are replaced.\n' "$ROOT"
+    printf '\nLocal working directory: %s\nInherited SIM_* settings are replaced.\n' "$ROOT"
+    printf 'Hardware: local CUDA architecture=%s, threads=%s\n' "$ARCH" "$THREADS"
 else
-    printf '\nWorking directory: %s\nFresh run; existing SIM_* settings and SBATCH_* overrides will not be inherited.\n' "$ROOT"
+    printf '\nWorking directory: %s\nExisting SIM_* settings and SBATCH_* overrides will not be inherited.\n' "$ROOT"
+    printf 'Hardware: %s on %s, CUDA architecture=%s, CPUs=%s, RAM=%s, wall-time=%s\n' \
+        "$GRES" "$PARTITION" "$ARCH" "$CPUS" "$MEMORY" "$TIME"
+fi
+printf 'Review: plan=%s backend=%s worlds=%s rollout=%s updates=%s replay interval=%s\n' \
+    "$PLAN" "$ROLLOUT_BACKEND" "$ENVS" "$ROLLOUT" "$UPDATES" "$REPLAY"
+REVIEW_STAGE="${START_STAGE:-first}"
+if [[ -n "$RESUME" ]]; then REVIEW_STAGE=checkpoint; fi
+printf 'Checkpoint: resume=%s initialize=%s start-stage=%s save-every=%s\n' \
+    "${RESUME:-none}" "${INITIALIZE:-none}" "$REVIEW_STAGE" "$SAVE_EVERY"
+if [[ "$ROLLOUT_BACKEND" == auto ]]; then
+    printf 'Auto backend may fall back to host after GPU-node capability checks.\n'
 fi
 if [[ -n "$SWEEP_VARIABLE" ]]; then
     printf 'Sweep: %s (%d jobs). Jobs can train concurrently; shared builds are locked.\n' "$SWEEP_LABEL" "${#RUN_NAMES[@]}"
@@ -539,9 +583,7 @@ if "$DRY_RUN"; then
     if "$LOCAL"; then printf 'Dry run: nothing built or launched.\n'; else printf 'Dry run: nothing submitted.\n'; fi
     exit 0
 fi
-if "$FORM_USED"; then
-    CONFIRM=y
-elif "$LOCAL"; then
+if "$LOCAL"; then
     prompt CONFIRM "Start ${#RUN_NAMES[@]} local run(s)? (y/n)" n '^[yYnN]$'
 else
     prompt CONFIRM "Submit ${#RUN_NAMES[@]} job(s)? (y/n)" n '^[yYnN]$'

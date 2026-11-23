@@ -13,8 +13,9 @@ stationary_melee retains aim/attacks/equipment without locomotion options.
 random_walk accepts change_interval (20 ticks), wall_margin (1.25 blocks) and
 sneak (False), using yaw/world rays and independent checkpointed RNG streams
 per actor.
-bridge_fixed_lane accepts jump and sneak booleans (both False by default) and
-follows the initial north/south spawn heading without position-aware navigation.
+bridge_fixed_lane accepts jump, sneak, and place_blocks booleans (False by default)
+and an explicit block_slot for placement. It follows the initial north/south
+spawn heading without position-aware navigation.
 tactical_melee accepts basic_melee options plus style: evasive, aggressive or
 patient. These vary retreat/pressure/charge-based movement, not just timing.
 Checkpoint files are trusted standalone PPO archives, loaded with weights_only.
@@ -221,12 +222,26 @@ class StationaryTargetController(_BatchedController):
 
 class BridgeFixedLaneController(StationaryTargetController):
     def __init__(self, contract, count, seed=1, options=None):
-        options = _options({} if options is None else options, ("jump", "sneak"))
+        options = _options({} if options is None else options, ("jump", "sneak", "place_blocks", "block_slot"))
         super().__init__(contract, count, seed)
         self.options = options
         self._description.update(controller="bridge_fixed_lane", options=options)
         self.jump = _boolean(options, "jump")
         self.sneak = _boolean(options, "sneak")
+        self.place_blocks = _boolean(options, "place_blocks")
+        self.block_slot = None
+        if self.place_blocks:
+            self.block_slot = _integer(options.get("block_slot"), "block_slot", 0, 8)
+            self._require_feature("self.pitch_fraction")
+            pitch_descriptor = self._features["self.pitch_fraction"][1]
+            if "clip" in pitch_descriptor and (pitch_descriptor["clip"][0] > -1 or pitch_descriptor["clip"][1] < 1):
+                raise ValueError("bridge_fixed_lane requires unclipped self.pitch_fraction")
+            self._require_choice("weapon", self.block_slot)
+            self._require_choice("use_item", True)
+            if "pitch" not in self._heads or not any(choice > 0 for choice in self._heads["pitch"][1]):
+                raise ValueError("bridge_fixed_lane block placement requires a positive pitch choice")
+        elif "block_slot" in options:
+            raise ValueError("block_slot requires place_blocks")
         self._require_feature("self.yaw_fraction")
         yaw_descriptor = self._features["self.yaw_fraction"][1]
         if "clip" in yaw_descriptor and (yaw_descriptor["clip"][0] > -1 or yaw_descriptor["clip"][1] < 1):
@@ -266,6 +281,12 @@ class BridgeFixedLaneController(StationaryTargetController):
         for name in ("jump", "sneak"):
             if getattr(self, name):
                 self._set(actions, name, np.ones(len(observations), dtype=bool))
+        if self.place_blocks:
+            pitch = self._feature(observations, "self.pitch_fraction") * 90
+            column, choices = self._heads["pitch"]
+            actions[:, column] = np.abs((90 - pitch)[:, None] - np.asarray(choices)).argmin(axis=1)
+            self._set(actions, "weapon", np.full(len(observations), self.block_slot))
+            self._set(actions, "use_item", np.ones(len(observations), dtype=bool))
         return actions
 
     def reset(self, mask):

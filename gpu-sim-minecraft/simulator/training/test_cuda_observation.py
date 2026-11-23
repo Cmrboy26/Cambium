@@ -32,9 +32,9 @@ class CUDAObservationChecks(unittest.TestCase):
                             {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
                   "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 2, "cage_ticks": 0,
                                            "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
-                  "task_rewards": {"score": 0, "win": 0, "loss": 0}}
+                  "task_rewards": {"score": 0, "win": 0, "loss": 0, "draw": -5}}
         weights = {"doing_damage": 20, "taking_damage": -20, "death": -3,
-                   "episode_timeout": -4, "no_damage_penalty": -2}
+                   "episode_timeout": -4, "no_damage_penalty": -2, "win_speed": 0.1}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "combat.json"
             path.write_text(json.dumps(scene), encoding="utf-8")
@@ -1237,6 +1237,109 @@ class CUDAResidentChecks(unittest.TestCase):
             torch.testing.assert_close(environment.cuda_reset_episodes(), expected)
             with self.assertRaisesRegex(ValueError, "one entry per world"):
                 environment.set_cuda_reset_episodes(torch.zeros(2, dtype=torch.int64))
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_duel_behavior_events_match_cpu_without_reward_weights(self):
+        definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        definition["players"][0]["pitch"] = 90
+        definition["players"][0]["loadout"] = {"weapons": ["minecraft:wind_charge"], "selected": 0,
+                                               "wind_charges": 2, "offhand": "minecraft:air"}
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.velocity.y"}],
+                    "actions": [{"name": "use_item", "values": [False, True]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wind.json"
+            path.write_text(json.dumps(definition), encoding="utf-8")
+            options = {"environment": path, "contract": contract, "max_ticks": 20, "seed": 7,
+                       "weights": dict.fromkeys(REWARD_NAMES, 0.0)}
+            with Environment(2, device="cpu", library=os.environ.get("MCSIM_TEST_CPU_LIBRARY"), **options) as reference, \
+                 Environment(2, device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"], **options) as environment:
+                environment.register_cuda_observations()
+                actions = environment.register_cuda_actions()
+                buffers = environment.register_cuda_resident(behavior_events=True)
+                with self.assertRaisesRegex(RuntimeError, "behavior buffers already registered"):
+                    environment.register_cuda_resident()
+                host_actions = np.zeros((2, 2, 1), dtype=np.int32)
+                host_actions[0, 0, 0] = 1
+                accumulated = 0.0
+                for _ in range(12):
+                    reference.step(host_actions)
+                    expected = reference.step_behavior_events()
+                    actions.copy_(torch.as_tensor(host_actions, device=actions.device))
+                    _, outputs = environment.step_cuda_resident_async()
+                    actual = outputs["behavior_events"].cpu().numpy()
+                    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6)
+                    accumulated += float(actual[0, 0, 0])
+                    host_actions.fill(0)
+                environment.wait_cuda_actions()
+                self.assertGreater(accumulated, 0.2)
+                self.assertEqual(float(buffers["rewards"].abs().sum()), 0.0)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    mask = np.array([True, False])
+                    reference.reset(mask)
+                    buffers["reset_mask"].copy_(torch.as_tensor(mask, device=actions.device))
+                    environment.reset_cuda_resident_async()
+                    reference.step(host_actions)
+                    actions.copy_(torch.as_tensor(host_actions, device=actions.device))
+                    _, outputs = environment.step_cuda_resident_async()
+                    np.testing.assert_allclose(outputs["behavior_events"].cpu().numpy(),
+                                               reference.step_behavior_events(), rtol=0, atol=1e-6)
+                    original = buffers["behavior_events"]
+                    buffers["behavior_events"] = torch.empty_like(original)
+                    with self.assertRaisesRegex(RuntimeError, "resident buffer changed"):
+                        environment.step_cuda_resident_async()
+                    buffers["behavior_events"] = original
+                torch.cuda.current_stream().wait_stream(stream)
+
+        with Environment(1, device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"]) as environment:
+            environment.register_cuda_observations()
+            environment.register_cuda_actions()
+            with mock.patch.object(environment.native, "mcsim_register_cuda_reset_mask", return_value=-1), \
+                 mock.patch.object(environment.native, "mcsim_last_error", return_value=b"forced reset registration failure"):
+                with self.assertRaisesRegex(RuntimeError, "forced reset registration failure"):
+                    environment.register_cuda_resident(behavior_events=True)
+            with self.assertRaisesRegex(RuntimeError, "behavior buffers already registered"):
+                environment.register_cuda_resident()
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_duel_mace_smash_event_matches_cpu(self):
+        definition = json.loads((ROOT / "simulator/environments/duel.json").read_text())
+        definition["bounds"]["size"][1] = 10
+        definition["players"][0].update(position=[0.5, 6, 0.5], velocity=[0, 0, 0], pitch=90,
+                                        on_ground=False, attack_strength_ticks=40,
+                                        loadout={"weapons": ["minecraft:mace"], "selected": 0})
+        definition["players"][1]["position"] = [0.5, 1, 0.5]
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.velocity.y"}],
+                    "actions": [{"name": "attack", "values": [False, True]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mace.json"
+            path.write_text(json.dumps(definition), encoding="utf-8")
+            options = {"environment": path, "contract": contract, "max_ticks": 20, "seed": 7,
+                       "weights": dict.fromkeys(REWARD_NAMES, 0.0)}
+            with Environment(1, device="cpu", library=os.environ.get("MCSIM_TEST_CPU_LIBRARY"), **options) as reference, \
+                 Environment(1, device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"], **options) as environment:
+                environment.register_cuda_observations()
+                actions = environment.register_cuda_actions()
+                environment.register_cuda_resident(behavior_events=True)
+                host_actions = np.zeros((1, 2, 1), dtype=np.int32)
+                smashed = False
+                for tick in range(20):
+                    host_actions[0, 0, 0] = tick % 2 == 0
+                    _, _, terminated, truncated = reference.step(host_actions)
+                    actions.copy_(torch.as_tensor(host_actions, device=actions.device))
+                    _, outputs = environment.step_cuda_resident_async()
+                    expected = reference.step_behavior_events()
+                    np.testing.assert_allclose(outputs["behavior_events"].cpu().numpy(), expected, rtol=0, atol=1e-6)
+                    smashed |= bool(expected[0, 0, 1])
+                    if terminated[0] or truncated[0]:
+                        break
+                environment.wait_cuda_actions()
+                self.assertTrue(smashed)
 
     @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
                          "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")

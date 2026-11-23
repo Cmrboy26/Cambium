@@ -14,6 +14,7 @@ struct BridgeTaskRewardSettings {
     float opponent_score = 0.0F;
     float toward = 0.0F;
     float away = 0.0F;
+    float draw = 0.0F;
 };
 
 struct BridgeTaskRewardTerms {
@@ -183,6 +184,12 @@ MCSIM_HD inline BridgeRewardStep bridgeRewards(
             addDuelReward(result.shared, player, 4, settings.weights[4]);
             if (!reward_state.dealt_damage[player]) addDuelReward(result.shared, player, 5, settings.weights[5]);
         }
+        const auto winner = player == 0 ? BridgeOutcome::team0 : BridgeOutcome::team1;
+        if (events.terminated && events.outcome == winner) {
+            const float speed_bonus = static_cast<float>(settings.weights[8] * rewardClamp(
+                1.0 - static_cast<double>(match.ticks) / rules.max_ticks, 0.0, 1.0));
+            addDuelReward(result.shared, player, 8, speed_bonus);
+        }
         if (!finished && !events.round_reset && !events.respawn[0] && !events.respawn[1] && has_shaping) {
             float shaping[5]{};
             shapingRewards(players[player], players[1 - player], players[player].ordinary_arrow_count,
@@ -197,11 +204,11 @@ MCSIM_HD inline BridgeRewardStep bridgeRewards(
         const auto& terms = result.task[player].values;
         result.rewards[player] = static_cast<float>(terms[0] + terms[1] + terms[2] + terms[3])
             + result.shared.rewards[player];
-        const auto winner = player == 0 ? BridgeOutcome::team0 : BridgeOutcome::team1;
         const auto opponent = player == 0 ? BridgeOutcome::team1 : BridgeOutcome::team0;
         result.shared.lost[player] = events.terminated && events.outcome == opponent;
-        if (events.terminated && events.outcome != BridgeOutcome::draw) {
-            result.rewards[player] += events.outcome == winner ? win_reward : loss_reward;
+        if (events.terminated) {
+            result.rewards[player] += events.outcome == BridgeOutcome::draw ? task_settings.draw
+                : events.outcome == winner ? win_reward : loss_reward;
         }
     }
     return result;

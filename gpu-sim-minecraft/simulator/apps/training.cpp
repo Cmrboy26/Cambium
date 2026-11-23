@@ -79,6 +79,7 @@ struct TrainingBatch {
     float bridge_score_reward = 0.0F;
     float bridge_win_reward = 0.0F;
     float bridge_loss_reward = 0.0F;
+    float bridge_draw_reward = 0.0F;
     float bridge_opponent_score_reward = 0.0F;
     float bridge_toward_reward = 0.0F;
     float bridge_away_penalty = 0.0F;
@@ -290,7 +291,8 @@ struct TrainingBatch {
         gpu->configureRewards(settings, states.data(), states.size(), finished.data());
         if (bridge_enabled) {
             const app::BridgeTaskRewardSettings task_settings{bridge_score_reward, bridge_opponent_score_reward,
-                                                              bridge_toward_reward, bridge_away_penalty};
+                                                              bridge_toward_reward, bridge_away_penalty,
+                                                              bridge_draw_reward};
             gpu->configureBridgeRewards(task_settings, bridge_win_reward, bridge_loss_reward,
                                         objective_progress.data(), objective_progress.size());
         }
@@ -373,6 +375,26 @@ struct TrainingBatch {
                 throw std::invalid_argument("Bridge spawns must be safe and outside both goals");
             }
             if (generation) {
+                if (generation->pattern_count) {
+                    int top = 0, side_width = 0;
+                    for (int index = 0; index < generation->pattern_count; ++index) {
+                        const auto& pattern = generation->patterns[index];
+                        if (pattern.location == 0) top = std::max(top, pattern.maximum);
+                        else side_width = std::max(side_width, pattern.maximum);
+                    }
+                    const Aabb areas[]{
+                        {{double(generation->center_x), double(generation->floor_y + 1), double(generation->start_z)},
+                         {double(generation->bridge_end_x), double(generation->floor_y + 1 + top), double(generation->end_z)}},
+                        {{double(generation->center_x - side_width), double(generation->floor_y), double(generation->start_z)},
+                         {double(generation->center_x), double(generation->floor_y + 1), double(generation->end_z)}},
+                        {{double(generation->bridge_end_x), double(generation->floor_y), double(generation->start_z)},
+                         {double(generation->bridge_end_x + side_width), double(generation->floor_y + 1), double(generation->end_z)}}};
+                    for (int index = 0; index < 3; ++index) {
+                        if ((index == 0 ? top : side_width) > 0 && areas[index].intersects(player.bounds()))
+                            throw std::invalid_argument("Bridge spawn overlaps generated terrain");
+                    }
+                    continue;
+                }
                 for (int side : {-1, 1}) {
                     const double low_x = generation->center_x + (side < 0 ? -2.0 : 1.0);
                     const Aabb area{{low_x, double(generation->floor_y), double(generation->start_z)},
@@ -603,41 +625,118 @@ struct TrainingBatch {
         if (generate_terrain) {
             if (!rules.building.enabled) throw std::invalid_argument("Bridge terrain generation requires building rules");
             const auto& source = config.at("terrain_generation");
-            const char* names[]{"center_x", "floor_y", "start_z", "end_z", "segments"};
-            if (!source.is_object() || source.size() != 5) throw std::invalid_argument("Invalid Bridge terrain generation");
-            for (const auto* name : names) {
-                if (!source.contains(name) || !source[name].is_number_integer()
-                    || source[name] < -1000000000 || source[name] > 1000000000) {
-                    throw std::invalid_argument("Bridge terrain generation requires bounded integer fields");
+            if (source.is_object() && source.contains("bridge")) {
+                if (source.size() != 2 || !source.contains("patterns") || !source["bridge"].is_object()
+                    || source["bridge"].size() != 2 || !source["bridge"].contains("min")
+                    || !source["bridge"].contains("max") || !source["patterns"].is_array()
+                    || source["patterns"].empty() || source["patterns"].size() > 32) {
+                    throw std::invalid_argument("Invalid Bridge pattern generation");
                 }
-            }
-            generation = {source["center_x"].get<int>(), source["floor_y"].get<int>(),
-                          source["start_z"].get<int>(), source["end_z"].get<int>(), source["segments"].get<int>()};
-            TerrainOverlays validation(terrain.blocks, 1);
-            if (!generateBridgeTerrain(validation.view(0), generation, 0)) {
-                throw std::invalid_argument("Bridge terrain generation requires a clear, straight protected center lane");
-            }
-            for (int z = generation.start_z; z < generation.end_z; ++z) {
-                for (int offset : {-2, -1, 1, 2}) {
-                    for (int height = 0; height <= 1; ++height) {
-                        if (!bridgeBuildZoneContains(rules.building, generation.center_x + offset,
-                                                     generation.floor_y + height, z)) {
-                            throw std::invalid_argument("Generated terrain must be inside Bridge build zones");
+                int lower[3]{}, upper[3]{};
+                for (int axis = 0; axis < 3; ++axis) {
+                    for (const char* name : {"min", "max"}) {
+                        const auto& values = source["bridge"][name];
+                        if (!values.is_array() || values.size() != 3 || !values[axis].is_number_integer()
+                            || values[axis] < -1000000000 || values[axis] > 1000000000) {
+                            throw std::invalid_argument("Bridge bounds require bounded integer coordinates");
+                        }
+                    }
+                    lower[axis] = source["bridge"]["min"][axis].get<int>();
+                    upper[axis] = source["bridge"]["max"][axis].get<int>();
+                }
+                if (upper[1] - lower[1] != 1) throw std::invalid_argument("Bridge floor must be one block high");
+                generation.center_x = lower[0];
+                generation.bridge_end_x = upper[0];
+                generation.floor_y = lower[1];
+                generation.start_z = lower[2];
+                generation.end_z = upper[2];
+                generation.pattern_count = static_cast<int>(source["patterns"].size());
+                int max_top = 0, max_side = 0;
+                for (int index = 0; index < generation.pattern_count; ++index) {
+                    const auto& item = source["patterns"][index];
+                    if (!item.is_object() || !item.contains("location") || !item["location"].is_string()
+                        || !item.contains("type") || !item["type"].is_string()
+                        || !item.contains("percent") || !item["percent"].is_number()) {
+                        throw std::invalid_argument("Invalid Bridge terrain pattern");
+                    }
+                    auto& pattern = generation.patterns[index];
+                    const auto location = item["location"].get<std::string>();
+                    const auto type = item["type"].get<std::string>();
+                    if (location != "top" && location != "side") throw std::invalid_argument("Invalid pattern location");
+                    pattern.location = location == "top" ? 0 : 1;
+                    if (type == "constant" && item.size() == 4 && item.contains("value") && item["value"].is_number_integer()) {
+                        pattern.type = 1;
+                        if (item["value"] < 0 || item["value"] > 8) throw std::invalid_argument("Invalid pattern extent");
+                        pattern.minimum = pattern.maximum = item["value"].get<int>();
+                    } else if ((type == "random" || type == "function") && item.size() == (type == "random" ? 5 : 6)
+                               && item.contains("min") && item["min"].is_number_integer()
+                               && item.contains("max") && item["max"].is_number_integer()
+                               && (type != "function" || (item.contains("function") && item["function"] == "half-sine"))) {
+                        if (item["min"] < 0 || item["max"] > 8 || item["min"] > item["max"])
+                            throw std::invalid_argument("Invalid pattern extent");
+                        pattern.type = type == "random" ? 0 : 2;
+                        pattern.minimum = item["min"].get<int>();
+                        pattern.maximum = item["max"].get<int>();
+                    } else throw std::invalid_argument("Invalid Bridge terrain pattern fields");
+                    const double probability = item["percent"].get<double>();
+                    if (!std::isfinite(probability) || probability < 0 || probability > 1)
+                        throw std::invalid_argument("Invalid Bridge terrain pattern probability");
+                    pattern.probability = static_cast<int>(std::round(probability * (1 << 24)));
+                    if (pattern.location == 0) max_top = std::max(max_top, pattern.maximum);
+                    else max_side = std::max(max_side, pattern.maximum);
+                }
+                TerrainOverlays validation(terrain.blocks, 1);
+                if (!generateBridgeTerrain(validation.view(0), generation, 0))
+                    throw std::invalid_argument("Bridge patterns require a clear protected bridge floor");
+                for (int z = generation.start_z; z < generation.end_z; ++z) {
+                    for (int x = generation.center_x - max_side; x < generation.bridge_end_x + max_side; ++x) {
+                        const bool on_bridge = x >= generation.center_x && x < generation.bridge_end_x;
+                        for (int offset = on_bridge ? 1 : 0; offset <= (on_bridge ? max_top : 0); ++offset) {
+                            const int y = generation.floor_y + offset;
+                            const Aabb cell{{double(x), double(y), double(z)}, {double(x + 1), double(y + 1), double(z + 1)}};
+                            if (!bridgeBuildZoneContains(rules.building, x, y, z)
+                                || cell.intersects(rules.goals[0]) || cell.intersects(rules.goals[1]))
+                                throw std::invalid_argument("Generated terrain must be in build zones and outside goals");
                         }
                     }
                 }
-            }
-            for (int side : {-1, 1}) {
-                const double low_x = generation.center_x + (side < 0 ? -2.0 : 1.0);
-                const Aabb area{{low_x, double(generation.floor_y), double(generation.start_z)},
-                                {low_x + 2.0, double(generation.floor_y) + 2.0, double(generation.end_z)}};
-                if (area.intersects(rules.goals[0]) || area.intersects(rules.goals[1])) {
-                    throw std::invalid_argument("Generated terrain must not overlap Bridge goals");
+            } else {
+                const char* names[]{"center_x", "floor_y", "start_z", "end_z", "segments"};
+                if (!source.is_object() || source.size() != 5) throw std::invalid_argument("Invalid Bridge terrain generation");
+                for (const auto* name : names) {
+                    if (!source.contains(name) || !source[name].is_number_integer()
+                        || source[name] < -1000000000 || source[name] > 1000000000) {
+                        throw std::invalid_argument("Bridge terrain generation requires bounded integer fields");
+                    }
+                }
+                generation = {source["center_x"].get<int>(), source["floor_y"].get<int>(),
+                              source["start_z"].get<int>(), source["end_z"].get<int>(), source["segments"].get<int>()};
+                TerrainOverlays validation(terrain.blocks, 1);
+                if (!generateBridgeTerrain(validation.view(0), generation, 0)) {
+                    throw std::invalid_argument("Bridge terrain generation requires a clear, straight protected center lane");
+                }
+                for (int z = generation.start_z; z < generation.end_z; ++z) {
+                    for (int offset : {-2, -1, 1, 2}) {
+                        for (int height = 0; height <= 1; ++height) {
+                            if (!bridgeBuildZoneContains(rules.building, generation.center_x + offset,
+                                                         generation.floor_y + height, z)) {
+                                throw std::invalid_argument("Generated terrain must be inside Bridge build zones");
+                            }
+                        }
+                    }
+                }
+                for (int side : {-1, 1}) {
+                    const double low_x = generation.center_x + (side < 0 ? -2.0 : 1.0);
+                    const Aabb area{{low_x, double(generation.floor_y), double(generation.start_z)},
+                                    {low_x + 2.0, double(generation.floor_y) + 2.0, double(generation.end_z)}};
+                    if (area.intersects(rules.goals[0]) || area.intersects(rules.goals[1])) {
+                        throw std::invalid_argument("Generated terrain must not overlap Bridge goals");
+                    }
                 }
             }
         }
         const auto& task = config.at("task_rewards");
-        if (weights[2] != 0.0F || weights[8] != 0.0F) {
+        if (weights[2] != 0.0F) {
             throw std::invalid_argument("Bridge does not support duel win rewards");
         }
         if (!task.is_object() || !task.contains("score")
@@ -646,13 +745,15 @@ struct TrainingBatch {
         }
         for (const auto& field : task.items()) {
             if (field.key() != "score" && field.key() != "win" && field.key() != "loss"
-                && field.key() != "opponent_score" && field.key() != "toward" && field.key() != "away") {
+                && field.key() != "draw" && field.key() != "opponent_score"
+                && field.key() != "toward" && field.key() != "away") {
                 throw std::invalid_argument("Unsupported Bridge reward field");
             }
         }
-        float task_weights[3]{};
-        const char* names[3]{"score", "win", "loss"};
-        for (int index = 0; index < 3; ++index) {
+        float task_weights[4]{};
+        const char* names[4]{"score", "win", "loss", "draw"};
+        for (int index = 0; index < 4; ++index) {
+            if (index == 3 && !task.contains(names[index])) continue;
             if (!task[names[index]].is_number()) throw std::invalid_argument("Bridge reward weights must be finite");
             const double value = task[names[index]].get<double>();
             if (!std::isfinite(value) || std::abs(value) > (std::numeric_limits<float>::max)()) {
@@ -670,7 +771,7 @@ struct TrainingBatch {
         }
         for (int scored = 0; scored < 2; ++scored) {
             for (int opposed = 0; opposed < 2; ++opposed) {
-                for (int outcome = 0; outcome < 3; ++outcome) {
+                for (int outcome = 0; outcome < 4; ++outcome) {
                     const double total = scored * double(task_weights[0]) + opposed * opponent_score
                         + (outcome == 0 ? 0.0 : double(task_weights[outcome]));
                     if (std::abs(total) > (std::numeric_limits<float>::max)()) {
@@ -722,6 +823,7 @@ struct TrainingBatch {
         bridge_score_reward = task_weights[0];
         bridge_win_reward = task_weights[1];
         bridge_loss_reward = task_weights[2];
+        bridge_draw_reward = task_weights[3];
         bridge_opponent_score_reward = static_cast<float>(opponent_score);
         bridge_toward_reward = progress_weights[0];
         bridge_away_penalty = progress_weights[1];
@@ -1049,7 +1151,7 @@ struct TrainingBatch {
         std::copy(shaping_weights.begin(), shaping_weights.end(), reward_settings.shaping_weights);
         reward_settings.max_ticks = max_ticks;
         const app::BridgeTaskRewardSettings bridge_task_settings{bridge_score_reward, bridge_opponent_score_reward,
-                                      bridge_toward_reward, bridge_away_penalty};
+                                      bridge_toward_reward, bridge_away_penalty, bridge_draw_reward};
         for (std::size_t environment = 0; environment < worlds.size(); ++environment) {
             const auto offset = environment * 2;
             if (bridge_enabled) {
@@ -1160,9 +1262,11 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"cuda_resident_episode_version", 1},
         {"bridge_host_batch_version", 3},
         {"bridge_shared_reward_version", 1},
+        {"bridge_outcome_reward_version", 1},
         {"bridge_local_voxels_version", 1},
         {"bridge_host_match_features_version", 1},
         {"bridge_terrain_generation_version", 1},
+        {"bridge_terrain_patterns_version", 1},
         {"bridge_opponent_score_version", 1},
         {"bridge_objective_reward_version", 1},
         {"actor_task_state_version", 1},
@@ -1174,9 +1278,11 @@ MCSIM_EXPORT const char* mcsim_build_info() {
         {"reward_totals", {{"base", 13}, {"shaping", 5}}},
 #if defined(MCSIM_HAS_CUDA)
     {"cuda_resident_bridge_version", 1},
+        {"cuda_resident_behavior_version", 1},
         {"cuda_compiled", true}
 #else
     {"cuda_resident_bridge_version", 0},
+        {"cuda_resident_behavior_version", 0},
         {"cuda_compiled", false}
 #endif
     }.dump();
@@ -1289,7 +1395,7 @@ MCSIM_EXPORT int mcsim_set_reward_weights(void* handle, const float* weights) {
         if (!handle || !weights) throw std::invalid_argument("Null base reward argument");
         auto& batch = *static_cast<TrainingBatch*>(handle);
         batch.requireHostState();
-        if (batch.bridge_enabled && (weights[2] != 0.0F || weights[8] != 0.0F)) {
+        if (batch.bridge_enabled && weights[2] != 0.0F) {
             throw std::invalid_argument("Bridge does not support duel win rewards");
         }
         for (std::size_t index = 0; index < batch.weights.size(); ++index) {
@@ -1672,6 +1778,22 @@ MCSIM_EXPORT int mcsim_register_cuda_bridge_buffers(void* handle, float* match, 
 #endif
     });
 }
+MCSIM_EXPORT int mcsim_register_cuda_behavior_events(void* handle, float* events, std::size_t count) {
+    return protect([&] {
+        if (!handle) throw std::invalid_argument("Null resident behavior handle");
+#if defined(MCSIM_HAS_CUDA)
+        auto& batch = *static_cast<TrainingBatch*>(handle);
+        if (batch.bridge_enabled || !batch.gpu || !batch.gpu_resident_configured) {
+            throw std::invalid_argument("Prepare CUDA resident duel stepping first");
+        }
+        batch.gpu->registerBehaviorBuffer(events, count);
+#else
+        static_cast<void>(events);
+        static_cast<void>(count);
+        throw std::invalid_argument("CUDA resident behavior events require a CUDA-enabled library");
+#endif
+    });
+}
 MCSIM_EXPORT int mcsim_register_cuda_reset_mask(void* handle, const std::uint8_t* mask, std::size_t worlds) {
     return protect([&] {
         if (!handle) throw std::invalid_argument("Null resident reset handle");
@@ -1851,9 +1973,22 @@ MCSIM_EXPORT const char* mcsim_replay_frame(void* handle, int environment) {
                 auto& initial_terrain = bridge["initial_terrain"] = nlohmann::json::array();
                 const auto blocks = batch.blocks[environment];
                 const auto& generation = batch.bridge_terrain_generation;
+                int start_x = generation.center_x - 2, end_x = generation.center_x + 3;
+                int end_y = generation.floor_y + 2;
+                if (generation.pattern_count) {
+                    int top = 0, side = 0;
+                    for (int index = 0; index < generation.pattern_count; ++index) {
+                        const auto& pattern = generation.patterns[index];
+                        if (pattern.location == 0) top = std::max(top, pattern.maximum);
+                        else side = std::max(side, pattern.maximum);
+                    }
+                    start_x = generation.center_x - side;
+                    end_x = generation.bridge_end_x + side;
+                    end_y = generation.floor_y + top + 1;
+                }
                 for (int z = generation.start_z; z < generation.end_z; ++z) {
-                    for (int x = generation.center_x - 2; x <= generation.center_x + 2; ++x) {
-                        for (int y = generation.floor_y; y <= generation.floor_y + 1; ++y) {
+                    for (int x = start_x; x < end_x; ++x) {
+                        for (int y = generation.floor_y; y < end_y; ++y) {
                             const auto index = blocks.cellIndex(x, y, z);
                             if (index < 0 || blocks.overlay[index] == PlacedBlock::empty) continue;
                             initial_terrain.push_back({{"player", blocks.overlay[index] == PlacedBlock::team0 ? 0 : 1},

@@ -94,6 +94,13 @@ Metric, opponent and axis selectors match the [PNG metric catalog](AGENTS.md#per
 It needs only Python, not PyTorch or a native library; Ctrl+C stops it; use `-Port` if occupied.
 New episode metrics need restarted/resumed training. Missing historical metrics stay blank.
 
+In Results, the Opponents view compares completed training episodes across the selected
+window or curriculum stage. The table weights rates, return and length by episode count;
+the charts show per-rollout values and follow the axis and smoothing controls. Updates
+without complete per-opponent data are flagged rather than estimated from overlapping
+recent-history summaries. Length is in environment steps; Bridge uses one tick per step.
+Training opponents, including changing self-play checkpoints, are not held-out benchmarks.
+
 For a concise text or JSON summary of a saved or live run:
 
 ```powershell

@@ -316,6 +316,15 @@ __global__ void exportDuelRewards(BatchView batch, const app::DuelRewardStep* re
     }
 }
 
+__global__ void exportDuelBehavior(BatchView batch, const int* action_status, float* events) {
+    const auto actor = blockIdx.x * blockDim.x + threadIdx.x;
+    if (actor >= static_cast<unsigned int>(batch.environment_count) * 2 || *action_status != 0) return;
+    const auto& player = batch.players[actor];
+    events[actor * 3] = static_cast<float>(batch.worlds[actor / 2].wind_self_launch[actor % 2]);
+    events[actor * 3 + 1] = player.last_attack.mace_smash ? 1.0F : 0.0F;
+    events[actor * 3 + 2] = player.on_ground ? 1.0F : 0.0F;
+}
+
 __global__ void exportBridgeRewards(BatchView batch, const BridgeTickEvents* events,
                                     const app::BridgeTaskRewardTerms* task_results, const int* action_status,
                                     std::uint8_t* scored, double* task_terms) {
@@ -505,6 +514,7 @@ struct CudaBatch::Storage {
     std::uint8_t* registered_truncated = nullptr;
     std::uint8_t* registered_losses = nullptr;
     double* registered_contributions = nullptr;
+    float* registered_behavior_events = nullptr;
     float* registered_bridge_match = nullptr;
     std::uint8_t* registered_bridge_voxels = nullptr;
     std::uint8_t* registered_bridge_scored = nullptr;
@@ -893,7 +903,7 @@ void CudaBatch::configureBridgeRewards(const app::BridgeTaskRewardSettings& sett
     if (!storage_->bridge_rules.data || !storage_->reward_settings.data || storage_->bridge_objectives.data
         || !objectives || count != storage_->players.count
         || !std::isfinite(settings.score) || !std::isfinite(settings.opponent_score)
-        || !std::isfinite(settings.toward) || !std::isfinite(settings.away)
+        || !std::isfinite(settings.toward) || !std::isfinite(settings.away) || !std::isfinite(settings.draw)
         || !std::isfinite(win_reward) || !std::isfinite(loss_reward)) {
         throw std::invalid_argument("Invalid CUDA Bridge reward configuration");
     }
@@ -1070,6 +1080,17 @@ void CudaBatch::registerRewardBuffers(float* rewards, std::uint8_t* terminated, 
     storage_->registered_contributions = contributions;
 }
 
+void CudaBatch::registerBehaviorBuffer(float* events, std::size_t count) {
+    if (!events || !storage_->reward_results.data || storage_->bridge_rules.data
+        || count != checkedProduct(storage_->players.count, std::size_t(3))) {
+        throw std::invalid_argument("Invalid CUDA resident behavior buffer");
+    }
+    validateDevicePointer(events, storage_->device);
+    checkCuda(cudaEventSynchronize(storage_->observation_state_ready));
+    if (storage_->observation_read_pending) checkCuda(cudaEventSynchronize(storage_->observation_read_done));
+    storage_->registered_behavior_events = events;
+}
+
 void CudaBatch::registerBridgeBuffers(float* match, std::size_t match_count, std::uint8_t* voxels,
                                       std::size_t voxel_count, std::uint8_t* scored, std::size_t scored_count,
                                       double* task_terms, std::size_t task_count, int match_version) {
@@ -1121,6 +1142,17 @@ void CudaBatch::stepRegisteredOnStream(void* stream) {
         exportBridgeRewards<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block, 0, cuda_stream>>>(
             storage_->view, storage_->bridge_events.data, storage_->bridge_task_results.data,
             storage_->action_status.data, storage_->registered_bridge_scored, storage_->registered_bridge_task_terms);
+        checkCuda(cudaGetLastError());
+        const auto status = cudaEventRecord(storage_->observation_state_ready, cuda_stream);
+        if (status != cudaSuccess) {
+            cudaStreamSynchronize(cuda_stream);
+            checkCuda(status);
+        }
+    } else if (storage_->registered_behavior_events) {
+        const auto count = static_cast<unsigned int>(storage_->players.count);
+        const auto cuda_stream = static_cast<cudaStream_t>(stream);
+        exportDuelBehavior<<<(count + threads_per_block - 1) / threads_per_block, threads_per_block, 0, cuda_stream>>>(
+            storage_->view, storage_->action_status.data, storage_->registered_behavior_events);
         checkCuda(cudaGetLastError());
         const auto status = cudaEventRecord(storage_->observation_state_ready, cuda_stream);
         if (status != cudaSuccess) {

@@ -29,24 +29,32 @@ Authored Bridge environments place this configuration in their `bridge` field;
 the resolved scenario retains it separately from the native scene. The supported
 research subset has one fixed arena per stage and fixed spawns/loadouts, existing scalar
 policy features or the opt-in local voxel model. Generic combat and shaping reward
-weights are supported; `won_duel` and `win_speed` are rejected.
+weights are supported; `won_duel` is rejected.
 Supported opponents are stationary targets, fixed-lane runners, compatible
 structured Bridge checkpoints, and current or frozen self-play. The fixed-lane runner follows its initial north/south heading;
 it is not a general navigation controller. Its optional boolean `jump` and
 `sneak` settings hold those controls for the entire episode (default false).
-Enabled controls require the corresponding action head and true choice. Opponent
-mixture weights select a controller independently at each episode reset, so
+Enabled controls require the corresponding action head and true choice.
+The optional `place_blocks: true` and explicit integer `block_slot` select that
+slot, hold `use_item`, and turn the pitch toward 90 degrees down while following
+the lane. Both kits must contain blocks in that slot, building must be enabled,
+and the policy must expose pitch and the required action choices. This simple
+runner does not plan placement or navigate around obstacles. Opponent mixture
+weights select a controller independently at each episode reset, so
 their proportions are expected probabilities, not exact per-batch quotas. The [building/items plan](../setups/curricula/bridge/building-voxel-selfplay.json)
 uses the experimental kit, building and local-voxel subsets.
-Bridge `task_rewards` provide score, win and loss signals; match-clock endings
+Bridge `task_rewards` provide score, win, loss and optional draw signals; match-clock endings
 are terminal, while an external limit truncates and bootstraps the final
 observation. Training logs match outcomes and learner-only shared reward breakdowns.
 Environment `task.rewards` and stage/evaluation `task_override.rewards` set the
 shared weights; the override replaces the entire shared map and omitted terms are
 zero. These are additive with `bridge.task_rewards`. Damage and attack events are
 captured before respawn; `death` pays for each Bridge death, including void deaths.
-`episode_timeout` and `no_damage_penalty` pay only at the Bridge match-clock limit
-or external truncation, not on a goal-limit win. No-damage state spans the whole
+`win_speed` pays the winner once, scaled by the remaining fraction of the Bridge
+match clock. `episode_timeout` and `no_damage_penalty` pay both players at the
+Bridge match-clock limit or external truncation, not on a goal-limit finish; a
+clock-expiry draw receives both the draw reward and any timeout reward.
+No-damage state spans the whole
 match, including round resets. Shaping uses the external `max_ticks` as its budget
 and does not pay on terminal, truncation, respawn or goal-reset ticks.
 The per-rollout `bridge_goals_for`, `bridge_goals_against`, `bridge_wins`,
@@ -241,6 +249,10 @@ decode actions.
 truncation, losses, contribution and reset-mask tensors after registering
 observations and actions. Bridge additionally requires the portable version-3
 descriptor and registers match, voxel, score and task-reward tensors.
+For duels, `register_cuda_resident(behavior_events=True)` additionally registers
+the raw per-player wind impulse, mace-smash and grounded events used by evaluation.
+This requires `cuda_resident_behavior_version: 1`; behavior buffers cannot be
+re-registered without recreating the environment.
 `step_cuda_resident_async()` advances one tick and
 returns the registered observations and outputs; `reset_cuda_resident_async()`
 resets the worlds selected by the uint8 mask and overwrites observations.
@@ -807,6 +819,20 @@ transitions. Each suite requires `every_updates`, `episodes` and `seed`;
 optional `worlds` selects parallel worlds, capped at its episode count. Omission
 preserves the historical maximum of 16 worlds. Behavior evaluations require a
 native library advertising `behavior_events_version: 1`.
+
+When the effective rollout backend is `cuda-resident`, each suite is checked
+independently for resident evaluation. Supported Bridge suites use the portable
+version-3 descriptor and the resident Bridge opponents; supported duel suites use
+stationary or current-policy opponents and require `cuda_resident_behavior_version: 1`.
+Both require one arena and no per-episode spawn/equipment sampling; Bridge also
+requires fixed spawns and equipment. Unsupported suites use host evaluation and
+record `resident_fallback_reason`; each result records its effective `backend`.
+Resident evaluation keeps episode bookkeeping on the GPU and checks completion
+and native status every 32 ticks. It retains exact episode counts, Bridge seat
+balance and existing result fields, but its sampler produces different stochastic
+trajectories from the host backend. Results near advancement thresholds can
+therefore differ. Evaluation still uses the configured `worlds`; increasing it
+may improve utilization but also changes seeded sampling and should be measured.
 
 Each episode contributes at most one success to each behavior rate.
 `self_launch_rate` requires one own wind explosion adding at least 0.2 blocks/tick

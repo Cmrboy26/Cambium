@@ -113,6 +113,7 @@
                 <fieldset><legend>View</legend><div class="segments">
                     <label><input type="radio" name="performance-mode" value="benchmark" aria-controls="benchmark-performance" checked><span>Benchmark</span></label>
                     <label><input type="radio" name="performance-mode" value="training" aria-controls="training-performance"><span>Training</span></label>
+                    <label><input type="radio" name="performance-mode" value="opponents" aria-controls="opponent-performance"><span>Opponents</span></label>
                 </div></fieldset>
             </div>
             <div class="view-controls" aria-label="Chart settings">
@@ -152,13 +153,23 @@
                 <div class="charts">
                     <article class="chart"><h2>Training outcomes <span id="training-outcomes-window">This rollout</span></h2><div class="plot"><canvas id="training-outcomes-chart" role="img" aria-label="Training win, loss, timeout and draw rates"></canvas></div></article>
                     <article class="chart"><h2>Training episode return <span id="training-return-window">This rollout</span></h2><div class="plot"><canvas id="training-return-chart" role="img" aria-label="Training episode return"></canvas></div></article>
-                    <article class="chart"><h2>Fight length <span>Simulation ticks</span></h2><div class="plot"><canvas id="training-length-chart" role="img" aria-label="Mean fight length and winning and losing fight lengths"></canvas></div></article>
+                    <article class="chart"><h2>Fight length <span>Environment steps</span></h2><div class="plot"><canvas id="training-length-chart" role="img" aria-label="Mean fight length and winning and losing fight lengths"></canvas></div></article>
                     <article class="chart"><h2 id="explorer-title">Metric history</h2><label class="chart-select">Metric<select id="metric-select"></select></label><div class="plot"><canvas id="metric-chart" role="img" aria-label="Selected metric history"></canvas></div></article>
                 </div>
                 <details id="training-opponent-details" class="opponent-details">
                     <summary>Per-opponent episode statistics</summary>
-                    <div class="table-scroll"><table><thead><tr><th>Opponent</th><th>Episodes</th><th>Win</th><th>Loss</th><th>Timeout</th><th>Draw</th><th>Return / episode</th><th>Ticks / episode</th></tr></thead><tbody id="training-opponents"></tbody></table></div>
+                    <div class="table-scroll"><table><thead><tr><th>Opponent</th><th>Episodes</th><th>Win</th><th>Loss</th><th>Timeout</th><th>Draw</th><th>Return / episode</th><th>Steps / episode</th></tr></thead><tbody id="training-opponents"></tbody></table></div>
                 </details>
+            </section>
+            <section id="opponent-performance" class="chart-group" aria-labelledby="opponent-performance-title" hidden>
+                <h3 id="opponent-performance-title">Training opponents</h3>
+                <p id="opponent-comparison-status" class="section-note" role="status">No per-opponent episode data recorded in this window.</p>
+                <div class="table-scroll" tabindex="0" aria-label="Per-opponent training statistics"><table><thead><tr><th scope="col">Opponent</th><th scope="col">Episodes</th><th scope="col">Win</th><th scope="col">Loss</th><th scope="col">Timeout</th><th scope="col">Draw</th><th scope="col">Return / episode</th><th scope="col">Steps / episode</th></tr></thead><tbody id="opponent-comparison"></tbody></table></div>
+                <div class="charts opponent-charts">
+                    <article class="chart"><h2>Win rate <span>Per rollout</span></h2><div class="plot"><canvas id="opponent-win-chart" role="img" aria-label="Training win rate by opponent"></canvas><p id="opponent-win-chart-empty" class="plot-empty" hidden>No data in this window.</p></div></article>
+                    <article class="chart"><h2>Episode return <span>Per rollout</span></h2><div class="plot"><canvas id="opponent-return-chart" role="img" aria-label="Training episode return by opponent"></canvas><p id="opponent-return-chart-empty" class="plot-empty" hidden>No data in this window.</p></div></article>
+                    <article class="chart"><h2>Episode length <span>Environment steps per rollout</span></h2><div class="plot"><canvas id="opponent-length-chart" role="img" aria-label="Training episode length by opponent"></canvas><p id="opponent-length-chart-empty" class="plot-empty" hidden>No data in this window.</p></div></article>
+                </div>
             </section>
             <section id="reward-diagnostics" class="chart-group" aria-labelledby="outcomes-title" hidden>
                 <h3 id="outcomes-title">Training reward diagnostics</h3>

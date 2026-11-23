@@ -173,6 +173,10 @@ rewards `[worlds,2]`, uint8 terminated and truncated `[worlds]`, uint8 losses
 `[worlds,2]`, and float64 contributions `[worlds,2,18]`; the uint8 reset mask is
 `[worlds]`. `mcsim_step_cuda_resident_async` enqueues validation, one tick,
 reward/endings computation and configured observations on the supplied stream.
+For duel batches, `mcsim_register_cuda_behavior_events` optionally registers a
+float32 `[worlds,2,3]` buffer for the same raw wind impulse, mace-smash and
+grounded events as `mcsim_step_behavior_events`. Build info advertises
+`cuda_resident_behavior_version: 1` when this CUDA interface is available.
 `mcsim_reset_cuda_resident_async` restores selected worlds to their registered
 fixed initial player states and writes post-reset observations. Final step
 observations and outputs must be consumed or copied before their next overwrite.

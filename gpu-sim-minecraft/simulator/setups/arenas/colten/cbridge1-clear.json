@@ -1,0 +1,14 @@
+{
+  "format": "minecraft_sim_arena",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "cbridge1-clear",
+  "requires": ["movement", "melee"],
+  "rules": {"simulate_food": false, "natural_regeneration": false},
+  "bounds": {"min": [-5, -4, -20], "size": [11, 10, 40]},
+  "blocks": [
+    {"from": [-3, 0, -19], "to": [3, 0, -16], "block": "minecraft:stone"},
+    {"from": [0, 0, -15], "to": [0, 0, 14], "block": "minecraft:stone"},
+    {"from": [-3, 0, 15], "to": [3, 0, 18], "block": "minecraft:stone"}
+  ]
+}

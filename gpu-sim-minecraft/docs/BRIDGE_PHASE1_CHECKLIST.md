@@ -324,17 +324,18 @@ checkpoints remain required for save/resume and checkpoint opponents.
   state/terrain preservation, per-world RNG and final observation handling.
   Preserve terminal-versus-truncation masks and timeout bootstrap in
   [compute_gae](../simulator/training/ppo.py).
-- [ ] P1-06-03: Preserve pointer/shape/dtype/device validation, tensor lifetime,
+- [x] P1-06-03: Preserve pointer/shape/dtype/device validation, tensor lifetime,
   same-stream ordering, explicit cross-stream fences, delayed sticky errors and
   safe teardown. Keep graph-capture restrictions explicit; check device errors
   and nonfinite rollout values before an optimizer update.
-- [ ] P1-06-04: Support one fixed arena per stage, one CUDA device, stationary,
+- [x] P1-06-04: Support one fixed arena per stage, one CUDA device, stationary,
   fixed-lane and fresh checkpoint opponents, frozen/current self-play, generated
   terrain, building and stage transitions, with device-side seat/opponent
   selection. Record backend/RNG provenance and fresh-episode checkpoint semantics.
   Explicitly reject unsupported strict configurations or report the host fallback.
-  **In progress:** T4 checks cover generated terrain, stage changes, fresh
-  checkpoint/current/frozen opponents, host evaluation and fresh-episode resume.
+  Evidence: [resident Bridge checks](../simulator/training/test_research.py) and
+  [CUDA adapter checks](../simulator/training/test_cuda_observation.py) cover
+  evaluation parity, opponent routing, stage changes and checkpoint resume.
 - [ ] P1-06-05: Validate the existing backend selector in the Rosie submission
   and monitoring paths; [train.sbatch](../rosie/train.sbatch) passes it through.
 - [ ] P1-06-06: Compare fixed-action CPU/CUDA multi-world trajectories through

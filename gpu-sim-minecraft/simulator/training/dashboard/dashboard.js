@@ -5,6 +5,7 @@ const colors = { green: "#18764f", blue: "#347aa2", red: "#b84242", amber: "#b27
 const suitePalette = [colors.green, colors.blue, colors.red, colors.amber, "#746ca8", "#29898c", "#8f364c", "#7b8542",
     "#4f6170", "#ab7256", "#148b61", "#c35191", "#5868b0", "#a84f27", "#568b9b", "#796329"];
 const suiteColors = new Map();
+const opponentColors = new Map();
 const rewardTypes = [
     ["doing_damage", "Damage dealt", colors.green], ["taking_damage", "Damage taken", colors.red],
     ["won_duel", "Win", colors.blue], ["death", "Death", "#8f364c"],
@@ -36,6 +37,9 @@ const definitions = [
     ["training-return-chart", [["training_return", "Episode return", colors.green]]],
     ["training-length-chart", [["training_length", "All fights", colors.blue], ["training_win_length", "Wins", colors.green],
         ["training_loss_length", "Losses", colors.red]]],
+    ["opponent-win-chart", [["training_win_rate", "Win rate", colors.green]]],
+    ["opponent-return-chart", [["training_return", "Episode return", colors.blue]]],
+    ["opponent-length-chart", [["training_length", "Episode length", colors.amber]]],
     ["metric-chart", [["training_return", "Episode return", colors.blue]]],
     ["reward-chart", [["reward_mean", "Mean reward", colors.green]]],
     ["total-reward-chart", [["reward_total", "Total reward", colors.blue]]],
@@ -152,14 +156,57 @@ function trainingSummary(row, opponent = selectedOpponent) {
     return opponent ? source.training_opponents?.[opponent] ?? {} : source;
 }
 
+const opponentMetricFields = ["training_win_rate", "training_loss_rate", "training_timeout_rate",
+    "training_draw_rate", "training_return", "training_length"];
+
+function aggregateOpponents(rows) {
+    const opponents = new Map();
+    let incompleteUpdates = 0;
+    for (const row of rows) {
+        const rollout = row.training_rollout;
+        if (!rollout || rollout.source === "recovered_rewards" || !rollout.training_opponents) {
+            incompleteUpdates++;
+            continue;
+        }
+        let recordedEpisodes = 0;
+        let incomplete = false;
+        for (const [name, summary] of Object.entries(rollout.training_opponents)) {
+            const count = summary.training_episodes;
+            if (!Number.isFinite(count) || count < 0) {
+            incomplete = true;
+                continue;
+            }
+            recordedEpisodes += count;
+            if (!count) continue;
+            if (!opponents.has(name)) opponents.set(name, {episodes: 0, sums: {}, missing: new Set()});
+            const result = opponents.get(name);
+            result.episodes += count;
+            for (const field of opponentMetricFields) {
+                if (Number.isFinite(summary[field])) result.sums[field] = (result.sums[field] ?? 0) + summary[field] * count;
+                else {
+                    result.missing.add(field);
+                    incomplete = true;
+                }
+            }
+        }
+        if (!Number.isFinite(rollout.training_episodes) || rollout.training_episodes !== recordedEpisodes) incomplete = true;
+        if (incomplete) incompleteUpdates++;
+    }
+    return {opponents: [...opponents].sort(([left], [right]) => left.localeCompare(right)).map(([name, result]) => ({
+        name, episodes: result.episodes, ...Object.fromEntries(opponentMetricFields.map(field =>
+            [field, result.missing.has(field) ? null : result.sums[field] / result.episodes])),
+    })), incompleteUpdates};
+}
+
 function renderPerformanceMode() {
     for (const id of ["benchmark-performance", "benchmark-summary-win", "benchmark-summary-return", "benchmark-suite-control"]) {
         element(id).hidden = performanceMode !== "benchmark";
     }
-    for (const id of ["training-performance", "training-summary-win", "training-summary-return", "training-opponent-control",
-        "reward-diagnostics"]) {
+    for (const id of ["training-performance", "training-opponent-control", "reward-diagnostics"]) {
         element(id).hidden = performanceMode !== "training";
     }
+    for (const id of ["training-summary-win", "training-summary-return"]) element(id).hidden = performanceMode === "benchmark";
+    element("opponent-performance").hidden = performanceMode !== "opponents";
     for (const input of document.querySelectorAll('input[name="performance-mode"]')) input.checked = input.value === performanceMode;
 }
 
@@ -743,6 +790,55 @@ function updateBenchmarkDatasets(chart, id, key, derivative) {
         ? "Click a legend entry to toggle it. Right-click to solo; right-click the solo entry again to show all." : "";
 }
 
+function renderOpponentComparison(visible) {
+    const {opponents, incompleteUpdates} = aggregateOpponents(visible);
+    const episodes = opponents.reduce((total, opponent) => total + opponent.episodes, 0);
+    element("opponent-comparison-status").textContent = visible.length
+        ? `Selected window / ${format(episodes)} recorded episodes${incompleteUpdates ? ` / ${format(incompleteUpdates)} updates with incomplete per-opponent data` : ""}`
+        : "No updates in this window.";
+    renderTable("opponent-comparison", opponents.map(opponent => [
+        opponent.name, format(opponent.episodes), ...["win", "loss", "timeout", "draw"].map(outcome => {
+            const rate = opponent[`training_${outcome}_rate`];
+            return Number.isFinite(rate) ? `${format(rate * 100, 2)}%` : "--";
+        }), format(opponent.training_return, 3), format(opponent.training_length, 1),
+    ]), 8, "No per-opponent episodes recorded in this window.");
+}
+
+function updateOpponentDatasets(chart, id, key, derivative, visible) {
+    const names = [...new Set(visible.flatMap(row => row.training_rollout?.source === "recovered_rewards"
+        ? [] : Object.keys(row.training_rollout?.training_opponents ?? {})))].sort();
+    for (const name of names) {
+        if (!opponentColors.has(name)) opponentColors.set(name, suitePalette[opponentColors.size % suitePalette.length]);
+    }
+    const visibility = chart.opponentVisibility ??= new Map();
+    const previous = new Map();
+    chart.data.datasets.forEach((dataset, index) => {
+        if (dataset.opponentName !== undefined) {
+            visibility.set(dataset.opponentName, chart.isDatasetVisible(index));
+            previous.set(dataset.opponentName, dataset);
+        }
+    });
+    chart.data.datasets = names.map(name => {
+        const dataset = previous.get(name) ?? chartDataset(id, name, opponentColors.get(name));
+        dataset.opponentName = name;
+        dataset.data = metricPoints(row => {
+            const summary = row.training_rollout?.source === "recovered_rewards" ? {} : trainingSummary(row, name);
+            return summary.training_episodes > 0 && Number.isFinite(summary[key])
+                ? summary[key] * (metricCatalog[key]?.scale ?? 1) : null;
+        }, derivative);
+        return dataset;
+    });
+    chart.data.datasets.forEach((dataset, index) => chart.setDatasetVisibility(index, visibility.get(dataset.opponentName) ?? true));
+    chart.options.plugins.legend.display = names.length > 0;
+    chart.options.normalized = names.length <= 1;
+    chart.options.interaction.mode = names.length > 1 ? "nearest" : "index";
+    chart.canvas.parentElement?.classList.toggle("multi-benchmark-plot", names.length > 1);
+    legendSolo.afterInit(chart);
+    chart.canvas.title = names.length > 1
+        ? "Click a legend entry to toggle it. Right-click to solo; right-click the solo entry again to show all." : "";
+    element(`${id}-empty`).hidden = chart.data.datasets.some(dataset => dataset.data.some(point => Number.isFinite(point.y)));
+}
+
 function updateRewardDatasets(chart, visible, derivative) {
     const visibility = chart.rewardVisibility ??= new Map();
     const previous = new Map();
@@ -847,6 +943,7 @@ function updateSmoothing() {
 function redrawCharts() {
     renderWindowControls();
     const visible = windowRows(chartRows());
+    renderOpponentComparison(visible);
     const domain = visible.map(row => row[chartAxis]).filter(Number.isFinite);
     const [minimum, maximum] = chartBounds(domain);
     for (const [id, series] of definitions) {
@@ -856,6 +953,7 @@ function redrawCharts() {
         const evaluationChart = ["benchmark-win-chart", "benchmark-return-chart"].includes(id)
             || (id === "metric-chart" && metricCatalog[series[0][0]]?.scope === "evaluation");
         if (id === "reward-types-chart") updateRewardDatasets(chart, visible, derivative);
+        else if (id.startsWith("opponent-")) updateOpponentDatasets(chart, id, series[0][0], derivative, visible);
         else if (evaluationChart) updateBenchmarkDatasets(chart, id, series[0][0], derivative);
         else {
             if (chart.data.datasets.some(dataset => dataset.suiteName !== undefined) || chart.data.datasets.length !== series.length) {

@@ -27,9 +27,9 @@ from simulator.training.legacy import SCHEMA as LEGACY_SCHEMA, SCHEMA_V2 as LEGA
 from simulator.training.plans import EpisodeSampler, advance_rule, plan_hash, reached, resolve_plan
 from simulator.training.policies import fixed_indices, policy_actions, resident_policy_actions
 from simulator.training.research import (BehaviorEvaluation, EpisodeMetrics, OpponentPool,
-                                         ResidentCollector, ResidentOpponentPool, SampledWorlds, bridge_observation_inputs,
-                                         collect, evaluate, export_replay,
-                                         requires_new_worlds, research_metadata, resident_unsupported)
+                                         ResidentBehaviorEvaluation, ResidentBridgeEvaluation, ResidentCollector, ResidentOpponentPool, SampledWorlds, bridge_observation_inputs,
+                                         _evaluate_bridge_resident, _evaluate_duel_resident, _resident_bridge_evaluation_loop, _resident_duel_evaluation_loop, collect, evaluate, export_replay,
+                                         requires_new_worlds, research_metadata, resident_evaluation_unsupported, resident_unsupported)
 from simulator.training.serve import Policy
 from simulator.training.train import arguments, main, optimize
 from simulator.training.timing import CollectionTimer
@@ -44,6 +44,131 @@ def short_plan():
 
 
 class BridgeResearchChecks(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_evaluation_matches_host_for_fixed_bridge_and_duel(self):
+        plan, suite, cpu_options = self.evaluation_inputs(episodes=5, worlds=3, max_ticks=100)
+        suite["controls"] = {"fixed": {"movement": "neutral"}}
+        suite["scenario"]["bridge"]["match"]["max_ticks"] = 3
+        plan["bridge_observation"] = bridge_observation_descriptor(3)
+        model = BridgeActorCritic(1, plan["bridge_observation"], 8, {"movement": 3})
+        cuda_options = SimpleNamespace(device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"], max_ticks=100)
+        with torch.no_grad():
+            expected = evaluate(model, plan, suite, cpu_options, torch.device("cpu"), {})
+            actual = _evaluate_bridge_resident(model.cuda(), plan, suite, cuda_options, None)
+        self.assertEqual(actual, expected)
+        self.assertEqual([seat["episodes"] for seat in actual["seats"]], [3, 2])
+        self.assertEqual(actual["draws"], 5)
+        suite["scenario"]["bridge"]["match"]["max_ticks"] = 100
+        cpu_options.max_ticks = cuda_options.max_ticks = 1
+        with torch.no_grad():
+            expected = evaluate(model.cpu(), plan, suite, cpu_options, torch.device("cpu"), {})
+            actual = _evaluate_bridge_resident(model.cuda(), plan, suite, cuda_options, None)
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual["truncations"], 5)
+
+        suite["scenario"]["bridge"]["match"]["goals_to_win"] = 5
+        suite["controls"] = {"fixed": {"movement": "forward"}}
+        cpu_options.max_ticks = cuda_options.max_ticks = 5
+        with torch.no_grad():
+            expected = evaluate(model.cpu(), plan, suite, cpu_options, torch.device("cpu"), {})
+            actual = _evaluate_bridge_resident(model.cuda(), plan, suite, cuda_options, None)
+        self.assertEqual(actual, expected)
+        self.assertGreater(actual["goals_for"], 0)
+        self.assertEqual(actual["truncations"], 5)
+
+        suite["scenario"].pop("bridge")
+        plan.pop("bridge_observation")
+        suite["controls"] = {"fixed": {"movement": "neutral"}}
+        model = ActorCritic(1, 8, action_sizes={"movement": 3})
+        cpu_options.max_ticks = cuda_options.max_ticks = 3
+        with torch.no_grad():
+            expected = evaluate(model, plan, suite, cpu_options, torch.device("cpu"), {})
+            actual = _evaluate_duel_resident(model.cuda(), plan, suite, cuda_options)
+        self.assertEqual(actual, expected)
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_bridge_evaluation_preserves_frozen_snapshot_and_seed(self):
+        self.scenario["bridge"]["match"]["max_ticks"] = 3
+        self.definitions["past"] = {"type": "frozen_self_play", "every_updates": 1}
+        plan, suite, _ = self.evaluation_inputs(episodes=5, worlds=3, max_ticks=10)
+        plan["bridge_observation"] = bridge_observation_descriptor(3)
+        suite["opponents"] = [{"id": "past", "weight": 1}]
+        model = BridgeActorCritic(1, plan["bridge_observation"], 8, {"movement": 3}).cuda()
+        source = OpponentPool(self.definitions, self.contract, 3, "cuda", 42, learner=model)
+        source.configure(suite["opponents"])
+        source.capture(model, 1, {"fixed": {"movement": "forward"}}, force=True)
+        source.reset(np.ones(3, dtype=bool))
+        snapshot_updates = source.controllers["past"].snapshot_updates.copy()
+        source_rng = source.controllers["past"]._generator.get_state().clone()
+        options = SimpleNamespace(device="cuda", library=os.environ["MCSIM_TEST_CUDA_LIBRARY"], max_ticks=10)
+        first = _evaluate_bridge_resident(model, plan, suite, options, source)
+        second = _evaluate_bridge_resident(model, plan, suite, options, source)
+        self.assertEqual(first, second)
+        self.assertEqual([seat["episodes"] for seat in first["seats"]], [3, 2])
+        self.assertEqual(first["opponents"][0]["controller"]["snapshot_update"], 1)
+        self.assertEqual(first["opponents"][0]["controller"]["fixed_actions"], {"movement": 1})
+        self.assertEqual(len(first["opponents"][0]["controller"]["snapshot_sha256"]), 64)
+        np.testing.assert_array_equal(source.controllers["past"].snapshot_updates, snapshot_updates)
+        torch.testing.assert_close(source.controllers["past"]._generator.get_state(), source_rng)
+        self.assertTrue(model.training)
+        with self.assertRaisesRegex(ValueError, "compatible source snapshot"):
+            _evaluate_bridge_resident(model, plan, suite, options, None)
+
+    @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
+                         "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
+    def test_resident_duel_training_runs_evaluation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = json.loads((TEST_SETUPS / "environment.json").read_text())
+            environment["arena"] = str(TEST_SETUPS / "arena.json")
+            environment["spawns"]["sample"] = "world"
+            (root / "environment.json").write_text(json.dumps(environment))
+            plan = short_plan()
+            plan["environment"] = str(root / "environment.json")
+            plan["opponents"] = {"stationary": plan["opponents"]["stationary"],
+                                 "walker": {"type": "scripted", "controller": "random_walk"}}
+            plan["mixtures"] = {"target": plan["mixtures"]["target"],
+                                "walking": [{"id": "walker", "weight": 1}]}
+            plan["stages"] = [plan["stages"][0]]
+            plan["stages"][0]["evaluations"] = {
+                "held": {"every_updates": 1, "episodes": 5, "worlds": 2, "seed": 9},
+                "fallback": {"every_updates": 1, "episodes": 5, "worlds": 2, "seed": 9,
+                             "overrides": {"opponents": "walking"}}}
+            plan["stages"][0]["advance"] = {"all": [{"updates": 2},
+                {"evaluation": {"suite": "held", "metric": "win_rate", "at_least": 0}}]}
+            (root / "plan.json").write_text(json.dumps(plan))
+            output = root / "run"
+            flags = ["--plan", str(root / "plan.json"), "--output", str(output), "--device", "cuda",
+                     "--rollout-backend", "cuda-resident", "--library", os.environ["MCSIM_TEST_CUDA_LIBRARY"],
+                     "--envs", "4", "--updates", "2", "--rollout-steps", "3", "--max-ticks", "3",
+                     "--hidden-dim", "8", "--epochs", "1", "--minibatch-size", "4", "--threads", "1",
+                     "--replay-every", "0"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(flags), 0)
+            row = json.loads((output / "metrics.jsonl").read_text().splitlines()[0])
+            self.assertEqual(row["evaluations"]["held"]["backend"], "cuda-resident")
+            self.assertEqual(row["evaluations"]["held"]["episodes"], 5)
+            self.assertEqual(row["evaluations"]["fallback"]["backend"], "host")
+            self.assertIn("walker", row["evaluations"]["fallback"]["resident_fallback_reason"])
+            without_evaluation = deepcopy(plan)
+            without_evaluation["stages"][0].pop("evaluations")
+            without_evaluation["stages"][0]["advance"] = {"updates": 2}
+            (root / "without-evaluation.json").write_text(json.dumps(without_evaluation))
+            comparison = flags.copy()
+            comparison[comparison.index("--plan") + 1] = str(root / "without-evaluation.json")
+            comparison[comparison.index("--output") + 1] = str(root / "comparison")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(comparison), 0)
+            evaluated = torch.load(output / "latest.pt", weights_only=True)
+            baseline = torch.load(root / "comparison/latest.pt", weights_only=True)
+            self.assertTrue(evaluated["research"]["completed"])
+            for key in ("model", "optimizer", "rng_state", "cuda_rng_state"):
+                torch.testing.assert_close(evaluated[key], baseline[key], rtol=0, atol=0)
+            torch.testing.assert_close(evaluated["research"]["resident_rng"],
+                                       baseline["research"]["resident_rng"], rtol=0, atol=0)
+
     @unittest.skipUnless(torch.cuda.is_available() and os.environ.get("MCSIM_TEST_CUDA_LIBRARY"),
                          "CUDA and MCSIM_TEST_CUDA_LIBRARY are required")
     def test_resident_bridge_stage_resume_and_checkpoint_opponents(self):
@@ -79,6 +204,7 @@ class BridgeResearchChecks(unittest.TestCase):
             rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
             self.assertEqual([row["stage"] for row in rows], ["target-clear", "runners-generated"])
             self.assertEqual(rows[1]["evaluations"]["held"]["episodes"], 2)
+            self.assertEqual(rows[1]["evaluations"]["held"]["backend"], "cuda-resident")
             self.assertGreater(rows[1]["timeouts"], 0)
             resumed = torch.load(output / "latest.pt", weights_only=True)
             self.assertEqual(resumed["research"]["rollout_backend"], "cuda-resident")
@@ -91,7 +217,6 @@ class BridgeResearchChecks(unittest.TestCase):
             mixed["mixtures"]["all"] = [{"id": name, "weight": 1} for name in mixed["opponents"]]
             mixed["stages"] = [deepcopy(plan["stages"][1])]
             mixed["stages"][0]["opponents"] = "all"
-            mixed["stages"][0].pop("evaluations")
             mixed_path = root / "mixed.json"
             mixed_path.write_text(json.dumps(mixed))
             with contextlib.redirect_stdout(io.StringIO()):
@@ -100,6 +225,10 @@ class BridgeResearchChecks(unittest.TestCase):
             result = torch.load(root / "mixed-run/latest.pt", weights_only=True)
             self.assertEqual(result["metadata"]["bridge_observation"], bridge_observation_descriptor(3))
             self.assertEqual(result["research"]["rollout_backend"], "cuda-resident")
+            mixed_row = json.loads((root / "mixed-run/metrics.jsonl").read_text().splitlines()[0])
+            held = mixed_row["evaluations"]["held"]
+            self.assertEqual(held["backend"], "cuda-resident")
+            self.assertEqual({entry["id"] for entry in held["opponents"]}, set(mixed["opponents"]))
 
     def test_reward_only_stage_transition_and_resume(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,7 +244,7 @@ class BridgeResearchChecks(unittest.TestCase):
                     "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
                 "task_rewards": {"score": 2, "win": 5, "loss": -3}}
             changed = deepcopy(environment)
-            changed["bridge"]["task_rewards"].update(score=7, opponent_score=-1, toward=0.25, away=0)
+            changed["bridge"]["task_rewards"].update(score=7, opponent_score=-1, toward=0.25, away=0, draw=-5)
             for name, value in (("first", environment), ("second", changed)):
                 (root / f"{name}.json").write_text(json.dumps(value))
             plan = {"format": "minecraft_sim_training_plan", "version": 2, "name": "bridge-rewards", "seed": 42,
@@ -126,7 +255,7 @@ class BridgeResearchChecks(unittest.TestCase):
                 "mixtures": {"target": [{"id": "target", "weight": 1}]},
                 "stages": [{"name": "first", "opponents": "target", "advance": {"updates": 1}},
                            {"name": "second", "environment": "second.json", "opponents": "target",
-                            "task_override": {"rewards": {"pitch_control": 3, "no_damage_penalty": -2}},
+                            "task_override": {"rewards": {"pitch_control": 3, "no_damage_penalty": -2, "win_speed": 0.1}},
                             "advance": {"updates": 3}}]}
             plan_path = root / "plan.json"
             plan_path.write_text(json.dumps(plan))
@@ -139,9 +268,14 @@ class BridgeResearchChecks(unittest.TestCase):
                 boundary = torch.load(output / "latest.pt", weights_only=True)
                 self.assertEqual(boundary["research"]["stage_index"], 1)
                 self.assertEqual(boundary["metadata"]["scenario"]["experimental_bridge"], changed["bridge"])
-                self.assertEqual(boundary["metadata"]["reward_semantics"], "bridge_shared_rewards_v1")
+                self.assertEqual(boundary["metadata"]["reward_semantics"], "bridge_draw_win_speed_v1")
                 self.assertEqual(boundary["metadata"]["reward_weights"]["pitch_control"], 3)
                 self.assertEqual(main(["--resume", str(output / "latest.pt"), *common]), 0)
+                boundary["metadata"]["reward_semantics"] = "bridge_shared_rewards_v1"
+                incompatible = root / "old-reward-semantics.pt"
+                torch.save(boundary, incompatible)
+                with self.assertRaisesRegex(ValueError, "reward semantics"):
+                    main(["--resume", str(incompatible), *common])
             resumed = torch.load(output / "latest.pt", weights_only=True)
             self.assertEqual(resumed["research"]["stage_index"], 1)
             self.assertEqual(resumed["metadata"]["scenario"]["experimental_bridge"], changed["bridge"])
@@ -2064,6 +2198,160 @@ class ResidentPolicyChecks(unittest.TestCase):
 
 
 class ResidentOpponentChecks(unittest.TestCase):
+    def test_resident_block_placing_runner_matches_host(self):
+        from simulator.training.compiler import _validate_bridge_opponents
+        from simulator.training.controllers import create_controller
+        from simulator.training.research import ResidentFixedLane
+
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}, {"feature": "self.pitch_fraction", "scale": -2}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "yaw", "values": [-2, 0, 2]},
+                        {"name": "pitch", "values": [-10, 0, 10]},
+                        {"name": "jump", "values": [False, True]},
+                        {"name": "weapon", "values": [0, 3]},
+                        {"name": "use_item", "values": [False, True]}]})
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane",
+                      "options": {"jump": True, "place_blocks": True, "block_slot": 3}}
+        controller = create_controller(definition, contract, 2)
+        resident = ResidentFixedLane(controller, "cpu")
+        for values in ([[0, 0], [1, -2]], [[0, -1], [1, -1.9]]):
+            observations = np.asarray(values, dtype=np.float32)
+            host = controller.act(observations)
+            actual, valid = resident.act(torch.from_numpy(observations), torch.ones(2, dtype=torch.bool))
+            self.assertTrue(valid.all())
+            np.testing.assert_array_equal(actual.numpy(), host)
+        kit = {"slots": ["sword", "empty", "empty", "blocks"], "blocks": 64}
+        scenario = {"bridge": {"building": {}, "kits": [deepcopy(kit), deepcopy(kit)],
+                               "goals": [{"min": [-1, 1, -4], "max": [1, 3, -3]},
+                                         {"min": [-1, 1, 3], "max": [1, 3, 4]}]},
+                    "arenas": [{"environment": {"players": [
+                        {"position": [0, 1, -2], "yaw": 0, "loadout": {"selected": 0}},
+                        {"position": [0, 1, 2], "yaw": 180, "loadout": {"selected": 0}}]}}]}
+        _validate_bridge_opponents(contract, scenario, {"builder": definition})
+        scenario["bridge"]["kits"][1]["slots"][3] = "empty"
+        with self.assertRaisesRegex(ValueError, "blocks in both"):
+            _validate_bridge_opponents(contract, scenario, {"builder": definition})
+
+    def test_resident_evaluation_eligibility_uses_suite_scenario_and_opponents(self):
+        plan = {"policy": {"ticks_per_action": 1}, "bridge_observation": bridge_observation_descriptor(3),
+                "opponents": {"target": {"type": "scripted", "controller": "stationary_target"},
+                              "walker": {"type": "scripted", "controller": "random_walk"}}}
+        suite = {"scenario": {"bridge": {}, "arenas": [{}]}, "opponents": [{"id": "target", "weight": 1}]}
+        capabilities = dict.fromkeys(("cuda_async_observation_version", "cuda_action_decode_version",
+                                      "cuda_resident_step_version", "cuda_resident_episode_version",
+                                      "cuda_resident_bridge_version"), 1)
+        self.assertIsNone(resident_evaluation_unsupported(plan, suite, "cuda", capabilities))
+        self.assertIn("CUDA", resident_evaluation_unsupported(plan, suite, "cpu", capabilities))
+        self.assertIn("capabilities", resident_evaluation_unsupported(plan, suite, "cuda", {}))
+        changed = deepcopy(suite)
+        changed["scenario"]["arenas"].append({})
+        self.assertIn("multiple arenas", resident_evaluation_unsupported(plan, changed, "cuda", capabilities))
+        changed = deepcopy(suite)
+        changed["opponents"] = [{"id": "walker", "weight": 1}]
+        self.assertIn("walker", resident_evaluation_unsupported(plan, changed, "cuda", capabilities))
+        changed = deepcopy(suite)
+        changed["scenario"]["spawns"] = {"sample": "episode"}
+        self.assertIn("fixed spawns", resident_evaluation_unsupported(plan, changed, "cuda", capabilities))
+        changed = deepcopy(suite)
+        changed["scenario"].pop("bridge")
+        self.assertIn("capabilities", resident_evaluation_unsupported(plan, changed, "cuda", capabilities))
+        capabilities["cuda_resident_behavior_version"] = 1
+        self.assertIsNone(resident_evaluation_unsupported(plan, changed, "cuda", capabilities))
+
+    def test_resident_duel_evaluation_loop_counts_first_completions(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]}]})
+        model = ActorCritic(1, 8, action_sizes={"movement": 2})
+        host_pool = OpponentPool({"target": {"type": "scripted", "controller": "stationary_target"}},
+                                 contract, 2, "cpu", 17, learner=model)
+        host_pool.configure([{"id": "target", "weight": 1}])
+        pool = ResidentOpponentPool(host_pool, "cpu", 17)
+        pool.reset(torch.ones(2, dtype=torch.bool))
+        pool.learner_slots.zero_()
+        pool.reset = lambda mask: None
+        observations = torch.zeros(2, 2, 1)
+
+        class FakeEnvironment:
+            def __init__(self):
+                self.tick = 0
+                self.outputs = {"rewards": torch.ones(2, 2), "terminated": torch.zeros(2, dtype=torch.uint8),
+                                "truncated": torch.zeros(2, dtype=torch.uint8),
+                                "losses": torch.zeros(2, 2, dtype=torch.uint8),
+                                "behavior_events": torch.zeros(2, 2, 3),
+                                "reset_mask": torch.zeros(2, dtype=torch.uint8)}
+
+            def step_cuda_resident_async(self):
+                self.tick += 1
+                self.outputs["terminated"].fill_(self.tick % 2 == 0)
+                self.outputs["losses"].copy_(torch.tensor([[0, 1], [1, 0]], dtype=torch.uint8))
+                self.outputs["behavior_events"].zero_()
+                self.outputs["behavior_events"][:, :, 0 if self.tick % 2 else 1] = 0.3 if self.tick % 2 else 1
+                return observations, self.outputs
+
+            def reset_cuda_resident_async(self):
+                return observations
+
+            def wait_cuda_actions(self):
+                return None
+
+        environment = FakeEnvironment()
+        collector = SimpleNamespace(worlds=SimpleNamespace(count=2, action_names=contract["action_names"]),
+                                    pool=pool, environment=environment, device=torch.device("cpu"),
+                                    observations=observations, actions=torch.empty(2, 2, 1, dtype=torch.int32))
+        with torch.no_grad():
+            result = _resident_duel_evaluation_loop(model, collector, 5, {}, poll_steps=8)
+        self.assertEqual(result, {"win_rate": 0.6, "reward_mean": 2, "self_launch_rate": 1,
+                                  "mace_smash_rate": 1, "launch_smash_rate": 1, "episodes": 5, "worlds": 2})
+
+    def test_resident_bridge_evaluation_loop_masks_finished_tickets(self):
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": "self.yaw_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]}]})
+        model = BridgeActorCritic(1, bridge_observation_descriptor(3), 8, {"movement": 2})
+        host_pool = OpponentPool({"target": {"type": "scripted", "controller": "stationary_target"}},
+                                 contract, 2, "cpu", 17, learner=model)
+        host_pool.configure([{"id": "target", "weight": 1}])
+        pool = ResidentOpponentPool(host_pool, "cpu", 17)
+        pool.reset(torch.ones(2, dtype=torch.bool))
+        observations = {"scalar": torch.zeros(2, 2, 1), "match": torch.zeros(2, 2, 17),
+                        "voxels": torch.zeros(2, 2, 5, 9, 9, dtype=torch.uint8)}
+
+        class FakeEnvironment:
+            def __init__(self):
+                self.outputs = {"rewards": torch.ones(2, 2), "terminated": torch.ones(2, dtype=torch.uint8),
+                                "truncated": torch.zeros(2, dtype=torch.uint8),
+                                "losses": torch.zeros(2, 2, dtype=torch.uint8),
+                                "bridge_scored": torch.zeros(2, 2, dtype=torch.uint8),
+                                "reset_mask": torch.zeros(2, dtype=torch.uint8)}
+                self.waits = 0
+
+            def step_cuda_resident_async(self):
+                return observations, self.outputs
+
+            def reset_cuda_resident_async(self):
+                return observations
+
+            def wait_cuda_actions(self):
+                self.waits += 1
+
+        environment = FakeEnvironment()
+        collector = SimpleNamespace(worlds=SimpleNamespace(count=2, action_names=contract["action_names"]),
+                                    pool=pool, environment=environment, device=torch.device("cpu"),
+                                    observations=observations, actions=torch.empty(2, 2, 1, dtype=torch.int32))
+        with torch.no_grad():
+            result = _resident_bridge_evaluation_loop(model, collector, 5, {}, 17, poll_steps=4)
+        self.assertEqual((result["episodes"], result["draws"], result["reward_mean"]), (5, 5, 1))
+        self.assertEqual([seat["episodes"] for seat in result["seats"]], [3, 2])
+        self.assertEqual(environment.waits, 1)
+        environment.outputs["bridge_scored"][0, 0] = 2
+        with torch.no_grad(), self.assertRaisesRegex(ValueError, "invalid observations"):
+            _resident_bridge_evaluation_loop(model, collector, 2, {}, 17, poll_steps=1)
+
     def test_structured_resident_collector_preserves_final_observations(self):
         contract = validate_contract({
             "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
@@ -2461,6 +2749,58 @@ class ResidentOpponentChecks(unittest.TestCase):
 
 
 class EpisodeMetricChecks(unittest.TestCase):
+    def test_resident_behavior_matches_host_across_landing_and_resets(self):
+        host = BehaviorEvaluation(4)
+        resident = ResidentBehaviorEvaluation(4, torch.device("cpu"))
+        slots = np.array([0, 1, 0, 0])
+        events = np.zeros((4, 2, 3), dtype=np.float32)
+        events[:, :, 2] = 1
+        events[0, 0, 0] = events[1, 1, 0] = events[2, 0, 0] = 0.3
+        events[3, 1, 0] = 0.3
+        for tick in range(84):
+            if tick == 1:
+                events.fill(0)
+            if tick == 2:
+                events[1, 1, 2] = 1
+            if tick == 3:
+                events.fill(0)
+                events[:, :, 1] = 1
+            if tick == 4:
+                events.fill(0)
+            host.step(events, slots)
+            resident.step(torch.from_numpy(events), torch.from_numpy(slots))
+            if tick == 5:
+                mask = np.array([True, False, False, False])
+                host.reset(mask)
+                resident.reset(torch.from_numpy(mask))
+            for name in ("launched", "smashed", "launch_smash", "remaining", "airborne"):
+                np.testing.assert_array_equal(getattr(resident, name).numpy(), getattr(host, name))
+
+    def test_resident_bridge_evaluation_counts_tickets_scores_and_seats(self):
+        evaluation = ResidentBridgeEvaluation(3, 5, torch.device("cpu"))
+        first = {"rewards": torch.tensor([[1., 0.], [0., 2.], [3., 0.]]),
+                 "terminated": torch.tensor([1, 1, 0], dtype=torch.uint8),
+                 "truncated": torch.zeros(3, dtype=torch.uint8),
+                 "losses": torch.tensor([[0, 1], [0, 0], [0, 0]], dtype=torch.uint8),
+                 "bridge_scored": torch.tensor([[1, 0], [1, 1], [1, 0]], dtype=torch.uint8)}
+        evaluation.step(first, evaluation.learner_slots())
+        self.assertEqual(evaluation.tickets.tolist(), [3, 4, 2])
+        self.assertEqual(evaluation.learner_slots().tolist(), [1, 0, 0])
+        second = {"rewards": torch.tensor([[0., 4.], [5., 0.], [6., 0.]]),
+                  "terminated": torch.tensor([1, 0, 1], dtype=torch.uint8),
+                  "truncated": torch.tensor([0, 1, 0], dtype=torch.uint8),
+                  "losses": torch.tensor([[1, 0], [0, 0], [1, 0]], dtype=torch.uint8),
+                  "bridge_scored": torch.tensor([[0, 1], [1, 0], [0, 1]], dtype=torch.uint8)}
+        evaluation.step(second, evaluation.learner_slots())
+        self.assertEqual(evaluation.tickets.tolist(), [-1, -1, -1])
+        result = evaluation.result(17)
+        self.assertEqual((result["episodes"], result["wins"], result["losses"], result["draws"],
+                          result["truncations"]), (5, 2, 1, 1, 1))
+        self.assertEqual((result["goals_for"], result["goals_against"], result["reward_mean"]), (5, 2, 4.2))
+        self.assertEqual([seat["episodes"] for seat in result["seats"]], [3, 2])
+        evaluation.step(first, evaluation.learner_slots())
+        self.assertEqual(evaluation.result(17), result)
+
     def test_launch_smash_requires_same_player_and_uninterrupted_flight(self):
         behavior = BehaviorEvaluation(4)
         slots = np.array([0, 1, 0, 0])

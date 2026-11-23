@@ -637,7 +637,7 @@ bool checkBatchedDuelRewardParity() {
     return result;
 }
 
-bool checkResidentBridge(int version) {
+bool checkResidentBridge(int version, bool patterned = false, bool draw = false) {
     using namespace minecraft_sim;
     constexpr int environments = 2;
     constexpr int actor_count = environments * 2;
@@ -674,7 +674,8 @@ bool checkResidentBridge(int version) {
         matches[environment].episodes = 1;
         for (int player = 0; player < 2; ++player) {
             const int actor = environment * 2 + player;
-            players[actor].position = {0.5, 1.0, player == 0 ? (environment == 0 ? 2.0 : 0.0) : -3.0};
+            players[actor].position = {0.5, 1.0, player == 0 ? (environment == 0 ? 2.0 : patterned ? 3.5 : 0.0)
+                                                            : (draw && environment == 0 ? -4.5 : -3.0)};
             initial[environment].players[player] = players[actor];
             resetBridgeKit(matches[environment], rules, players[actor], player);
             actors[actor].slot_count = 1;
@@ -686,7 +687,15 @@ bool checkResidentBridge(int version) {
         }
     }
     const auto initial_players = players;
-    const BridgeTerrainGeneration generation{0, 0, -2, 2, 4};
+    BridgeTerrainGeneration generation{0, 0, -2, 2, 4};
+    if (patterned) {
+        generation.segments = 0;
+        generation.bridge_end_x = 1;
+        generation.pattern_count = 3;
+        generation.patterns[0] = {0, 0, 0, 2, 1 << 23};
+        generation.patterns[1] = {1, 1, 1, 1, 1 << 24};
+        generation.patterns[2] = {0, 2, 0, 2, 1 << 24};
+    }
     for (int environment = 0; environment < environments; ++environment) {
         if (!generateBridgeTerrain(terrain.view(environment), generation,
                                    bridgeTerrainSeed(players[environment * 2].random.state))) return false;
@@ -710,7 +719,8 @@ bool checkResidentBridge(int version) {
     app::DuelRewardSettings settings;
     settings.max_ticks = 1;
     settings.weights[4] = -1.0F;
-    const app::BridgeTaskRewardSettings task_settings{2.0F, -1.0F, 0.25F, 0.1F};
+    settings.weights[8] = 0.1F;
+    const app::BridgeTaskRewardSettings task_settings{2.0F, -1.0F, 0.25F, 0.1F, -5.0F};
     device.configureRewards(settings, reward_states.data(), reward_states.size());
     device.configureBridgeRewards(task_settings, 10.0F, -5.0F, objectives.data(), objectives.size());
     const std::array<std::uint64_t, environments> episodes{1, 1};
@@ -748,6 +758,8 @@ bool checkResidentBridge(int version) {
         || cudaMemcpy(actual_voxels.data(), voxels.data, actual_voxels.size(), cudaMemcpyDeviceToHost) != cudaSuccess
         || cudaMemcpy(actual_terms.data(), task_terms.data, sizeof(actual_terms), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
     bool result = expected_rewards[0].shared.terminated && expected_rewards[1].shared.truncated;
+    result = result && (draw ? expected_events[0].outcome == BridgeOutcome::draw
+                             : expected_events[0].outcome == BridgeOutcome::team0);
     for (int environment = 0; environment < environments; ++environment) {
         result = result && actual_terminated[environment] == expected_rewards[environment].shared.terminated
             && actual_truncated[environment] == expected_rewards[environment].shared.truncated;
@@ -1326,7 +1338,8 @@ int main() {
         std::cerr << "CUDA finished-world protection check failed\n";
         return 1;
     }
-    if (!checkResidentBridge(1) || !checkResidentBridge(2)) {
+    if (!checkResidentBridge(1) || !checkResidentBridge(2) || !checkResidentBridge(1, true)
+        || !checkResidentBridge(2, true) || !checkResidentBridge(2, false, true)) {
         std::cerr << "CUDA resident Bridge parity check failed\n";
         return 1;
     }

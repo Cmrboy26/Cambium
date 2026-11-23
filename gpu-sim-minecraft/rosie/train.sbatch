@@ -144,13 +144,26 @@ if [[ "$(printf '%s\n' 3.24 "$cmake_version" | sort -V | head -n 1)" != 3.24 ]];
     exit 1
 fi
 
-nvidia-smi
-"$PYTHON" -c 'import torch; print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda); assert torch.cuda.is_available(), "CUDA is unavailable"'
-
-PRIVATE_DIR="$(mktemp -d "${SLURM_TMPDIR:-${TMPDIR:-/tmp}}/cambium-${SLURM_JOB_ID}.XXXXXX")"
+PRIVATE_DIR=""
+for TEMP_ROOT in "${SLURM_TMPDIR:-}" "${TMPDIR:-}" /tmp "$SIM_ROOT/simulator"; do
+    [[ -n "$TEMP_ROOT" ]] || continue
+    if PRIVATE_DIR="$(mktemp -d -- "$TEMP_ROOT/cambium-${SLURM_JOB_ID}.XXXXXX")"; then
+        break
+    fi
+    echo "WARNING: Cannot create private job directory in $TEMP_ROOT; trying another location." >&2
+done
+if [[ -z "$PRIVATE_DIR" ]]; then
+    echo "ERROR: Cannot create private job directory in any scratch or project location." >&2
+    exit 1
+fi
 trap 'rm -rf -- "$PRIVATE_DIR"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+export TMPDIR="$PRIVATE_DIR"
+echo "Using private job directory: $PRIVATE_DIR"
+
+nvidia-smi
+"$PYTHON" -c 'import torch; print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda); assert torch.cuda.is_available(), "CUDA is unavailable"'
 
 mkdir -p "$BUILD_DIR"
 BUILD_DIR="$(cd "$BUILD_DIR" && pwd -P)"
@@ -172,7 +185,10 @@ if [[ ! -f "$LIBRARY" ]]; then
     exit 1
 fi
 
-cp -- "$LIBRARY" "$PRIVATE_DIR/minecraft_sim_training.so"
+if ! cp -- "$LIBRARY" "$PRIVATE_DIR/minecraft_sim_training.so"; then
+    echo "ERROR: Failed to copy the native library to private job directory $PRIVATE_DIR." >&2
+    exit 1
+fi
 LIBRARY="$PRIVATE_DIR/minecraft_sim_training.so"
 chmod a-w "$LIBRARY"
 flock --unlock "$BUILD_LOCK_FD"

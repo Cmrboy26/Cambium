@@ -1,0 +1,87 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "CBridge1",
+  "seed": 42,
+  "policy": "../../policies/bridge/building-items.json",
+  "environment": "../../environments/colten/cbridge1-clear.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 4096},
+  "bridge_observation": {
+    "format": "minecraft_sim_bridge_observation", "version": 3,
+    "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1, "actor_task_state_version": 1},
+    "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
+    "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
+      "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress", "refill_enabled", "own_selected_slot",
+      "own_eating_progress", "own_mining_progress", "objective_yaw_error", "objective_pitch_error", "objective_distance",
+      "own_use_cooldown", "own_mining_cooldown"],
+    "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)", "64", "64", "64",
+      "max(1,arrow_refill_ticks)", "1", "8", "32_ticks", "1", "180_degrees", "90_degrees", "50_blocks_clipped",
+      "4_ticks", "5_ticks"],
+    "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_state",
+    "model": "bridge_voxel_actor_critic_v2"
+  },
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "runner-sneak-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"sneak": true, "jump": true}},
+    "runner-jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true}},
+    "past-self": {"type": "frozen_self_play", "every_updates": 20}
+  },
+  "mixtures": {
+    "target": [{"id": "target", "weight": 1}],
+    "runner-sneak": [{"id": "runner-sneak-jump", "weight": 1}],
+    "runner-jump": [{"id": "runner-jump", "weight": 1}],
+    "runners": [{"id": "runner-sneak-jump", "weight": 1}, {"id": "runner-jump", "weight": 4}],
+    "mixed": [{"id": "target", "weight": 1}, {"id": "runner-sneak-jump", "weight": 1},
+              {"id": "runner-jump", "weight": 4}, {"id": "past-self", "weight": 1}]
+  },
+  "stages": [
+    {
+      "name": "clear-crossing", "opponents": "target",
+      "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
+      "evaluations": {"clear-crossing": {"every_updates": 20, "worlds": 64, "episodes": 64, "seed": 1729}},
+      "advance": {"all": [{"updates": 20},
+        {"evaluation": {"suite": "clear-crossing", "metric": "min_seat_win_rate", "at_least": 0.75}}]},
+      "snapshots": [{"name": "clear-crossing", "on_completion": true}]
+    },
+    {
+      "name": "obstacle-crossing", "environment": "../../environments/colten/cbridge1-intro.json",
+      "opponents": "target", "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
+      "evaluations": {"obstacle-crossing": {"every_updates": 20, "worlds": 64, "episodes": 64, "seed": 2718}},
+      "advance": {"all": [{"updates": 40},
+        {"evaluation": {"suite": "obstacle-crossing", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "obstacle-crossing", "on_completion": true}]
+    },
+    {
+      "name": "obstacle-runners", "environment": "../../environments/colten/cbridge1-obstacles.json",
+      "opponents": "runners", "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
+      "task_override": {"rewards": {"doing_damage": 1}},
+      "evaluations": {
+        "runners-target": {"overrides": {"opponents": "target"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 3141},
+        "runners-sneak": {"overrides": {"opponents": "runner-sneak"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 1618},
+        "runners-jump": {"overrides": {"opponents": "runner-jump"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 2718}
+      },
+      "advance": {"all": [{"updates": 80},
+        {"evaluation": {"suite": "runners-target", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "runners-sneak", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "runners-jump", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "obstacle-runners", "on_completion": true}]
+    },
+    {
+      "name": "obstacle-building", "environment": "../../environments/colten/cbridge1-obstacles.json",
+      "opponents": "mixed", "controls": {"fixed": {}}, "task_override": {"rewards": {"doing_damage": 1}},
+      "evaluations": {
+        "building-target": {"overrides": {"opponents": "target"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 3141},
+        "building-sneak": {"overrides": {"opponents": "runner-sneak"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 1618},
+        "building-jump": {"overrides": {"opponents": "runner-jump"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 2718}
+      },
+      "advance": {"all": [{"updates": 600},
+        {"evaluation": {"suite": "building-target", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "building-sneak", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "building-jump", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "building-100", "at_updates": 100},
+                    {"name": "building-300", "at_updates": 300},
+                    {"name": "building-600", "at_updates": 600},
+                    {"name": "cbridge1-complete", "on_completion": true}]
+    }
+  ]
+}

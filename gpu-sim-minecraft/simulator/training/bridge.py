@@ -42,6 +42,66 @@ def _solid(scene, cell):
     return False
 
 
+def _validate_bridge_patterns(generation, scene, zones, goals, origin, size):
+    _object(generation, ("bridge", "patterns"), "pattern terrain generation")
+    bounds = _object(generation["bridge"], ("min", "max"), "bridge bounds")
+    for coordinates in bounds.values():
+        if (not isinstance(coordinates, list) or len(coordinates) != 3
+                or any(type(value) is not int or abs(value) > 1000000000 for value in coordinates)):
+            raise ValueError("Bridge bounds require three bounded integer coordinates")
+    lower, upper = bounds["min"], bounds["max"]
+    if not (1 <= upper[0] - lower[0] <= 64 and upper[1] - lower[1] == 1
+            and 1 <= upper[2] - lower[2] <= 10000):
+        raise ValueError("Bridge bounds require a one-block-high, nonempty Z-aligned floor")
+    patterns = generation["patterns"]
+    if not isinstance(patterns, list) or not 1 <= len(patterns) <= 32:
+        raise ValueError("Bridge terrain requires one to 32 patterns")
+    maxima = {"top": 0, "side": 0}
+    for pattern in patterns:
+        if not isinstance(pattern, dict):
+            raise ValueError("Bridge terrain pattern must be an object")
+        kind = pattern.get("type")
+        keys = {"location", "type", "percent"} | ({"value"} if kind == "constant" else {"min", "max"})
+        if kind == "function":
+            keys.add("function")
+        if kind not in ("random", "constant", "function") or set(pattern) != keys:
+            raise ValueError("Invalid Bridge terrain pattern fields")
+        if (not isinstance(pattern["location"], str) or pattern["location"] not in maxima
+            or (kind == "function" and pattern["function"] != "half-sine")):
+            raise ValueError("Unsupported Bridge terrain pattern location or function")
+        minimum = pattern["value"] if kind == "constant" else pattern["min"]
+        maximum = pattern["value"] if kind == "constant" else pattern["max"]
+        if type(minimum) is not int or type(maximum) is not int or not 0 <= minimum <= maximum <= 8:
+            raise ValueError("Bridge terrain pattern extents must be integers in 0..8")
+        if not 0 <= _number(pattern["percent"], "pattern percent") <= 1:
+            raise ValueError("Bridge terrain pattern percent must be in 0..1")
+        maxima[pattern["location"]] = max(maxima[pattern["location"]], maximum)
+    areas = []
+    if maxima["top"]:
+        areas.append(([lower[0], lower[1] + 1, lower[2]], [upper[0], lower[1] + 1 + maxima["top"], upper[2]]))
+    if maxima["side"]:
+        areas.extend([([lower[0] - maxima["side"], lower[1], lower[2]], [lower[0], upper[1], upper[2]]),
+                      ([upper[0], lower[1], lower[2]], [upper[0] + maxima["side"], upper[1], upper[2]])])
+    for area_lower, area_upper in [(lower, upper), *areas]:
+        if any(lo < base or hi > base + extent for lo, hi, base, extent in zip(area_lower, area_upper, origin, size)):
+            raise ValueError("Bridge floor and generated terrain must be in bounds")
+    for area_lower, area_upper in areas:
+        if (any(_intersects(area_lower, area_upper, goal["min"], goal["max"]) for goal in goals)
+                or any(_intersects(area_lower, area_upper, *_player_bounds(player["position"])) for player in scene["players"])):
+            raise ValueError("Generated Bridge terrain must be clear of spawns and goals")
+        for x_coord in range(area_lower[0], area_upper[0]):
+            for y_coord in range(area_lower[1], area_upper[1]):
+                for z_coord in range(area_lower[2], area_upper[2]):
+                    cell = (x_coord, y_coord, z_coord)
+                    if (_solid(scene, cell) or not any(all(lo <= value and value + 1 <= hi
+                            for lo, value, hi in zip(zone["min"], cell, zone["max"])) for zone in zones)):
+                        raise ValueError("Generated Bridge terrain requires clear cells inside build zones")
+    for x_coord in range(lower[0], upper[0]):
+        for z_coord in range(lower[2], upper[2]):
+            if not _solid(scene, (x_coord, lower[1], z_coord)):
+                raise ValueError("Bridge terrain generation requires a protected bridge floor")
+
+
 def validate_bridge(configuration, scene):
     required = {"mode", "goals", "void_y", "match", "task_rewards"}
     if (not isinstance(configuration, dict) or not required <= set(configuration)
@@ -86,7 +146,7 @@ def validate_bridge(configuration, scene):
     rewards = bridge["task_rewards"]
     required_rewards = {"score", "win", "loss"}
     if (not isinstance(rewards, dict) or not required_rewards <= set(rewards)
-            or set(rewards) - required_rewards - {"opponent_score", "toward", "away"}):
+            or set(rewards) - required_rewards - {"draw", "opponent_score", "toward", "away"}):
         raise ValueError("Invalid Bridge task_rewards fields")
     converted = {}
     for key, value in rewards.items():
@@ -98,7 +158,7 @@ def validate_bridge(configuration, scene):
     opponent = converted.get("opponent_score", 0)
     if any(abs(score + opposing + outcome) > FLOAT_MAX
            for score in (0, converted["score"]) for opposing in (0, opponent)
-           for outcome in (0, converted["win"], converted["loss"])):
+           for outcome in (0, converted["win"], converted["loss"], converted.get("draw", 0))):
         raise ValueError("Combined Bridge rewards must fit float32")
     player_bounds = [_player_bounds(player["position"]) for player in scene["players"]]
     if _intersects(*player_bounds[0], *player_bounds[1]):
@@ -178,6 +238,9 @@ def validate_bridge(configuration, scene):
     if "terrain_generation" in bridge:
         if "building" not in bridge:
             raise ValueError("Bridge terrain generation requires building rules")
+        if isinstance(bridge["terrain_generation"], dict) and "bridge" in bridge["terrain_generation"]:
+            _validate_bridge_patterns(bridge["terrain_generation"], scene, zones, goals, origin, size)
+            return
         generation = _object(bridge["terrain_generation"], ("center_x", "floor_y", "start_z", "end_z", "segments"),
                              "terrain generation")
         if (any(type(value) is not int or abs(value) > 1000000000 for value in generation.values())

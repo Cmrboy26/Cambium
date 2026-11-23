@@ -323,7 +323,13 @@ def _validate_bridge_opponents(policy, scenario, opponents):
         if opponent["controller"] == "bridge_fixed_lane":
             from simulator.training.controllers import BridgeFixedLaneController
 
-            BridgeFixedLaneController(policy, count=1, seed=0, options=opponent.get("options", {}))
+            controller = BridgeFixedLaneController(policy, count=1, seed=0, options=opponent.get("options", {}))
+            if controller.place_blocks:
+                kits = scenario["bridge"].get("kits", [])
+                if ("building" not in scenario["bridge"] or len(kits) != 2 or any(
+                        controller.block_slot >= len(kit["slots"])
+                        or kit["slots"][controller.block_slot] != "blocks" or kit["blocks"] < 1 for kit in kits)):
+                    raise ValueError("bridge_fixed_lane block placement requires blocks in both configured kit slots")
             goals = scenario["bridge"]["goals"]
             for player, spawn in enumerate(players):
                 yaw = (spawn.get("yaw", 0) + 180) % 360 - 180

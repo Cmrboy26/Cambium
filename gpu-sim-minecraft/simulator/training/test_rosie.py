@@ -25,11 +25,34 @@ class SubmissionFormTests(unittest.TestCase):
     def values(self):
         from simulator.training.submit_form import LEARNER_FIELDS
         from simulator.training.compiler import LEARNER_DEFAULTS
-        return {"JOB_NAME": "test", "TIME": "1-00:00:00", "ENVS": "8192", "UPDATES": "1500",
+        return {"JOB_NAME": "test", "ROLLOUT_BACKEND": "host", "WORKLOAD_PRESET": "custom", "DURATION_PRESET": "custom",
+            "TIME": "1-00:00:00", "ENVS": "8192", "UPDATES": "1500",
                 "ROLLOUT": "128", "CPUS": "8", "MEMORY": "24G", "THREADS": "auto", "REPLAY": "0",
                 "PROFILE_EVERY": "0", "SAVE_EVERY": "10", "RESUME": "", "INITIALIZE": "",
                 "START_STAGE": "", "DEPENDENCY": "none",
                 **{key: str(LEARNER_DEFAULTS[name]) for key, name in LEARNER_FIELDS.items()}}
+
+    def test_plan_picker_filters_paths_and_selects_with_keys(self):
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from simulator.training.submit_form import PlanPicker, matching_plans
+        plans = ["colten/cbridge1.json", "colten/cbridge2.json", "other/cbridge2.json"]
+        self.assertEqual(matching_plans(plans, "COLTEN bridge2"), ["colten/cbridge2.json"])
+        self.assertEqual(matching_plans(plans, "missing"), [])
+        with create_pipe_input() as pipe:
+            picker = PlanPicker(plans, input=pipe, output=DummyOutput())
+            pipe.send_text("cbridge2\x1b[B\r")
+            self.assertEqual(picker.run(), "other/cbridge2.json")
+
+    def test_plan_picker_can_cancel(self):
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from simulator.training.submit_form import PlanPicker
+        with create_pipe_input() as pipe:
+            picker = PlanPicker(["plan.json"], input=pipe, output=DummyOutput())
+            pipe.send_text("\x03")
+            with self.assertRaises(KeyboardInterrupt):
+                picker.run()
 
     def test_bridge_replay_defaults_and_validation(self):
         from simulator.training.submit_form import normalize, replay_default
@@ -53,11 +76,95 @@ class SubmissionFormTests(unittest.TestCase):
             plan = {"stages": [{"advance": {"updates": 1}, "scenario": {"bridge": {}} if bridge else {}}],
                     "learner": LEARNER_DEFAULTS}
             with self.subTest(bridge=bridge), patch("simulator.training.submit_form.load_plan", return_value=plan), \
+                    patch("simulator.training.submit_form.resident_reason", return_value=None), \
                     patch("simulator.training.submit_form.SubmissionForm") as form, contextlib.redirect_stdout(io.StringIO()):
                 form.return_value.run.return_value = (self.values(), {})
                 self.assertEqual(main(["--plan", "plan.json"]), 0)
                 self.assertEqual(form.call_args.args[0]["REPLAY"], expected)
                 self.assertEqual(form.call_args.kwargs["bridge"], bridge)
+
+    def test_rollout_backend_choices_use_compatibility_reason(self):
+        from simulator.training.submit_form import backend_status, normalize
+        values = self.values()
+        self.assertEqual(normalize({**values, "ROLLOUT_BACKEND": "cuda-resident"})[0]["ROLLOUT_BACKEND"],
+                         "cuda-resident")
+        with self.assertRaisesRegex(ValueError, "multiple arenas"):
+            normalize({**values, "ROLLOUT_BACKEND": "cuda-resident"}, unsupported="multiple arenas")
+        self.assertIn("multiple arenas", backend_status("auto", "multiple arenas"))
+        self.assertIn("multiple arenas", backend_status("host", "multiple arenas"))
+        self.assertEqual(normalize({**values, "ROLLOUT_BACKEND": "auto"}, unsupported="multiple arenas")[0]
+                         ["ROLLOUT_BACKEND"], "auto")
+        with self.assertRaisesRegex(ValueError, "Shared-GPU"):
+            normalize({**values, "ROLLOUT_BACKEND": "cuda-resident"}, shared_gpu=True)
+        for value in ("invalid", "host,auto"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({**values, "ROLLOUT_BACKEND": value})
+
+    def test_presets_change_only_their_own_setting_and_manual_edits_are_custom(self):
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from simulator.training.submit_form import SubmissionForm, duration_presets, workload_presets
+        workloads = workload_presets(8192)
+        durations = duration_presets(600)
+        self.assertEqual(workloads, {"small": 512, "medium": 2048, "large": 8192})
+        self.assertEqual(durations, {"short": 20, "standard": 600, "extended": 1200})
+        with create_pipe_input() as pipe:
+            form = SubmissionForm(self.values(), input=pipe, output=DummyOutput(), workloads=workloads,
+                                  durations=durations)
+            form.fields["WORKLOAD_PRESET"].buffer.text = "medium"
+            self.assertEqual(form.fields["ENVS"].text, "2048")
+            self.assertEqual(form.fields["UPDATES"].text, "1500")
+            form.fields["DURATION_PRESET"].buffer.text = "short"
+            self.assertEqual(form.fields["UPDATES"].text, "20")
+            self.assertEqual(form.fields["ENVS"].text, "2048")
+            form.fields["ENVS"].buffer.text = "1234"
+            self.assertEqual(form.fields["WORKLOAD_PRESET"].text, "custom")
+
+    def test_resume_preflight_requires_original_backend_and_batch_shape(self):
+        import torch
+        from simulator.training.submit_form import validate_checkpoints
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "latest.pt"
+            torch.save({"research": {"world_count": 2048, "rollout_steps": 128, "rollout_backend": "host"},
+                        "metadata": {"hidden_dim": 512}}, checkpoint)
+            values = {**self.values(), "RESUME": str(checkpoint), "ENVS": "2048", "HIDDEN": "512"}
+            validate_checkpoints(values, None)
+            for changes, expected in (({"ROLLOUT_BACKEND": "cuda-resident"}, "requires backend host"),
+                                      ({"ROLLOUT_BACKEND": "auto"}, "requires backend host"),
+                                      ({"ENVS": "8192"}, "Parallel worlds = 2048"),
+                                      ({"ROLLOUT": "64"}, "Steps per rollout = 128"),
+                                      ({"HIDDEN": "128"}, "Hidden width = 512")):
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, expected):
+                    validate_checkpoints({**values, **changes}, None)
+
+    def test_stage_change_updates_preset_without_overwriting_custom_budget(self):
+        from prompt_toolkit.output import DummyOutput
+        from simulator.training.submit_form import SubmissionForm, duration_presets, stage_budgets
+        plan = {"stages": [{"name": "first", "advance": {"updates": 100}},
+                           {"name": "last", "advance": {"updates": 200}}]}
+        budgets = stage_budgets(plan)
+        self.assertEqual(budgets, {"": 300, "first": 300, "last": 200})
+        values = {**self.values(), "DURATION_PRESET": "standard", "UPDATES": "300"}
+        form = SubmissionForm(values, output=DummyOutput(), durations=duration_presets(300), budgets=budgets)
+        form.fields["START_STAGE"].buffer.text = "last"
+        self.assertEqual(form.fields["UPDATES"].text, "200")
+        form.fields["UPDATES"].buffer.text = "333"
+        form.fields["START_STAGE"].buffer.text = "first"
+        self.assertEqual(form.fields["UPDATES"].text, "333")
+        self.assertEqual(form.fields["DURATION_PRESET"].text, "custom")
+
+    def test_preset_and_backend_choices_cycle_with_arrow_keys(self):
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from simulator.training.submit_form import ORDER, SubmissionForm, duration_presets, workload_presets
+        with create_pipe_input() as pipe:
+            form = SubmissionForm(self.values(), input=pipe, output=DummyOutput(),
+                                  workloads=workload_presets(8192), durations=duration_presets(600))
+            pipe.send_text("\x1b[B\x1b[C\x1b[B\x1b[C\x1b[B\x1b[C" + "\x1b[B" * (len(ORDER) - 3) + "\r")
+            settings, _ = form.run()
+        self.assertEqual(settings["ROLLOUT_BACKEND"], "auto")
+        self.assertEqual(settings["ENVS"], "512")
+        self.assertEqual(settings["UPDATES"], "20")
 
     def test_form_validates_numeric_sweeps_and_cpu_limits(self):
         from simulator.training.submit_form import normalize
@@ -238,6 +345,7 @@ class TrainingJobTests(unittest.TestCase):
         self.executable(self.root / ".venv-rosie/bin/python",
                         '#!/usr/bin/env bash\n'
                         'if [[ "$1" == "-B" ]]; then\n'
+                        '  if [[ -n "${JOB_TEST_TMPDIR_LOG:-}" ]]; then printf "%s" "$TMPDIR" > "$JOB_TEST_TMPDIR_LOG"; fi\n'
                         '  printf "%s\\n" "$@" > "$JOB_TEST_LOG"\n'
                         '  while (( $# )); do\n'
                         '    if [[ "$1" == "--library" ]]; then cp -- "$2" "$JOB_TEST_SNAPSHOT"; break; fi\n'
@@ -415,6 +523,49 @@ done
         arguments = self.log.read_text().splitlines()
         self.assertEqual(Path(arguments[arguments.index("--library") + 1]).parent.parent, fallback)
         self.assertEqual(list(fallback.iterdir()), [])
+
+    def test_private_library_uses_tmpdir_when_slurm_scratch_fails(self):
+        result = self.launch(SLURM_TMPDIR=str(self.root / "missing scratch"), TMPDIR=str(self.scratch))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertEqual(Path(arguments[arguments.index("--library") + 1]).parent.parent, self.scratch)
+        self.assertIn("trying another location", result.stderr)
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_private_library_falls_back_when_scratch_is_full(self):
+        self.executable(self.tools / "mktemp", '#!/usr/bin/env bash\n'
+                        'case "$3" in "$JOB_TEST_BAD_SCRATCH"/*|/tmp/cambium-*)\n'
+                        '  echo "No space left on device" >&2; exit 1;;\n'
+                        'esac\n'
+                        'exec /usr/bin/mktemp "$@"\n')
+        tmpdir_log = self.root / "training-tmpdir"
+        result = self.launch(SLURM_TMPDIR=str(self.scratch), TMPDIR=str(self.scratch),
+                             JOB_TEST_BAD_SCRATCH=str(self.scratch), JOB_TEST_TMPDIR_LOG=str(tmpdir_log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        library = Path(arguments[arguments.index("--library") + 1])
+        self.assertEqual(library.parent.parent, self.root / "simulator")
+        self.assertEqual(tmpdir_log.read_text(), str(library.parent))
+        self.assertFalse(library.parent.exists())
+        self.assertIn("trying another location", result.stderr)
+        self.assertEqual(self.snapshot.read_bytes(), b"compiled simulator")
+
+    def test_private_library_fails_cleanly_when_all_scratch_is_unavailable(self):
+        self.executable(self.tools / "mktemp", '#!/usr/bin/env bash\necho "No space left on device" >&2\nexit 1\n')
+        result = self.launch(TMPDIR=str(self.scratch))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot create private job directory in any scratch or project location", result.stderr)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_failed_private_library_copy_never_starts_training(self):
+        self.executable(self.tools / "cp", '#!/usr/bin/env bash\necho "No space left on device" >&2\nexit 1\n')
+        result = self.launch()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Failed to copy the native library to private job directory", result.stderr)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+        self.assertTrue((self.root / "simulator/build-rosie-cuda-75/minecraft_sim_training.so").is_file())
 
     def test_custom_build_directory_uses_its_own_lock_and_snapshot(self):
         build = self.root / "custom build"
@@ -610,6 +761,17 @@ print(f"{12345 + count};test-cluster")
         result = self.launch(shared_gpu=True, extra_arguments=("--rollout-backend", "auto"))
         self.assertNotEqual(result.returncode, 0)
 
+    def test_incompatible_explicit_resident_is_rejected_before_submission(self):
+        self.make_bridge_plan()
+        forced = self.launch(extra_arguments=("--rollout-backend", "cuda-resident"), dry_run=False)
+        self.assertNotEqual(forced.returncode, 0)
+        self.assertIn("requires a portable Bridge observation descriptor", forced.stdout)
+        self.assertFalse(self.log.exists())
+        automatic = self.launch(extra_arguments=("--rollout-backend", "auto"))
+        self.assertEqual(automatic.returncode, 0, automatic.stderr)
+        self.assertIn("Auto will use host", automatic.stdout)
+        self.assertIn("SIM_ROLLOUT_BACKEND=auto", automatic.stdout)
+
     def test_local_dry_run_exports_stage_checkpoint_and_cadence(self):
         checkpoint = self.root / "prior-run" / "snapshots" / "aim-1.pt"
         checkpoint.parent.mkdir(parents=True)
@@ -692,13 +854,16 @@ print(f"{12345 + count};test-cluster")
                 if phase == 0 and b"GPU preset [" in captured:
                     os.write(primary, b"\n")
                     phase = 1
-                if phase == 1 and b"Plan number [" in captured:
+                if phase == 1 and b"Choose a training plan" in captured:
                     os.write(primary, b"\n")
                     phase = 2
                 if phase == 2 and b"Rosie Training Submission" in captured:
+                    import torch
                     checkpoint = self.root / "prior run" / "latest.pt"
                     checkpoint.parent.mkdir(parents=True)
-                    checkpoint.write_bytes(b"checkpoint")
+                    torch.save({"research": {"world_count": 2048, "rollout_steps": 128,
+                                              "rollout_backend": "cuda-resident"},
+                                "metadata": {"hidden_dim": 512}}, checkpoint)
                     entropy = ORDER.index("ENT_COEF")
                     profile = ORDER.index("PROFILE_EVERY")
                     resume = ORDER.index("RESUME")
@@ -710,6 +875,9 @@ print(f"{12345 + count};test-cluster")
                     keys += "\x1b[B" * (len(ORDER) - resume) + "\r"
                     os.write(primary, keys.encode())
                     phase = 3
+                if phase == 3 and b"Submit 1 job(s)? (y/n)" in captured:
+                    os.write(primary, b"y\n")
+                    phase = 4
             self.assertEqual(process.wait(timeout=2), 0, captured.decode(errors="replace"))
         finally:
             if process.poll() is None:
@@ -719,16 +887,80 @@ print(f"{12345 + count};test-cluster")
         submission = json.loads(self.log.read_text())
         self.assertIn("--job-name=arrow-submit", submission["arguments"])
         export = next(value for value in submission["arguments"] if value.startswith("--export="))
+        self.assertIn("SIM_ROLLOUT_BACKEND=cuda-resident", export)
         self.assertIn("SIM_ENT_COEF=0.025", export)
         self.assertIn("SIM_PROFILE_EVERY=10", export)
         self.assertIn("SIM_SAVE_EVERY=250", export)
         self.assertIn(f"SIM_RESUME={self.root}/prior run/latest.pt", export)
         self.assertEqual(len(self.history.read_text().splitlines()), 1)
 
+    def test_interactive_plan_search_and_stage_defaults_reach_dry_run(self):
+        import fcntl
+        import pty
+        import select
+        import struct
+        import termios
+        import time
+        from simulator.training.submit_form import ORDER
+        checkpoint = self.root / "seed checkpoint.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        (self.root / "simulator/setups/curricula/bad-plan.json").write_text("{broken")
+        primary, secondary = pty.openpty()
+        fcntl.ioctl(secondary, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        environment = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
+                       "PYTHONPATH": str(Path(__file__).resolve().parents[2]), "TERM": "xterm-256color",
+                       "PROMPT_TOOLKIT_NO_CPR": "1", "SUBMIT_TEST_LOG": str(self.log),
+                       "SUBMIT_TEST_HISTORY": str(self.history)}
+        process = subprocess.Popen(["bash", str(self.script), "--dry-run", "--initialize", str(checkpoint),
+                                    "--start-stage", "stage-2"], stdin=secondary, stdout=secondary, stderr=secondary,
+                                   cwd=self.temporary.name, env=environment)
+        os.close(secondary)
+        captured = b""
+        phase = 0
+        picker_start = 0
+        deadline = time.monotonic() + 30
+        try:
+            while process.poll() is None and time.monotonic() < deadline:
+                if not select.select([primary], [], [], 1)[0]:
+                    continue
+                try:
+                    captured += os.read(primary, 65536)
+                except OSError:
+                    break
+                if phase == 0 and b"GPU preset [" in captured:
+                    os.write(primary, b"\n")
+                    phase = 1
+                if phase == 1 and b"Choose a training plan" in captured:
+                    os.write(primary, b"bad-plan\n")
+                    phase = 2
+                if phase == 2 and b"Choose another plan? (y/n)" in captured:
+                    picker_start = len(captured)
+                    os.write(primary, b"y\n")
+                    phase = 3
+                if phase == 3 and b"Choose a training plan" in captured[picker_start:]:
+                    os.write(primary, b"shield-axe\n")
+                    phase = 4
+                if phase == 4 and b"Rosie Training Submission" in captured:
+                    os.write(primary, ("\x1b[B" * len(ORDER) + "\r").encode())
+                    phase = 5
+            self.assertEqual(process.wait(timeout=2), 0, captured.decode(errors="replace"))
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            os.close(primary)
+        output = captured.decode(errors="replace")
+        self.assertIn("Selected training plan validation failed", output)
+        for expected in ("SIM_ROLLOUT_BACKEND=cuda-resident", "SIM_ENVS=2048", "SIM_UPDATES=1700",
+                         "SIM_START_STAGE=stage-2", "Dry run: nothing submitted"):
+            self.assertIn(expected, output)
+        self.assertFalse(self.log.exists())
+
     def test_enter_defaults_use_h100_and_current_plan_budget(self):
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)
         for expected in ("--partition=dgxh100", "--gres=gpu:h100:1", "MCSIM_CUDA_ARCHITECTURES=90",
+                         "SIM_ROLLOUT_BACKEND=host",
                          "SIM_ENVS=8192", "SIM_UPDATES=2000", "SIM_ROLLOUT_STEPS=128",
                          "SIM_HIDDEN_DIM=512", "SIM_EPOCHS=2", "SIM_MINIBATCH_SIZE=16384",
                          "SIM_LR=0.0003", "SIM_REPLAY_EVERY=50000", "Validated 1 plan(s); 0 failed",

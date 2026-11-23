@@ -33,12 +33,15 @@ from simulator.training.timing import CollectionTimer, OptimizationTimer
 BRIDGE_REWARD_SEMANTICS = "bridge_score_win_loss_v1"
 BRIDGE_OBJECTIVE_REWARD_SEMANTICS = "bridge_score_opponent_objective_progress_v2"
 BRIDGE_SHARED_REWARD_SEMANTICS = "bridge_shared_rewards_v1"
+BRIDGE_OUTCOME_REWARD_SEMANTICS = "bridge_draw_win_speed_v1"
 
 
 def bridge_reward_semantics(configuration, weights=None):
+    fields = configuration["task_rewards"]
+    if fields.get("draw", 0) or (weights and weights.get("win_speed", 0)):
+        return BRIDGE_OUTCOME_REWARD_SEMANTICS
     if weights and any(weights.values()):
         return BRIDGE_SHARED_REWARD_SEMANTICS
-    fields = configuration["task_rewards"]
     return (BRIDGE_OBJECTIVE_REWARD_SEMANTICS if set(fields) & {"opponent_score", "toward", "away"}
             else BRIDGE_REWARD_SEMANTICS)
 
@@ -587,6 +590,16 @@ class ResidentFixedLane:
         self.neutral = torch.as_tensor(controller._neutral, device=device)
         self.enabled = [(controller._heads[name][0], controller._heads[name][1].index(True))
                         for name in ("jump", "sneak") if getattr(controller, name)]
+        self.placing = controller.place_blocks
+        if self.placing:
+            self.pitch_feature, pitch_descriptor = controller._features["self.pitch_fraction"]
+            self.pitch_scale = pitch_descriptor["scale"]
+            self.pitch_column, pitch_choices = controller._heads["pitch"]
+            self.pitch_choices = torch.tensor(pitch_choices, dtype=torch.float64, device=device)
+            self.weapon_column, weapon_choices = controller._heads["weapon"]
+            self.block_choice = weapon_choices.index(controller.block_slot)
+            self.use_column, use_choices = controller._heads["use_item"]
+            self.use_choice = use_choices.index(True)
 
     def reset(self, mask):
         self.directions = torch.where(mask, -1, self.directions)
@@ -604,6 +617,11 @@ class ResidentFixedLane:
         actions[:, self.movement_column] = torch.where(error.abs() <= 1, self.forward, self.neutral_movement)
         for column, choice in self.enabled:
             actions[:, column] = choice
+        if self.placing:
+            pitch = observations[:, self.pitch_feature].to(torch.float64) / self.pitch_scale * 90
+            actions[:, self.pitch_column] = (90 - pitch.unsqueeze(1) - self.pitch_choices).abs().argmin(dim=1)
+            actions[:, self.weapon_column] = self.block_choice
+            actions[:, self.use_column] = self.use_choice
         return actions, valid
 
 
@@ -765,7 +783,7 @@ class ResidentOpponentPool:
 
 
 class ResidentCollector:
-    def __init__(self, worlds, pool, seed, bridge_descriptor=None):
+    def __init__(self, worlds, pool, seed, bridge_descriptor=None, behavior_events=False):
         if worlds.device != "cuda" or len(worlds.groups) != 1 or len(worlds.sampler.scenario["arenas"]) != 1:
             raise ValueError("Resident rollout requires one CUDA arena batch")
         for component in ("spawns", "equipment"):
@@ -783,7 +801,8 @@ class ResidentCollector:
         environment.register_cuda_observations()
         self.actions = environment.register_cuda_actions()
         self.buffers = (environment.register_cuda_resident(bridge_descriptor) if bridge_descriptor is not None
-                else environment.register_cuda_resident())
+            else environment.register_cuda_resident(behavior_events=True) if behavior_events
+            else environment.register_cuda_resident())
         self.observations = environment.observe_cuda_async()
         self.pool.reset(torch.ones(worlds.count, dtype=torch.bool, device=self.device))
 
@@ -1100,6 +1119,68 @@ def _collect(model, worlds, pool, observations, steps, device, fixed, timer, lea
     return rollout, observations, endings, timeouts
 
 
+class ResidentBridgeEvaluation:
+    def __init__(self, count, episodes, device):
+        self.episodes = episodes
+        self.indices = torch.arange(count, device=device)
+        self.tickets = self.indices.clone()
+        self.next_ticket = torch.tensor(count, device=device)
+        self.finished = torch.zeros((), dtype=torch.long, device=device)
+        self.returns = torch.zeros(count, dtype=torch.float64, device=device)
+        self.scores = torch.zeros((count, 2), dtype=torch.long, device=device)
+        self.reward_total = torch.zeros((), dtype=torch.float64, device=device)
+        self.totals = torch.zeros((2, 7), dtype=torch.long, device=device)
+
+    def learner_slots(self):
+        return self.tickets.clamp_min(0) % 2
+
+    def step(self, outputs, slots):
+        terminated = outputs["terminated"].bool()
+        truncated = outputs["truncated"].bool()
+        done = terminated | truncated
+        active = self.tickets >= 0
+        completed = active & done
+        rewards = outputs["rewards"][self.indices, slots].to(torch.float64)
+        self.returns += torch.where(active, rewards, 0)
+        self.scores += torch.where(active.unsqueeze(1), outputs["bridge_scored"].long(), 0)
+        losses = outputs["losses"].bool()
+        learner_lost = losses[self.indices, slots]
+        opponent_lost = losses[self.indices, 1 - slots]
+        wins = terminated & ~learner_lost & opponent_lost
+        lost = terminated & learner_lost & ~opponent_lost
+        draws = terminated & ~learner_lost & ~opponent_lost
+        for seat in range(2):
+            selected = completed & (slots == seat)
+            self.totals[seat] += torch.stack((selected.sum(), (selected & wins).sum(),
+                (selected & lost).sum(), (selected & draws).sum(), (selected & truncated).sum(),
+                torch.where(selected, self.scores[:, seat], 0).sum(),
+                torch.where(selected, self.scores[:, 1 - seat], 0).sum()))
+        self.reward_total += torch.where(completed, self.returns, 0).sum()
+        self.finished += completed.sum()
+        self.returns = torch.where(done, 0, self.returns)
+        self.scores = torch.where(done.unsqueeze(1), 0, self.scores)
+        tickets = self.next_ticket + completed.long().cumsum(dim=0) - 1
+        self.tickets = torch.where(completed, torch.where(tickets < self.episodes, tickets, -1), self.tickets)
+        self.next_ticket = (self.next_ticket + completed.sum()).clamp_max(self.episodes)
+        return done
+
+    def result(self, seed):
+        names = ("episodes", "wins", "losses", "draws", "truncations", "goals_for", "goals_against")
+        seats = [dict(zip(names, row)) for row in self.totals.cpu().tolist()]
+        totals = {name: sum(seat[name] for seat in seats) for name in names}
+        finished = totals["episodes"]
+        result = {**totals, "worlds": len(self.indices), "seed": seed, "seats": seats,
+                  "reward_mean": self.reward_total.item() / finished}
+        for name, rate in (("wins", "win_rate"), ("losses", "loss_rate"),
+                           ("draws", "draw_rate"), ("truncations", "truncation_rate")):
+            result[rate] = totals[name] / finished
+        for name in ("goals_for", "goals_against"):
+            result[name + "_mean"] = totals[name] / finished
+        result["min_seat_win_rate"] = min(seat["wins"] / seat["episodes"] if seat["episodes"] else 0.0
+                                          for seat in seats)
+        return result
+
+
 class BehaviorEvaluation:
     def __init__(self, count):
         self.launched = np.zeros(count, dtype=bool)
@@ -1127,6 +1208,39 @@ class BehaviorEvaluation:
     def reset(self, mask):
         for value in (self.launched, self.smashed, self.launch_smash, self.remaining, self.airborne):
             value[mask] = 0
+
+
+class ResidentBehaviorEvaluation:
+    def __init__(self, count, device):
+        self.indices = torch.arange(count, device=device)
+        self.launched = torch.zeros(count, dtype=torch.bool, device=device)
+        self.smashed = torch.zeros(count, dtype=torch.bool, device=device)
+        self.launch_smash = torch.zeros(count, dtype=torch.bool, device=device)
+        self.remaining = torch.zeros(count, dtype=torch.int32, device=device)
+        self.airborne = torch.zeros(count, dtype=torch.bool, device=device)
+
+    def step(self, events, slots):
+        selected = events[self.indices, slots]
+        launch = selected[:, 0] >= 0.2
+        smash = selected[:, 1] > 0
+        grounded = selected[:, 2] > 0
+        self.smashed |= smash
+        self.launch_smash |= smash & (self.remaining > 0) & self.airborne
+        self.remaining = (self.remaining - 1).clamp_min(0)
+        self.airborne |= (self.remaining > 0) & ~grounded
+        landed = grounded & self.airborne
+        self.remaining = torch.where(landed, 0, self.remaining)
+        self.airborne &= ~landed
+        self.launched |= launch
+        self.remaining = torch.where(launch, 80, self.remaining)
+        self.airborne = torch.where(launch, ~grounded, self.airborne)
+
+    def reset(self, mask):
+        self.launched &= ~mask
+        self.smashed &= ~mask
+        self.launch_smash &= ~mask
+        self.remaining = torch.where(mask, 0, self.remaining)
+        self.airborne &= ~mask
 
 
 def _bridge_snapshot_sha256(controller, update):
@@ -1163,6 +1277,78 @@ def _copy_bridge_snapshot(pool, source, name, update=None):
         except (AttributeError, ValueError) as error:
             raise ValueError(f"Bridge frozen self-play opponent {name!r} requires a compatible source snapshot") from error
     target.copy_snapshot(original, selected)
+
+
+def _bridge_evaluation_opponents(pool, suite):
+    result = []
+    for entry in suite["opponents"]:
+        controller = pool.controllers[entry["id"]]
+        details = controller.provenance
+        if isinstance(controller, FrozenSelfPlayController):
+            details["snapshot_update"] = controller.latest_update
+            details["fixed_actions"] = controller.snapshots[controller.latest_update][1].copy()
+            details["snapshot_sha256"] = _bridge_snapshot_sha256(controller, controller.latest_update)
+        elif isinstance(controller, SelfPlayController):
+            details["fixed_actions"] = controller._fixed.copy()
+        result.append({"id": entry["id"], "weight": entry["weight"], "controller": details})
+    return result
+
+
+def _resident_bridge_evaluation_loop(model, collector, episodes, fixed, seed, poll_steps=32):
+    worlds, pool, environment = collector.worlds, collector.pool, collector.environment
+    evaluation = ResidentBridgeEvaluation(worlds.count, episodes, collector.device)
+    pool.learner_slots.copy_(evaluation.learner_slots())
+    valid = torch.ones((), dtype=torch.bool, device=collector.device)
+    while True:
+        for _ in range(poll_steps):
+            slots = pool.learner_slots
+            _, _, log_probs, _, actions, finite = pool.act(model, collector.observations, worlds.action_names, fixed)
+            valid &= finite.all() & torch.isfinite(log_probs).all()
+            collector.actions.copy_(actions)
+            _, outputs = environment.step_cuda_resident_async()
+            terminated, truncated, losses = outputs["terminated"], outputs["truncated"], outputs["losses"]
+            scored = outputs["bridge_scored"]
+            valid &= (torch.isfinite(outputs["rewards"]).all() & (terminated <= 1).all()
+                      & (truncated <= 1).all() & ((terminated == 0) | (truncated == 0)).all()
+                      & (losses <= 1).all() & (losses.sum(dim=1) <= 1).all()
+                      & ((losses == 0) | terminated.bool().unsqueeze(1)).all() & (scored <= 1).all())
+            done = evaluation.step(outputs, slots)
+            outputs["reset_mask"].copy_(done)
+            collector.observations = environment.reset_cuda_resident_async()
+            pool.reset(done)
+            pool.learner_slots.copy_(evaluation.learner_slots())
+        environment.wait_cuda_actions()
+        if not valid.item():
+            raise ValueError("Resident Bridge evaluation encountered invalid observations, rewards or outcomes")
+        if evaluation.finished.item() == episodes:
+            break
+    return evaluation.result(seed)
+
+
+@torch.no_grad()
+def _evaluate_bridge_resident(model, plan, suite, options, opponent_pool):
+    scenario = suite["scenario"]
+    _validate_structured_bridge_consumer(model, plan, scenario)
+    _validate_bridge_opponents(plan["policy"], scenario, plan["opponents"])
+    count = min(suite.get("worlds", 16), suite["episodes"])
+    fixed = fixed_indices(plan["policy"], suite["controls"])
+    worlds = SampledWorlds(scenario, plan["policy"], count, options.device,
+                           options.library, options.max_ticks, suite["seed"])
+    was_training = model.training
+    model.eval()
+    try:
+        pool = OpponentPool(plan["opponents"], plan["policy"], count, options.device, suite["seed"], learner=model)
+        pool.configure(suite["opponents"], suite["controls"])
+        for entry in suite["opponents"]:
+            if isinstance(pool.controllers[entry["id"]], FrozenSelfPlayController):
+                _copy_bridge_snapshot(pool, opponent_pool, entry["id"])
+        collector = ResidentCollector(worlds, pool, suite["seed"], bridge_descriptor=model.descriptor)
+        result = _resident_bridge_evaluation_loop(model, collector, suite["episodes"], fixed, suite["seed"])
+        result["opponents"] = _bridge_evaluation_opponents(pool, suite)
+        return result
+    finally:
+        model.train(was_training)
+        worlds.close()
 
 
 def _evaluate_bridge(model, plan, suite, options, device, opponent_pool):
@@ -1257,17 +1443,7 @@ def _evaluate_bridge(model, plan, suite, options, device, opponent_pool):
         result = {**totals, "episodes": finished, "worlds": count, "seed": suite["seed"], "seats": seats,
                   "reward_mean": reward_total / finished}
         if structured:
-            result["opponents"] = []
-            for entry in suite["opponents"]:
-                controller = pool.controllers[entry["id"]]
-                details = controller.provenance
-                if isinstance(controller, FrozenSelfPlayController):
-                    details["snapshot_update"] = controller.latest_update
-                    details["fixed_actions"] = controller.snapshots[controller.latest_update][1].copy()
-                    details["snapshot_sha256"] = _bridge_snapshot_sha256(controller, controller.latest_update)
-                elif isinstance(controller, SelfPlayController):
-                    details["fixed_actions"] = controller._fixed.copy()
-                result["opponents"].append({"id": entry["id"], "weight": entry["weight"], "controller": details})
+            result["opponents"] = _bridge_evaluation_opponents(pool, suite)
         for name in ("wins", "losses", "draws", "truncations"):
             rate = {"wins": "win_rate", "losses": "loss_rate", "draws": "draw_rate",
                     "truncations": "truncation_rate"}[name]
@@ -1280,6 +1456,92 @@ def _evaluate_bridge(model, plan, suite, options, device, opponent_pool):
     finally:
         model.train(was_training)
         worlds.close()
+
+
+def _resident_duel_evaluation_loop(model, collector, episodes, fixed, poll_steps=32):
+    worlds, pool, environment = collector.worlds, collector.pool, collector.environment
+    behavior = ResidentBehaviorEvaluation(worlds.count, collector.device)
+    returns = torch.zeros(worlds.count, dtype=torch.float64, device=collector.device)
+    finished = torch.zeros((), dtype=torch.long, device=collector.device)
+    totals = torch.zeros(4, dtype=torch.long, device=collector.device)
+    reward_total = torch.zeros((), dtype=torch.float64, device=collector.device)
+    valid = torch.ones((), dtype=torch.bool, device=collector.device)
+    while True:
+        for _ in range(poll_steps):
+            slots = pool.learner_slots
+            _, _, log_probs, _, actions, finite = pool.act(model, collector.observations, worlds.action_names, fixed)
+            valid &= finite.all() & torch.isfinite(log_probs).all()
+            collector.actions.copy_(actions)
+            _, outputs = environment.step_cuda_resident_async()
+            terminated = outputs["terminated"].bool()
+            truncated = outputs["truncated"].bool()
+            done = terminated | truncated
+            losses, events = outputs["losses"], outputs["behavior_events"]
+            valid &= (torch.isfinite(outputs["rewards"]).all() & torch.isfinite(events).all()
+                      & (outputs["terminated"] <= 1).all() & (outputs["truncated"] <= 1).all()
+                      & ~(terminated & truncated).any() & (losses <= 1).all())
+            returns += outputs["rewards"][pool.indices, slots].to(torch.float64)
+            behavior.step(events, slots)
+            selected = done & (finished + done.long().cumsum(dim=0) <= episodes)
+            learner_lost = losses[pool.indices, slots].bool()
+            opponent_lost = losses[pool.indices, 1 - slots].bool()
+            wins = selected & terminated & ~learner_lost & opponent_lost
+            totals += torch.stack((wins.sum(), (selected & behavior.launched).sum(),
+                                   (selected & behavior.smashed).sum(), (selected & behavior.launch_smash).sum()))
+            reward_total += torch.where(selected, returns, 0).sum()
+            finished += selected.sum()
+            returns = torch.where(done, 0, returns)
+            behavior.reset(done)
+            outputs["reset_mask"].copy_(done)
+            collector.observations = environment.reset_cuda_resident_async()
+            pool.reset(done)
+        environment.wait_cuda_actions()
+        if not valid.item():
+            raise ValueError("Resident duel evaluation encountered invalid observations, rewards or outcomes")
+        if finished.item() == episodes:
+            break
+    wins, launches, smashes, launch_smashes = totals.cpu().tolist()
+    return {"win_rate": wins / episodes, "reward_mean": reward_total.item() / episodes,
+            "self_launch_rate": launches / episodes, "mace_smash_rate": smashes / episodes,
+            "launch_smash_rate": launch_smashes / episodes, "episodes": episodes, "worlds": worlds.count}
+
+
+@torch.no_grad()
+def _evaluate_duel_resident(model, plan, suite, options):
+    count = min(suite.get("worlds", 16), suite["episodes"])
+    fixed = fixed_indices(plan["policy"], suite["controls"])
+    worlds = SampledWorlds(suite["scenario"], plan["policy"], count, options.device,
+                           options.library, options.max_ticks, suite["seed"])
+    was_training = model.training
+    model.eval()
+    try:
+        pool = OpponentPool(plan["opponents"], plan["policy"], count, options.device, suite["seed"], learner=model)
+        pool.configure(suite["opponents"], suite["controls"])
+        collector = ResidentCollector(worlds, pool, suite["seed"], behavior_events=True)
+        return _resident_duel_evaluation_loop(model, collector, suite["episodes"], fixed)
+    finally:
+        model.train(was_training)
+        worlds.close()
+
+
+def resident_evaluation_unsupported(plan, suite, device, build_info):
+    scenario = suite["scenario"]
+    bridge = scenario.get("bridge") is not None
+    if bridge and any(scenario.get(name) for name in ("spawns", "equipment")):
+        return "Resident Bridge evaluation requires fixed spawns and equipment"
+    if bridge and plan["policy"].get("ticks_per_action") != 1:
+        return "Resident Bridge evaluation requires ticks_per_action 1"
+    evaluation_plan = {"bridge_observation": plan.get("bridge_observation"), "opponents": plan["opponents"],
+                       "stages": [{"name": "evaluation", "scenario": scenario, "opponents": suite["opponents"]}]}
+    reason = resident_unsupported(evaluation_plan, device)
+    if reason is not None:
+        return reason
+    capabilities = ("cuda_async_observation_version", "cuda_action_decode_version", "cuda_resident_step_version",
+                    "cuda_resident_episode_version", "cuda_resident_bridge_version" if bridge
+                    else "cuda_resident_behavior_version")
+    if any(build_info.get(name) != 1 for name in capabilities):
+        return "Native library lacks the required resident CUDA capabilities"
+    return None
 
 
 @torch.no_grad()
@@ -1751,7 +2013,19 @@ def run(options, checkpoint=None):
                         if counter % suite["every_updates"] == 0:
                             evaluation_start = time.perf_counter()
                             torch.manual_seed(suite["seed"])
-                            result = evaluate(model, plan, suite, options, device, fixed, opponent_pool=pool)
+                            reason = (resident_evaluation_unsupported(plan, suite, options.device, worlds.build_info)
+                                      if rollout_backend == "cuda-resident" else None)
+                            if rollout_backend == "cuda-resident" and reason is None:
+                                with torch.no_grad():
+                                    result = (_evaluate_bridge_resident(model, plan, suite, options, pool)
+                                              if suite["scenario"].get("bridge") is not None
+                                              else _evaluate_duel_resident(model, plan, suite, options))
+                                result["backend"] = "cuda-resident"
+                            else:
+                                result = evaluate(model, plan, suite, options, device, fixed, opponent_pool=pool)
+                                result["backend"] = "host"
+                                if reason is not None:
+                                    result["resident_fallback_reason"] = reason
                             elapsed = time.perf_counter() - evaluation_start
                             result.update(seconds=elapsed, snapshot_update=update,
                                           stage=stage["name"], stage_index=stage_index)

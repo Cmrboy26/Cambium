@@ -23,7 +23,7 @@ SHAPING_REWARD_NAMES = ("good_aim", "proximity", "pitch_control", "aim_hold", "e
 EVENT_REWARD_NAMES = ("wind_self_launch", "missed_attack_ready_time")
 REWARD_TYPE_NAMES = (*BASE_REWARD_NAMES, "blocked_with_shield", *EVENT_REWARD_NAMES)
 REWARD_NAMES = (*REWARD_TYPE_NAMES, *SHAPING_REWARD_NAMES)
-BRIDGE_UNSUPPORTED_REWARDS = ("won_duel", "win_speed")
+BRIDGE_UNSUPPORTED_REWARDS = ("won_duel",)
 DEFAULT_REWARD_WEIGHTS = json.loads(Path(__file__).with_name("reward_weights.json").read_text(encoding="utf-8"))
 REWARD_SEMANTICS = "wind_launch_ready_time_episode_budgets_v6"
 
@@ -238,6 +238,7 @@ class Environment:
         self._cuda_resident_pointers = None
         self._cuda_resident_ready = False
         self._cuda_bridge_observations = None
+        self._cuda_behavior_events = False
         self.bridge = None
         if bridge is not None:
             try:
@@ -283,7 +284,14 @@ class Environment:
         if ("terrain_generation" in configuration
                 and self.build_info.get("bridge_terrain_generation_version") != 1):
             raise RuntimeError("Rebuild minecraft_sim_training for Bridge terrain generation")
+        generation = configuration.get("terrain_generation")
+        if (isinstance(generation, dict) and "bridge" in generation
+                and self.build_info.get("bridge_terrain_patterns_version") != 1):
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge terrain patterns")
         task_rewards = configuration.get("task_rewards")
+        if ((bridge_weights["win_speed"] or (isinstance(task_rewards, dict) and "draw" in task_rewards))
+                and self.build_info.get("bridge_outcome_reward_version") != 1):
+            raise RuntimeError("Rebuild minecraft_sim_training for Bridge draw and win-speed rewards")
         if (isinstance(task_rewards, dict) and "opponent_score" in task_rewards
                 and self.build_info.get("bridge_opponent_score_version") != 1):
             raise RuntimeError("Rebuild minecraft_sim_training for Bridge opponent score rewards")
@@ -632,9 +640,16 @@ class Environment:
         with torch.cuda.device(self._cuda_action_device):
             self._check(function(self._handle))
 
-    def register_cuda_resident(self, bridge_descriptor=None):
+    def register_cuda_resident(self, bridge_descriptor=None, behavior_events=False):
         """Register fixed-reset CUDA step outputs; host-state operations become unavailable."""
         self._require_open()
+        if self._cuda_resident_buffers is not None and (behavior_events or self._cuda_behavior_events):
+            raise RuntimeError("CUDA resident behavior buffers already registered; recreate the environment")
+        if behavior_events and self.bridge is not None:
+            raise ValueError("Resident behavior events require a duel environment")
+        if behavior_events and (self.build_info.get("cuda_resident_behavior_version") != 1
+                                or getattr(self.native, "mcsim_register_cuda_behavior_events", None) is None):
+            raise RuntimeError("Rebuild minecraft_sim_training for CUDA resident behavior events")
         if self.bridge is not None:
             if bridge_descriptor is None or validate_bridge_observation_descriptor(bridge_descriptor)["version"] != 3:
                 raise ValueError("CUDA resident Bridge requires a portable observation descriptor")
@@ -669,6 +684,8 @@ class Environment:
                 "bridge_scored": torch.empty((self.count, 2), dtype=torch.uint8, device=device),
                 "bridge_reward_terms": torch.empty((self.count, 2, 4), dtype=torch.float64, device=device),
             })
+        if behavior_events:
+            buffers["behavior_events"] = torch.empty((self.count, 2, 3), dtype=torch.float32, device=device)
         self._cuda_resident_buffers = buffers
         self._cuda_resident_pointers = {name: output.data_ptr() for name, output in buffers.items()}
         self._cuda_resident_ready = False
@@ -693,6 +710,13 @@ class Environment:
                     buffers["bridge_voxels"].data_ptr(), buffers["bridge_voxels"].numel(),
                     buffers["bridge_scored"].data_ptr(), buffers["bridge_scored"].numel(),
                     buffers["bridge_reward_terms"].data_ptr(), buffers["bridge_reward_terms"].numel(), 2))
+            if behavior_events:
+                register_behavior = self.native.mcsim_register_cuda_behavior_events
+                register_behavior.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+                register_behavior.restype = ctypes.c_int
+                self._check(register_behavior(self._handle, buffers["behavior_events"].data_ptr(),
+                                              buffers["behavior_events"].numel()))
+                self._cuda_behavior_events = True
             self._check(reset(self._handle, buffers["reset_mask"].data_ptr(), self.count))
         self._cuda_resident_ready = True
         if bridge_descriptor is not None:
@@ -712,6 +736,9 @@ class Environment:
                   "reset_mask": (self.count,)}
         dtypes = {"rewards": torch.float32, "terminated": torch.uint8, "truncated": torch.uint8,
                   "losses": torch.uint8, "contributions": torch.float64, "reset_mask": torch.uint8}
+        if self._cuda_behavior_events:
+            shapes["behavior_events"] = (self.count, 2, 3)
+            dtypes["behavior_events"] = torch.float32
         if self._cuda_bridge_observations is not None:
             shapes.update({"bridge_match": (self.count, 2, 17), "bridge_voxels": (self.count, 2, 5, 9, 9),
                            "bridge_scored": (self.count, 2), "bridge_reward_terms": (self.count, 2, 4)})
@@ -958,6 +985,8 @@ class Environment:
         if self.bridge is not None:
             if any(resolved[name] for name in BRIDGE_UNSUPPORTED_REWARDS):
                 raise ValueError("Bridge does not support duel win rewards")
+            if resolved["win_speed"] and self.build_info.get("bridge_outcome_reward_version") != 1:
+                raise RuntimeError("Rebuild minecraft_sim_training for Bridge draw and win-speed rewards")
             if self.build_info.get("bridge_shared_reward_version") != 1:
                 raise RuntimeError("Rebuild minecraft_sim_training for Bridge shared rewards")
         if not all(np.isfinite(value) for value in resolved.values()):
@@ -1023,6 +1052,7 @@ class Environment:
             self._cuda_resident_pointers = None
             self._cuda_resident_ready = False
             self._cuda_bridge_observations = None
+            self._cuda_behavior_events = False
             directory = getattr(self.native, "_dll_directory", None)
             if directory is not None:
                 directory.close()

@@ -719,6 +719,92 @@ class InferenceChecks(unittest.TestCase):
 
 
 class TrainingChecks(unittest.TestCase):
+    def test_bridge_pattern_terrain_validation_reset_and_replay(self):
+        from simulator.training.bridge import validate_bridge
+
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text())
+        scene["bounds"] = {"min": [-3, 0, -6], "size": [7, 4, 12]}
+        scene["blocks"] = [{"from": [0, 0, -6], "to": [0, 0, 5], "block": "minecraft:stone"}]
+        for player, position in zip(scene["players"], ([0.5, 1, -4.5], [0.5, 1, 3.5])):
+            player["position"] = position
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air"], "selected": 0}
+        kit = {"slots": ["sword", "blocks"], "blocks": 64, "golden_apples": 0}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, -6], "max": [1, 3, -5]},
+                            {"min": [0, 1, 4], "max": [1, 3, 5]}], "void_y": -1,
+                  "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                            "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 1, "win": 1, "loss": -1}, "kits": [kit, kit],
+                  "building": {"zones": [{"min": [-3, 0, -3], "max": [4, 4, 3]}],
+                               "block_range": 4.5, "entity_range": 3.0, "hardness": 0.8,
+                               "mining_speed": 1.0, "correct_tool": True},
+                  "terrain_generation": {"bridge": {"min": [0, 0, -3], "max": [1, 1, 3]},
+                                         "patterns": [{"type": "constant", "location": "top", "value": 2, "percent": 1},
+                                                      {"type": "random", "location": "side", "min": 1, "max": 2, "percent": 0.5},
+                                                      {"type": "function", "location": "top", "function": "half-sine",
+                                                       "min": 0, "max": 2, "percent": 0.7}]}}
+        validate_bridge(bridge, scene)
+        for field, value in (("percent", 1.1), ("location", "middle"), ("value", -1)):
+            invalid = deepcopy(bridge)
+            invalid["terrain_generation"]["patterns"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_bridge(invalid, scene)
+        invalid = deepcopy(bridge)
+        invalid["terrain_generation"]["bridge"]["max"][2] = 5
+        with self.assertRaises(ValueError):
+            validate_bridge(invalid, scene)
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "weapon", "values": [0, 1]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pattern-scene.json"
+            path.write_text(json.dumps(scene), encoding="utf-8")
+            options = {"environment": path, "contract": contract, "bridge": bridge, "seed": 31,
+                       "library": os.environ.get("MCSIM_TEST_CPU_LIBRARY")}
+            with Environment(2, **options) as environment, Environment(2, **options) as duplicate:
+                initial = [environment.replay_frame(world)["bridge"]["initial_terrain"] for world in range(2)]
+                self.assertEqual(initial, [duplicate.replay_frame(world)["bridge"]["initial_terrain"] for world in range(2)])
+                for terrain in initial:
+                    positions = {tuple(block["position"]) for block in terrain}
+                    self.assertTrue(all((0, 2, z_coord) in positions for z_coord in range(-3, 3)))
+                    self.assertTrue(any(x_coord != 0 and y_coord == 0 for x_coord, y_coord, _ in positions))
+                environment.reset([False, True])
+                self.assertEqual(environment.replay_frame(0)["bridge"]["initial_terrain"], initial[0])
+                self.assertNotEqual(environment.replay_frame(1)["bridge"]["initial_terrain"], initial[1])
+            from simulator.training.controllers import create_controller
+            runner_contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                               "ticks_per_action": 1,
+                               "observations": [{"feature": "self.yaw_fraction"}, {"feature": "self.pitch_fraction"}],
+                               "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                                           {"name": "yaw", "values": [-2, 0, 2]},
+                                           {"name": "pitch", "values": [-10, 0, 10]},
+                                           {"name": "jump", "values": [False, True]},
+                                           {"name": "weapon", "values": [0, 1]},
+                                           {"name": "use_item", "values": [False, True]}]}
+            definition = {"type": "scripted", "controller": "bridge_fixed_lane",
+                          "options": {"jump": True, "place_blocks": True, "block_slot": 1}}
+            runner = create_controller(definition, runner_contract, 2)
+            target = create_controller({"type": "scripted", "controller": "stationary_target"}, runner_contract, 2)
+            runner_scene = deepcopy(scene)
+            runner_scene["blocks"] = [{"from": [-3, 0, -6], "to": [3, 0, 5], "block": "minecraft:stone"}]
+            path.write_text(json.dumps(runner_scene), encoding="utf-8")
+            runner_bridge = deepcopy(bridge)
+            runner_bridge.pop("terrain_generation")
+            with Environment(2, environment=path, contract=runner_contract, bridge=runner_bridge, seed=31,
+                             library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
+                current = environment.observe()
+                placements = [0, 0]
+                for _ in range(100):
+                    actions = np.empty((2, 2, len(runner_contract["actions"])), dtype=np.int32)
+                    for seat in (0, 1):
+                        actions[seat, seat] = runner.act(current[seat:seat + 1, seat], [seat])[0]
+                        actions[seat, 1 - seat] = target.act(current[seat:seat + 1, 1 - seat], [seat])[0]
+                    current, _, _, _ = environment.step(actions)
+                    states = environment.bridge_state()
+                    for seat in (0, 1):
+                        placements[seat] += int(states[seat]["placed"][seat])
+                self.assertTrue(all(count > 0 for count in placements), placements)
+
     def test_bridge_reset_episode_snapshot_and_restore(self):
         path = ROOT / "simulator/tests/reset_environment.json"
         contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
@@ -883,9 +969,9 @@ class TrainingChecks(unittest.TestCase):
                             {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
                   "void_y": -2, "match": {"goals_to_win": 2, "max_ticks": 2, "cage_ticks": 0,
                                            "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
-                  "task_rewards": {"score": 0, "win": 0, "loss": 0}}
+                  "task_rewards": {"score": 0, "win": 0, "loss": 0, "draw": -5}}
         weights = {"doing_damage": 20, "taking_damage": -20, "death": -3,
-                   "episode_timeout": -4, "no_damage_penalty": -2}
+                   "episode_timeout": -4, "no_damage_penalty": -2, "win_speed": 0.1}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "combat.json"
             path.write_text(json.dumps(scene), encoding="utf-8")
@@ -902,7 +988,7 @@ class TrainingChecks(unittest.TestCase):
                 self.assertEqual(totals["death"], 0)
                 actions.fill(0)
                 _, rewards, terminated, truncated = environment.step(actions)
-                np.testing.assert_allclose(rewards, [[-4, -6], [-6, -6]])
+                np.testing.assert_allclose(rewards, [[-9, -11], [-11, -11]])
                 self.assertTrue(terminated.all())
                 self.assertFalse(truncated.any())
                 environment.reset([True, False])
@@ -911,7 +997,40 @@ class TrainingChecks(unittest.TestCase):
                 _, rewards, _, _ = environment.step(actions)
                 np.testing.assert_allclose(rewards[0], [0, 0])
                 _, rewards, _, _ = environment.step(actions)
-                np.testing.assert_allclose(rewards[0], [-6, -6])
+                np.testing.assert_allclose(rewards[0], [-11, -11])
+
+    def test_bridge_win_speed_and_native_capability(self):
+        path = ROOT / "simulator/tests/reset_environment.json"
+        contract = {"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+                    "ticks_per_action": 1, "observations": [{"feature": "self.health_fraction"}],
+                    "actions": [{"name": "movement", "values": ["neutral", "forward"]}]}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                            {"min": [0, 1, -1.17], "max": [1, 3, -1.0]}],
+                  "void_y": -2, "match": {"goals_to_win": 1, "max_ticks": 100, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 2, "win": 5, "loss": -3, "draw": -5}}
+        library = os.environ.get("MCSIM_TEST_CPU_LIBRARY")
+        with Environment(1, environment=path, contract=contract, max_ticks=200, bridge=bridge,
+                         weights={"win_speed": 0.1}, library=library) as environment:
+            actions = np.array([[[1], [0]]], dtype=np.int32)
+            _, rewards, terminated, truncated = environment.step(actions)
+            self.assertTrue(terminated[0])
+            self.assertFalse(truncated[0])
+            np.testing.assert_allclose(rewards, [[7.099, -3]], atol=1e-6)
+            self.assertAlmostEqual(environment.step_reward_totals([[True, False]])["win_speed"], 0.099, places=6)
+            environment.reset()
+            np.testing.assert_allclose(environment.step(actions)[1], [[7.099, -3]], atol=1e-6)
+            environment.build_info["bridge_outcome_reward_version"] = 0
+            with self.assertRaisesRegex(RuntimeError, "Rebuild"):
+                environment.set_rewards({"win_speed": 0.1})
+        with Environment(1, environment=path, contract=contract, library=library) as environment:
+            environment.build_info["bridge_outcome_reward_version"] = 0
+            with self.assertRaisesRegex(RuntimeError, "Rebuild"):
+                environment.configure_bridge(bridge)
+            without_draw = {**bridge, "task_rewards": {"score": 2, "win": 5, "loss": -3}}
+            with self.assertRaisesRegex(RuntimeError, "Rebuild"):
+                environment.configure_bridge(without_draw, weights={"win_speed": 0.1})
 
     def test_bridge_shared_hit_is_preserved_through_goal_reset(self):
         path = ROOT / "simulator/tests/reset_environment.json"
@@ -963,7 +1082,7 @@ class TrainingChecks(unittest.TestCase):
                          library=os.environ.get("MCSIM_TEST_CPU_LIBRARY")) as environment:
             self.assertTrue(all(value == 0 for value in environment.weights.values()))
             environment.set_rewards({"no_damage_penalty": -2, "episode_timeout": -4})
-            for name in ("won_duel", "win_speed"):
+            for name in ("won_duel",):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, "duel win rewards"):
                     environment.set_rewards({name: 1})
             self.assertEqual(environment.episode_scenario(0)["reward_weights"]["no_damage_penalty"], -2)

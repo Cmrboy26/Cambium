@@ -229,6 +229,9 @@ and CUDA-resident observations. Version-2 checkpoints are not interchangeable
 with version 3. Host evaluation still requires the declared host capabilities.
 
 Optional `task_rewards.opponent_score` pays when the opposing player scores.
+Optional `task_rewards.draw` pays each player once on a match draw, including
+simultaneous goal-limit draws; it defaults to zero. An external truncation is
+not a match draw. A match-clock draw also receives any configured timeout reward.
 Nonnegative `toward` and `away` independently weight distance progress and
 retreat per 50 blocks; `away` is subtracted. Toward rewards only improvement
 beyond the actor's previous best distance to the current goal. Death and round
@@ -240,15 +243,48 @@ opponent-score, toward and away contributions are logged separately.
 
 Generic combat and shaping rewards may also be specified in `task.rewards` or
 replaced per stage or evaluation with `task_override.rewards`. They add to the
-Bridge task rewards; `won_duel` and `win_speed` are rejected. Damage events are
+Bridge task rewards; `won_duel` is rejected. `win_speed` pays the winner once
+as its weight times the remaining fraction of the Bridge match clock. Damage events are
 sampled before respawns. Death pays once per death, while timeout and no-damage
 penalties apply only when the match clock or external cutoff expires. The
 no-damage flag spans the entire match. Shaping uses the external tick limit as
 its budget and is skipped on terminal, truncation, respawn and goal-reset ticks.
+Draw and win-speed rewards require native `bridge_outcome_reward_version: 1`.
+Enabling either changes reward semantics and requires a new training run; existing
+weights can be used to initialize it, but an incompatible run cannot be resumed.
 
 ### Initial Bridge Terrain
 
-An authored Bridge environment may opt in to `terrain_generation`, for example:
+An authored Bridge environment may opt in to patterned `terrain_generation`:
+
+```json
+"terrain_generation": {
+   "bridge": {"min": [0, 0, -15], "max": [1, 1, 15]},
+   "patterns": [
+      {"location": "top", "type": "random", "min": 0, "max": 2, "percent": 0.75},
+      {"location": "top", "type": "constant", "value": 1, "percent": 0.5},
+      {"location": "side", "type": "function", "function": "half-sine", "min": 0, "max": 2, "percent": 0.6}
+   ]
+}
+```
+
+The half-open `bridge` bounds identify a protected, solid, rectangular floor,
+one block high, spanning 1-64 X cells and 1-10000 Z cells. The arena defines
+that floor; generated cells must initially be empty, inside build zones and
+arena bounds, and clear of spawns and goals. Patterns are an ordered list of
+1-32 independent overlays. `location: top` uses the height above each floor
+cell; `location: side` uses the width at floor level on each of the two edges.
+Each column or side at each Z position is independently selected with the
+given `percent` probability in 0..1. Selected `random` columns choose an
+inclusive integer extent from `min` through `max`; `constant` uses `value`.
+An extent of zero places nothing. Overlaps form a union, not an additive stack.
+Extents are integers from 0 to 8. `function: half-sine` varies the extent from
+`min` at both ends to approximately `max` near the middle, using a deterministic
+integer approximation and rounding to the nearest block. It is the only
+supported function; arbitrary code is not evaluated. For a one-cell Z span,
+the function uses `min`. The probability applies separately to every pattern.
+
+The older wing-only format remains supported:
 
 ```json
 "terrain_generation": {"center_x": 0, "floor_y": 0, "start_z": -7, "end_z": 8, "segments": 4}
@@ -273,7 +309,8 @@ preserve the overlay. A nonterminal goal clears generated and player-placed
 blocks when `persist_blocks_on_goal` is false; it does not regenerate them.
 Full match resets regenerate the terrain. CPU, host-staged CUDA and resident CUDA
 use the same generator. Native libraries advertise
-`bridge_terrain_generation_version: 1`.
+`bridge_terrain_generation_version: 1`; pattern-capable libraries additionally
+advertise `bridge_terrain_patterns_version: 1`.
 
 ### Proposed Structured Terrain Observations
 
