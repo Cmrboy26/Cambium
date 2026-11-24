@@ -10,6 +10,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def render():
     catalogue = json.loads((ROOT / "contracts/policy_catalogue.json").read_text(encoding="utf-8"))
+    registry = json.loads((ROOT / "contracts/bridge_observation_descriptors.json").read_text(encoding="utf-8"))
+    descriptors = registry.get("descriptors")
+    if (registry.get("format") != "minecraft_sim_bridge_observation_registry" or registry.get("version") != 1
+            or not isinstance(descriptors, dict) or not descriptors
+            or any(not key.isascii() or not key.isdecimal() or str(int(key)) != key or int(key) < 1
+                   or not isinstance(value, dict) or value.get("format") != "minecraft_sim_bridge_observation"
+                   or type(value.get("version")) is not int or value["version"] != int(key)
+                   for key, value in descriptors.items())):
+        raise ValueError("Invalid Bridge observation descriptor registry")
     tables = {"feature_names": catalogue["features"],
               "action_names": [action["name"] for action in catalogue["actions"]],
               "action_kinds": [action["kind"] for action in catalogue["actions"]],
@@ -38,8 +47,16 @@ def render():
         java.append(f'\tstatic final int MAX_{name.upper()} = {value};')
     cpp.extend(['}', ''])
     java.extend(['\tprivate PolicyCatalogue() {}', '}', ''])
+    bridge_java = ['package net.cambium;', '', 'import java.util.Map;', '', 'final class BridgeDescriptorRegistry {',
+                   '\tstatic final Map<Integer, String> HASHES = Map.ofEntries(']
+    for key in sorted(descriptors, key=int):
+        encoded = json.dumps(descriptors[key], sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        bridge_java.append(f'\t\t\tMap.entry({key}, "{hashlib.sha256(encoded).hexdigest()}"),')
+    bridge_java[-1] = bridge_java[-1][:-1] + ');'
+    bridge_java.extend(['\tprivate BridgeDescriptorRegistry() {}', '}', ''])
     return {ROOT / "simulator/apps/policy_catalogue.generated.hpp": "\n".join(cpp),
-            ROOT / "cambiummod/src/main/java/net/cambium/PolicyCatalogue.java": "\n".join(java)}
+            ROOT / "cambiummod/src/main/java/net/cambium/PolicyCatalogue.java": "\n".join(java),
+            ROOT / "cambiummod/src/main/java/net/cambium/BridgeDescriptorRegistry.java": "\n".join(bridge_java)}
 
 
 def main():

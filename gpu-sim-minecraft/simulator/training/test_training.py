@@ -1,5 +1,6 @@
 import contextlib
 from copy import deepcopy
+import hashlib
 import io
 import json
 import math
@@ -54,6 +55,27 @@ class InferenceChecks(unittest.TestCase):
                                    "environment": json.loads((ROOT / "simulator/environments/duel.json").read_text())},
                       "model": ActorCritic(22, 16, 9).state_dict()}
         torch.save(self.saved, self.path)
+
+    def test_bridge_descriptor_registry_preserves_checkpoint_identities(self):
+        from simulator.training.contract import bridge_observation_descriptor, validate_bridge_observation_descriptor
+
+        hashes = {
+            1: "d708928f0009e2176270447a1bd327edb265ed66fb5ae4ba964c66ab21196380",
+            2: "6c073518d3c85671184a0120166926af19cae9335bf7c43eee0df18c7d495201",
+            3: "1e51cb9cb9abde061619a3fe9acfa43c00825048f022643b2253e9acdf14f658",
+        }
+        for version, expected in hashes.items():
+            descriptor = bridge_observation_descriptor(version)
+            encoded = json.dumps(descriptor, sort_keys=True, separators=(",", ":")).encode()
+            self.assertEqual(hashlib.sha256(encoded).hexdigest(), expected)
+            self.assertEqual(validate_bridge_observation_descriptor(descriptor), descriptor)
+            descriptor["match_features"].reverse()
+            with self.assertRaisesRegex(ValueError, "descriptor"):
+                validate_bridge_observation_descriptor(descriptor)
+            self.assertNotEqual(bridge_observation_descriptor(version), descriptor)
+        for version in (0, 4, True, "3"):
+            with self.assertRaisesRegex(ValueError, "descriptor"):
+                bridge_observation_descriptor(version)
 
     def test_structured_bridge_inference_supports_both_seats(self):
         from backend.fast_rl_model import BridgeActorCritic
@@ -647,6 +669,86 @@ class InferenceChecks(unittest.TestCase):
                 process.wait(timeout=10)
                 process.stdout.close()
                 reader.join(timeout=3)
+
+    def save_bridge_fixture(self, version):
+        from backend.fast_rl_model import BridgeActorCritic
+        from simulator.training.contract import bridge_observation_descriptor
+
+        contract = validate_contract({"format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3",
+            "ticks_per_action": 1, "requires": ["movement"],
+            "observations": [{"feature": "self.health_fraction"}],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "jump", "values": [False, True]}]})
+        scenario = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text())
+        scenario["experimental_bridge"] = {
+            "mode": {"name": "bridge", "version": 1},
+            "goals": [{"min": [0, 1, 2.4], "max": [1, 3, 2.9]},
+                      {"min": [0, 1, -1.1], "max": [1, 3, -0.8]}],
+            "void_y": -2,
+            "match": {"goals_to_win": 2, "max_ticks": 100, "cage_ticks": 0,
+                      "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+            "task_rewards": {"score": 2.0, "win": 5.0, "loss": -3.0},
+        }
+        descriptor = bridge_observation_descriptor(version)
+        self.saved["metadata"].update(schema=contract, contract=contract, scenario=scenario,
+                                      bridge_observation=descriptor)
+        self.saved["model"] = BridgeActorCritic(contract["observation_dim"], descriptor, 16,
+            dict(zip(contract["action_names"], contract["action_sizes"]))).state_dict()
+        torch.save(self.saved, self.path)
+        return contract
+
+    @unittest.skipUnless(os.environ.get("MCSIM_INFERENCE_EXECUTABLE"), "No bundled inference executable selected")
+    def test_bundled_bridge_v3_helper(self):
+        contract = self.save_bridge_fixture(3)
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen([os.environ["MCSIM_INFERENCE_EXECUTABLE"], "local-bridge",
+                "--checkpoint", str(self.path), "--minecraft-directory", str(Path(self.directory.name) / "game"),
+                "--offline", "--json"], cwd=ROOT, stdout=subprocess.PIPE, stderr=errors)
+            try:
+                events = queue.Queue()
+                reader = threading.Thread(target=lambda: events.put(next((line for line in process.stdout
+                    if json.loads(line)["event"] in ("policy", "error")), b"")), daemon=True)
+                reader.start()
+                event = json.loads(events.get(timeout=90))
+                self.assertEqual(event["event"], "policy", event)
+                self.assertEqual(event["protocol"], 2)
+                base = f"http://127.0.0.1:{event['port']}"
+                with urlopen(base + "/info", timeout=3) as response:
+                    info = json.load(response)
+                self.assertEqual(info["bridge_observation"]["version"], 3)
+                body = {"protocol": 2, "session": "bundled-bridge", "tick": 0, "players": [0, 1],
+                        "contract_hash": info["contract_hash"], "bridge_observation_hash": info["bridge_observation_hash"],
+                        "observations": {"scalar": np.zeros((2, contract["observation_dim"])).tolist(),
+                                         "match": np.zeros((2, 17)).tolist(),
+                                         "voxels": np.zeros((2, 5, 9, 9), dtype=np.uint8).tolist()}}
+                with urlopen(Request(base + "/act", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=3) as response:
+                    self.assertEqual(len(json.load(response)["actions"]), 2)
+            finally:
+                process.terminate()
+                process.wait(timeout=10)
+                process.stdout.close()
+                reader.join(timeout=3)
+
+    @unittest.skipUnless(os.environ.get("MCSIM_LIVE_JAVA_CHECK") == "1", "Explicit Java/Python integration check")
+    def test_java_structured_bridge_versions(self):
+        from simulator.training.serve import BridgePolicy
+
+        wrapper = ROOT / "cambiummod" / ("gradlew.bat" if os.name == "nt" else "gradlew")
+        command = [str(wrapper)] if os.name == "nt" else ["bash", str(wrapper)]
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                self.save_bridge_fixture(version)
+                policy = BridgePolicy(self.path, deterministic=True)
+                with make_server(policy, 0) as server:
+                    worker = threading.Thread(target=server.serve_forever, daemon=True)
+                    worker.start()
+                    try:
+                        subprocess.run([*command, "-p", str(ROOT / "cambiummod"), "replayAnalysisChecks",
+                                        f"-PbridgePolicyPort={server.server_port}", "--console=plain", "--no-daemon"],
+                                       cwd=ROOT, check=True)
+                    finally:
+                        server.shutdown()
+                        worker.join(timeout=3)
 
     @unittest.skipUnless(os.environ.get("MCSIM_BRIDGE_CHECKPOINT"), "No Bridge checkpoint selected")
     def test_java_structured_bridge(self):

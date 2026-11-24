@@ -1768,6 +1768,7 @@ class RosieTests(unittest.TestCase):
         command = build_command()
         self.assertIn("--onefile", command)
         self.assertTrue(any(str(ROOT / "contracts/policy_catalogue.json") in item for item in command))
+        self.assertTrue(any(str(ROOT / "contracts/bridge_observation_descriptors.json") in item for item in command))
         self.assertTrue(any(str(ROOT / "simulator/training/reward_weights.json") in item for item in command))
         self.assertRegex(platform_name(), r"^(windows|linux|macos)-(x86_64|arm64)$")
 

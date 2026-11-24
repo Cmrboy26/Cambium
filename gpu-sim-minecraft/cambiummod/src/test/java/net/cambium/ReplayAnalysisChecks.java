@@ -15,11 +15,38 @@ public final class ReplayAnalysisChecks {
 			try (BridgePolicyClient policy = new BridgePolicyClient(Integer.parseInt(args[1]))) {
 				JsonObject info = policy.info().get(5, java.util.concurrent.TimeUnit.SECONDS);
 				policy.requireLiveSupport();
+				JsonObject descriptor = info.getAsJsonObject("bridge_observation");
+				int version = SimulationContract.integer(descriptor.get("version"));
+				require(policy.matchEncoderVersion() == (version == 1 ? 1 : 2)
+						&& policy.matchFeatureCount() == (version == 1 ? 10 : 17), "Bridge version must select its approved encoder layout");
 				try (BridgePolicyClient invalid = new BridgePolicyClient(Integer.parseInt(args[1]))) {
+					JsonObject modified = info.deepCopy();
+					JsonObject modifiedDescriptor = modified.getAsJsonObject("bridge_observation");
+					JsonArray features = modifiedDescriptor.getAsJsonArray("match_features");
+					var firstFeature = features.get(0);
+					features.set(0, features.get(1));
+					features.set(1, firstFeature);
+					modified.addProperty("bridge_observation_hash", BridgePolicyClient.descriptorFingerprint(modifiedDescriptor));
+					boolean rejected = false;
+					try { invalid.negotiate(modified); } catch (IllegalArgumentException error) { rejected = true; }
+					require(rejected, "Reordered features must fail even with a recomputed descriptor hash");
+					modified = info.deepCopy();
+					modified.addProperty("bridge_observation_hash", "0".repeat(64));
+					rejected = false;
+					try { invalid.negotiate(modified); } catch (IllegalArgumentException error) { rejected = true; }
+					require(rejected, "An incorrect advertised descriptor hash must be rejected");
+					modifiedDescriptor = descriptor.deepCopy();
+					modifiedDescriptor.addProperty("version", 999);
+					String futureHash = BridgePolicyClient.descriptorFingerprint(modifiedDescriptor);
+					rejected = false;
+					try { BridgePolicyClient.descriptorEncoder(modifiedDescriptor, futureHash,
+							java.util.Map.of(999, futureHash), java.util.Map.of(1, 1, 2, 2, 3, 2)); }
+					catch (IllegalArgumentException error) { rejected = true; }
+					require(rejected, "A registered future descriptor must not imply live encoder support");
 					JsonObject broken = info.deepCopy();
 					broken.getAsJsonObject("environment").getAsJsonObject("experimental_bridge")
 							.getAsJsonObject("match").addProperty("cage_ticks", -1);
-					boolean rejected = false;
+					rejected = false;
 					try { invalid.negotiate(broken); } catch (IllegalArgumentException error) { rejected = true; }
 					require(rejected, "Invalid checkpoint match rules must fail negotiation");
 					rejected = false;

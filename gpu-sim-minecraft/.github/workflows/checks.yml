@@ -55,6 +55,10 @@ jobs:
         env:
           MCSIM_LIVE_JAVA_CHECK: '1'
         run: python -B -m unittest simulator.training.test_training.InferenceChecks.test_java_bridge -v
+      - name: Java Python Structured Bridge Versions
+        env:
+          MCSIM_LIVE_JAVA_CHECK: '1'
+        run: python -B -m unittest simulator.training.test_training.InferenceChecks.test_java_structured_bridge_versions -v
       - name: Package Mod
         run: ./cambiummod/gradlew -p cambiummod build --console=plain --no-daemon
       - uses: actions/upload-artifact@v7

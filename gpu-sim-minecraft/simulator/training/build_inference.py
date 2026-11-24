@@ -26,6 +26,7 @@ def build_command():
     output = ROOT / "cambiummod/build/inference-build"
     return [sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--name", "cambium-inference",
             "--paths", str(ROOT), "--add-data", f"{ROOT / 'contracts/policy_catalogue.json'}{os.pathsep}contracts",
+            "--add-data", f"{ROOT / 'contracts/bridge_observation_descriptors.json'}{os.pathsep}contracts",
             "--add-data", f"{ROOT / 'simulator/training/reward_weights.json'}{os.pathsep}simulator/training",
             "--distpath", str(output / "dist"), "--workpath", str(output / "work"), "--specpath", str(output),
             str(ROOT / "simulator/training/rosie.py")]
@@ -48,7 +49,7 @@ def main(argv=None):
     subprocess.run(command, cwd=ROOT, check=True)
     target.mkdir(parents=True, exist_ok=True)
     destination = target / executable
-    shutil.copyfile(ROOT / "cambiummod/build/inference-build/dist" / executable, destination)
+    shutil.copy(ROOT / "cambiummod/build/inference-build/dist" / executable, destination)
     digest = hashlib.sha256()
     with destination.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):

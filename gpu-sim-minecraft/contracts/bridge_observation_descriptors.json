@@ -1,0 +1,36 @@
+{
+  "format": "minecraft_sim_bridge_observation_registry",
+  "version": 1,
+  "descriptors": {
+    "1": {
+      "format": "minecraft_sim_bridge_observation",
+      "version": 1,
+      "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1},
+      "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
+      "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining", "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress", "refill_enabled", "own_selected_slot"],
+      "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)", "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8"],
+      "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_host_state",
+      "model": "bridge_voxel_actor_critic_v1"
+    },
+    "2": {
+      "format": "minecraft_sim_bridge_observation",
+      "version": 2,
+      "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1, "actor_task_state_version": 1},
+      "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
+      "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining", "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress", "refill_enabled", "own_selected_slot", "own_eating_progress", "own_mining_progress", "objective_yaw_error", "objective_pitch_error", "objective_distance", "own_use_cooldown", "own_mining_cooldown"],
+      "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)", "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8", "32_ticks", "1", "180_degrees", "90_degrees", "50_blocks_clipped", "4_ticks", "5_ticks"],
+      "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_host_state",
+      "model": "bridge_voxel_actor_critic_v2"
+    },
+    "3": {
+      "format": "minecraft_sim_bridge_observation",
+      "version": 3,
+      "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1, "actor_task_state_version": 1},
+      "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
+      "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining", "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress", "refill_enabled", "own_selected_slot", "own_eating_progress", "own_mining_progress", "objective_yaw_error", "objective_pitch_error", "objective_distance", "own_use_cooldown", "own_mining_cooldown"],
+      "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)", "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8", "32_ticks", "1", "180_degrees", "90_degrees", "50_blocks_clipped", "4_ticks", "5_ticks"],
+      "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_state",
+      "model": "bridge_voxel_actor_critic_v2"
+    }
+  }
+}

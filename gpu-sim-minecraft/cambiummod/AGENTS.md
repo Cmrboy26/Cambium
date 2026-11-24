@@ -60,6 +60,15 @@ the intended build before diagnosing stale installed JARs. Rebuild/reinstall
 after source/catalogue changes; restart Minecraft. No script deletes old JARs.
 
 `PolicyCatalogue.java` is generated from the root catalogue, not hand-maintained.
+`BridgeDescriptorRegistry.java` is generated from the shared Bridge observation
+registry by `python -B scripts/generate-contract.py`. Descriptor versions 1, 2
+and 3 are explicitly mapped to live encoders; a registry entry alone does not
+enable live support. Preserve published descriptor fingerprints and add
+cross-language fixtures when changing this contract. The helper must bundle the
+same registry; rebuild it on the target OS before rebuilding the JAR. A Python
+`Unsupported Bridge observation/model descriptor` error can indicate an older
+helper or an incompatible checkpoint; the Java descriptor error indicates a
+failed live descriptor negotiation. Check both identities and the helper log.
 `ObservationEncoder` owns pure base normalization; `LivePolicy` owns Minecraft
 state extraction, equipment features and HTTP negotiation. The service catalogue
 hash is checked when supplied; older descriptor-compatible services may omit it.

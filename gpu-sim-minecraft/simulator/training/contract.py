@@ -25,32 +25,20 @@ _ARMOR_SLOTS = tuple(CATALOGUE["armor_slots"])
 _ARMOR_ITEMS = {slot: frozenset({"minecraft:air", *(f"minecraft:{material}_{slot}"
     for material in _EQUIPMENT_MATERIALS), *(["minecraft:turtle_helmet"] if slot == "helmet" else [])})
     for slot in _ARMOR_SLOTS}
+_BRIDGE_REGISTRY = json.loads((Path(__file__).resolve().parents[2] / "contracts/bridge_observation_descriptors.json").read_text(encoding="utf-8"))
+if (_BRIDGE_REGISTRY.get("format") != "minecraft_sim_bridge_observation_registry" or _BRIDGE_REGISTRY.get("version") != 1
+        or not isinstance(_BRIDGE_REGISTRY.get("descriptors"), dict) or not _BRIDGE_REGISTRY["descriptors"]
+        or any(not key.isascii() or not key.isdecimal() or str(int(key)) != key or int(key) < 1
+               or not isinstance(value, dict) or value.get("format") != "minecraft_sim_bridge_observation"
+               or type(value.get("version")) is not int or value["version"] != int(key)
+               for key, value in _BRIDGE_REGISTRY["descriptors"].items())):
+    raise ValueError("Invalid Bridge observation descriptor registry")
 
 
 def bridge_observation_descriptor(version=1):
-    if type(version) is not int or version not in (1, 2, 3):
+    if type(version) is not int or str(version) not in _BRIDGE_REGISTRY["descriptors"]:
         raise ValueError("Unsupported Bridge observation/model descriptor")
-    descriptor = {"format": "minecraft_sim_bridge_observation", "version": version,
-            "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1},
-            "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
-            "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
-                               "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress",
-                               "refill_enabled", "own_selected_slot"],
-            "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)",
-                             "64", "64", "64", "max(1,arrow_refill_ticks)", "1", "8"],
-            "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_host_state",
-            "model": "bridge_voxel_actor_critic_v1"}
-    if version >= 2:
-        descriptor["native_capabilities"]["actor_task_state_version"] = 1
-        descriptor["match_features"].extend(["own_eating_progress", "own_mining_progress",
-                                             "objective_yaw_error", "objective_pitch_error", "objective_distance",
-                                             "own_use_cooldown", "own_mining_cooldown"])
-        descriptor["match_scales"].extend(["32_ticks", "1", "180_degrees", "90_degrees", "50_blocks_clipped",
-                                           "4_ticks", "5_ticks"])
-        descriptor["model"] = "bridge_voxel_actor_critic_v2"
-    if version == 3:
-        descriptor["sampling"] = "current_state"
-    return descriptor
+    return deepcopy(_BRIDGE_REGISTRY["descriptors"][str(version)])
 
 
 def validate_bridge_observation_descriptor(value):
@@ -58,8 +46,8 @@ def validate_bridge_observation_descriptor(value):
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError):
         raise ValueError("Unsupported Bridge observation/model descriptor") from None
-    expected = [json.dumps(bridge_observation_descriptor(version), sort_keys=True, separators=(",", ":"))
-                for version in (1, 2, 3)]
+    expected = [json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+                for descriptor in _BRIDGE_REGISTRY["descriptors"].values()]
     if encoded not in expected:
         raise ValueError("Unsupported Bridge observation/model descriptor")
     return deepcopy(value)

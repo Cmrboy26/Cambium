@@ -315,7 +315,7 @@ final class LiveBridge implements LiveSession {
 			var state = new BridgeObservationEncoder.ActorState(count(player, kits[actor].index("blocks")), count(player, kits[actor].index("golden_apple")),
 					arrows(player), refill[actor], player.getInventory().getSelectedSlot(), eating, world.miningProgress(actor),
 					useDelay[actor], world.miningDelay(actor), feet, player.getYRot(), player.getXRot());
-			features[index] = BridgeObservationEncoder.features(policy.matchFeatureCount() == 10 ? 1 : 2, actor, featureRules, matchState, state, target);
+			features[index] = BridgeObservationEncoder.features(policy.matchEncoderVersion(), actor, featureRules, matchState, state, target);
 			voxels[index] = BridgeObservationEncoder.voxels(session.trace.environment, world.overlay(), feet, player.getYRot(), actor);
 		}
 		requestNanos = System.nanoTime();

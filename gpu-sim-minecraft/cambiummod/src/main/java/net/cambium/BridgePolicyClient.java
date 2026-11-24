@@ -30,9 +30,7 @@ final class BridgePolicyClient implements AutoCloseable {
 			"target.yaw_error", "target.pitch_error", "arena.ray_world_0", "arena.ray_world_45", "arena.ray_world_90",
 			"arena.ray_world_135", "arena.ray_world_180", "arena.ray_world_225", "arena.ray_world_270", "arena.ray_world_315");
 	private static final Set<String> LIVE_ACTIONS = Set.of("movement", "jump", "sprint", "sneak", "attack", "yaw", "pitch", "weapon", "use_item");
-	private static final List<String> DESCRIPTORS = List.of(
-			"d708928f0009e2176270447a1bd327edb265ed66fb5ae4ba964c66ab21196380",
-			"6c073518d3c85671184a0120166926af19cae9335bf7c43eee0df18c7d495201");
+	private static final Map<Integer, Integer> LIVE_ENCODERS = Map.of(1, 1, 2, 2, 3, 2);
 	private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 	private final URI base;
 	private SimulationContract contract;
@@ -41,6 +39,7 @@ final class BridgePolicyClient implements AutoCloseable {
 	private String contractHash;
 	private String descriptorHash;
 	private int matchFeatures;
+	private int matchEncoderVersion;
 
 	BridgePolicyClient(int port) {
 		if (port < 1 || port > 65535) throw new IllegalArgumentException("Invalid inference port");
@@ -60,10 +59,9 @@ final class BridgePolicyClient implements AutoCloseable {
 			throw new IllegalArgumentException("Unsupported Bridge inference protocol or catalogue");
 		}
 		JsonObject descriptor = info.getAsJsonObject("bridge_observation");
-		String negotiatedDescriptorHash = digest(canonical(descriptor));
-		if (!DESCRIPTORS.contains(negotiatedDescriptorHash) || !negotiatedDescriptorHash.equals(info.get("bridge_observation_hash").getAsString())) {
-			throw new IllegalArgumentException("Unsupported Bridge observation descriptor");
-		}
+		String negotiatedDescriptorHash = descriptorFingerprint(descriptor);
+		int negotiatedEncoder = descriptorEncoder(descriptor, info.get("bridge_observation_hash").getAsString(),
+				BridgeDescriptorRegistry.HASHES, LIVE_ENCODERS);
 		int negotiatedMatchFeatures = descriptor.getAsJsonArray("match_features").size();
 		String negotiatedContractHash = info.get("contract_hash").getAsString();
 		if (!negotiatedContractHash.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("Invalid policy contract fingerprint");
@@ -87,6 +85,7 @@ final class BridgePolicyClient implements AutoCloseable {
 		negotiatedContract.validateLoadouts(parsed.loadouts);
 		descriptorHash = negotiatedDescriptorHash;
 		matchFeatures = negotiatedMatchFeatures;
+		matchEncoderVersion = negotiatedEncoder;
 		contractHash = negotiatedContractHash;
 		loadouts = parsed.loadouts;
 		environment = parsed;
@@ -95,6 +94,17 @@ final class BridgePolicyClient implements AutoCloseable {
 
 	int observationCount() { return contract.observationCount(); }
 	int matchFeatureCount() { return matchFeatures; }
+	int matchEncoderVersion() { return matchEncoderVersion; }
+	static int descriptorEncoder(JsonObject descriptor, String advertisedHash, Map<Integer, String> hashes, Map<Integer, Integer> encoders) {
+		int version = SimulationContract.integer(descriptor.get("version"));
+		String hash = descriptorFingerprint(descriptor);
+		Integer encoder = encoders.get(version);
+		if (encoder == null || !hash.equals(hashes.get(version)) || !hash.equals(advertisedHash)) {
+			throw new IllegalArgumentException("Unsupported Bridge observation descriptor version or fingerprint: " + version);
+		}
+		return encoder;
+	}
+	static String descriptorFingerprint(JsonObject descriptor) { return digest(canonical(descriptor)); }
 	void requireLiveSupport() {
 		if (contract == null) throw new IllegalStateException("Bridge policy is not negotiated");
 		contract.requireSupported(LIVE_FEATURES, LIVE_ACTIONS);

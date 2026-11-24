@@ -79,7 +79,11 @@ independent weights; zero disables either term. The version-2 input requires
 `actor_task_state_version: 1` and uses new, incompatible model weights. The
 portable version-3 descriptor retains the version-2 feature layout but has a
 distinct checkpoint identity and supports host and resident sampling. The
-native item tick and actor-state/geometry encoders can be reused by other task
+shared [descriptor registry](../../contracts/bridge_observation_descriptors.json)
+owns the exact published descriptors; regenerate Java fingerprints with
+`python -B scripts/generate-contract.py` and explicitly implement or reject
+each live layout. A registry entry does not automatically imply live support.
+The native item tick and actor-state/geometry encoders can be reused by other task
 implementations, but ordinary authored duel plans do not yet enable those item
 mechanics or append the new features to their policy contract.
 
@@ -93,8 +97,9 @@ Bridge rules against its arena before serving and preserves the separate match
 clock and external training cutoff. It reuses the structured checkpoint
 controller and rejects malformed shapes, categories and incompatible checkpoints.
 The ordinary `Policy` and duel configuration paths still reject Bridge. The
-Java structured client and pure encoders have headless tests, but no Minecraft
-world controller is connected; `minecraft_bridge_supported` remains false.
+Java structured client and pure encoders have headless tests for descriptor
+versions 1, 2 and 3. The experimental Minecraft world controller is wired but
+not validated in-game; `minecraft_bridge_supported` remains false.
 `Environment.item_progress()` exposes the actor's current eating and mining
 fractions in any host-staged batch; `actor_task_state()` exposes pose, countdown,
 mining progress and item delays for `actor_task_observations()` with task-chosen

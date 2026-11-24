@@ -382,7 +382,9 @@ validation requires the applicable mechanics, observations and resident path.
   Bridge observations, actions and model descriptors. Reject unsupported modes
   or features explicitly instead of fabricating observations. Experimental
   structured HTTP inference, headless Java encoders and a live controller are
-  wired in source; in-game behavior and mixin loading remain unverified.
+  wired in source. A shared descriptor registry and Python/Java HTTP fixtures
+  cover observation versions 1, 2 and 3; in-game behavior and mixin loading
+  remain unverified.
 - [ ] P1-07-04: Implement or explicitly integrate a private-singleplayer Bridge
   rule controller for live scores, cages, respawns, protected blocks, kits and
   arrow refill. An experimental controller exists in source; in-game rule and
