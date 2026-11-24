@@ -11,7 +11,7 @@ new optimizer and progress history; selecting the plan without these arguments
 starts from fresh weights at the first stage. No job is submitted until the wizard
 is confirmed.
 
-Each stage gives both players -5 for a draw, plus -0.1 on a match-clock
+Each stage gives both players -8 for a draw, plus -0.1 on a match-clock
 timeout or external cutoff. Wins earn up to 0.1 extra for finishing early. These
 are additive with scoring and other rewards. Rebuild the native simulator and
 start a new run rather than resuming an older CBridge2 run.

@@ -17,7 +17,7 @@
     "void_y": -3,
     "match": {"goals_to_win": 3, "max_ticks": 1800, "cage_ticks": 40,
               "persist_blocks_on_goal": true, "arrow_refill_ticks": 80},
-    "task_rewards": {"score": 1, "opponent_score": -1, "win": 5, "loss": -5, "draw": -5, "toward": 3, "away": 0},
+    "task_rewards": {"score": 1, "opponent_score": -1, "win": 5, "loss": -5, "draw": -8, "toward": 3, "away": 0},
     "kits": [
       {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", "empty", "empty", "empty", "empty"], "blocks": 64, "golden_apples": 2},
       {"slots": ["sword", "bow", "pickaxe", "blocks", "golden_apple", "empty", "empty", "empty", "empty"], "blocks": 64, "golden_apples": 2}
@@ -29,8 +29,9 @@
       "bridge": {"min": [0, 0, -15], "max": [1, 1, 15]},
       "patterns": [
         {"location": "top", "type": "constant", "value": 1, "percent": 0.22},
-        {"location": "side", "type": "random", "min": 1, "max": 2, "percent": 0.35},
-        {"location": "side", "type": "function", "function": "half-sine", "min": 0, "max": 1, "percent": 0.25}
+        {"location": "top", "type": "random", "min": 0, "max": 2, "percent": 0.35},
+        {"location": "side", "type": "random", "min": 0, "max": 1, "percent": 0.35},
+        {"location": "top", "type": "function", "function": "half-sine", "min": 0, "max": 2, "percent": 0.25}
       ]
     }
   }
