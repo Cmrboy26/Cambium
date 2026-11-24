@@ -1144,6 +1144,50 @@ public final class ReplayAnalysisChecks {
 		try { BridgeTerrainGenerator.generate(environment, generation, 42); }
 		catch (IllegalArgumentException error) { rejected = true; }
 		require(rejected, "Generated Bridge terrain must stay inside the arena");
+		JsonObject patterns = JsonParser.parseString("""
+			{"bridge":{"min":[0,0,-5],"max":[1,1,5]},"patterns":[
+			 {"location":"top","type":"constant","value":1,"percent":0.12},
+			 {"location":"side","type":"random","min":1,"max":2,"percent":0.25}]}
+			""").getAsJsonObject();
+		require(!BridgeTerrainGenerator.generate(environment, patterns, 42).isEmpty(),
+				"Bridge pattern terrain must support CBridge2 generation");
+		JsonObject obstacles = JsonParser.parseString("""
+			{"bridge":{"min":[0,0,-5],"max":[1,1,5]},"patterns":[
+			 {"location":"top","type":"constant","value":1,"percent":0.22},
+			 {"location":"top","type":"random","min":0,"max":2,"percent":0.35},
+			 {"location":"side","type":"random","min":0,"max":2,"percent":0.35},
+			 {"location":"top","type":"function","function":"half-sine","min":0,"max":2,"percent":0.25}]}
+			""").getAsJsonObject();
+		var native42 = java.util.Map.ofEntries(
+				java.util.Map.entry(43, 1), java.util.Map.entry(44, 1), java.util.Map.entry(52, 1),
+				java.util.Map.entry(59, 1), java.util.Map.entry(67, 2), java.util.Map.entry(73, 2),
+				java.util.Map.entry(85, 2), java.util.Map.entry(86, 2), java.util.Map.entry(106, 1),
+				java.util.Map.entry(107, 1), java.util.Map.entry(130, 1), java.util.Map.entry(136, 1),
+				java.util.Map.entry(143, 1), java.util.Map.entry(148, 1), java.util.Map.entry(149, 1),
+				java.util.Map.entry(157, 1), java.util.Map.entry(164, 1), java.util.Map.entry(178, 2),
+				java.util.Map.entry(214, 2));
+		var native43 = java.util.Map.ofEntries(
+				java.util.Map.entry(67, 2), java.util.Map.entry(68, 2), java.util.Map.entry(73, 2),
+				java.util.Map.entry(85, 2), java.util.Map.entry(86, 2), java.util.Map.entry(88, 1),
+				java.util.Map.entry(130, 1), java.util.Map.entry(136, 2), java.util.Map.entry(151, 1),
+				java.util.Map.entry(157, 1), java.util.Map.entry(169, 1), java.util.Map.entry(170, 1),
+				java.util.Map.entry(178, 2), java.util.Map.entry(185, 2), java.util.Map.entry(211, 2),
+				java.util.Map.entry(212, 2));
+		require(BridgeTerrainGenerator.generate(environment, obstacles, 42).equals(native42)
+				&& BridgeTerrainGenerator.generate(environment, obstacles, 43).equals(native43),
+				"Bridge pattern geometry and ownership must match native seed fixtures");
+		JsonObject invalidPatterns = obstacles.deepCopy();
+		invalidPatterns.getAsJsonArray("patterns").get(0).getAsJsonObject().addProperty("percent", 1.1);
+		rejected = false;
+		try { BridgeTerrainGenerator.generate(environment, invalidPatterns, 42); }
+		catch (IllegalArgumentException error) { rejected = true; }
+		require(rejected, "Invalid Bridge pattern probabilities must be rejected");
+		invalidPatterns = obstacles.deepCopy();
+		invalidPatterns.getAsJsonObject("bridge").getAsJsonArray("max").set(2, ReplayAnalysis.JSON.toJsonTree(7));
+		rejected = false;
+		try { BridgeTerrainGenerator.generate(environment, invalidPatterns, 42); }
+		catch (IllegalArgumentException error) { rejected = true; }
+		require(rejected, "Bridge pattern bounds must stay inside the arena");
 		System.out.println("PASS: deterministic bounded Bridge terrain generation");
 	}
 

@@ -731,13 +731,26 @@ class InferenceChecks(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("MCSIM_LIVE_JAVA_CHECK") == "1", "Explicit Java/Python integration check")
     def test_java_structured_bridge_versions(self):
+        from backend.fast_rl_model import BridgeActorCritic
+        from simulator.training.compiler import resolve_experiment
         from simulator.training.serve import BridgePolicy
 
         wrapper = ROOT / "cambiummod" / ("gradlew.bat" if os.name == "nt" else "gradlew")
         command = [str(wrapper)] if os.name == "nt" else ["bash", str(wrapper)]
-        for version in (1, 2, 3):
-            with self.subTest(version=version):
+        plan_path = ROOT / "simulator/setups/curricula/colten/cbridge2.json"
+        plan = resolve_experiment(json.loads(plan_path.read_text(encoding="utf-8")), plan_path.parent)
+        cases = [(version, None) for version in (1, 2, 3)] + [(3, stage) for stage in plan["stages"][1:3]]
+        for version, stage in cases:
+            with self.subTest(version=version, stage=stage["name"] if stage else None):
                 self.save_bridge_fixture(version)
+                if stage:
+                    scenario = deepcopy(stage["scenario"]["arenas"][0]["environment"])
+                    scenario["experimental_bridge"] = deepcopy(stage["scenario"]["bridge"])
+                    contract = plan["policy"]
+                    self.saved["metadata"].update(schema=contract, contract=contract, scenario=scenario)
+                    self.saved["model"] = BridgeActorCritic(contract["observation_dim"], plan["bridge_observation"], 16,
+                        dict(zip(contract["action_names"], contract["action_sizes"]))).state_dict()
+                    torch.save(self.saved, self.path)
                 policy = BridgePolicy(self.path, deterministic=True)
                 with make_server(policy, 0) as server:
                     worker = threading.Thread(target=server.serve_forever, daemon=True)
