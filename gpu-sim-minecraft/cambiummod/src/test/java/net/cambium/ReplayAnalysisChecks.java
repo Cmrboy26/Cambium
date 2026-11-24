@@ -1204,6 +1204,11 @@ public final class ReplayAnalysisChecks {
 			{"zones":[{"min":[-1,0,-1],"max":[2,2,2]}],"block_range":4.5,"entity_range":3,
 			 "hardness":1,"mining_speed":15,"correct_tool":true}
 			""").getAsJsonObject();
+		var clicked = new net.minecraft.world.phys.BlockHitResult(new Vec3(0.5, 0.5, 0.5),
+				net.minecraft.core.Direction.UP, net.minecraft.core.BlockPos.ZERO, false);
+		require(LiveBridge.humanPlacementWithinReach(new Vec3(0.5, 2, 0.5), clicked, 4.5)
+				&& !LiveBridge.humanPlacementWithinReach(new Vec3(0.5, 6, 0.5), clicked, 4.5),
+				"Human block clicks must use the clicked position and obey the Bridge reach limit");
 		var arena = new BridgeArena(environment, rules, java.util.Map.of());
 		var players = new net.minecraft.world.phys.AABB[]{new net.minecraft.world.phys.AABB(0, 1, -1, 0.6, 2.8, -0.4),
 				new net.minecraft.world.phys.AABB(0, 1, 1, 0.6, 2.8, 1.6)};
@@ -1224,6 +1229,18 @@ public final class ReplayAnalysisChecks {
 				&& Math.abs(arena.miningProgress(0) - 0.1F) < 0.00001F, "Airborne mining must advance at one-fifth speed");
 		arena.cancelMining(0);
 		require(arena.miningProgress(0) == 0 && arena.overlay().get(arena.cell(1, 0, 0)) == 2, "Cancellation clears progress without changing blocks");
+		int edited = arena.cell(1, 0, 0);
+		arena.editBase(edited, true);
+		require(!arena.overlay().containsKey(edited) && environment.cells[edited] == 1
+				&& BridgeObservationEncoder.voxels(environment, arena.overlay(), new double[]{0, 0, 0}, 0, 0)[2][5][4] == 1,
+				"Observer edits must replace team terrain and appear in Bridge observations");
+		arena.editBase(edited, false);
+		require(environment.cells[edited] == 0 && arena.place(0, 0, 0, 0, 1, 0, 0, 1, players),
+				"Observer removal must make the edited cell available for bot placement");
+		arena.editBase(edited, true);
+		arena.restoreBase();
+		require(environment.cells[edited] == 0 && environment.cells[arena.cell(0, 0, 0)] == 1,
+				"Closing or resetting a Bridge arena must restore its original model cells");
 		System.out.println("PASS: Bridge base protection, ownership, placement and mining rules");
 	}
 
@@ -1300,6 +1317,14 @@ public final class ReplayAnalysisChecks {
 				&& BridgeMatch.refill(0, 0, 0, 2).equals(new BridgeMatch.Refill(0, 1))
 				&& BridgeMatch.refill(0, 0, 1, 2).equals(new BridgeMatch.Refill(1, 0)),
 				"Arrow refill must start after the shot tick and complete at the configured delay");
+		BridgeMatch.Refill refill = BridgeMatch.refill(1, 0, 0, 80);
+		for (int tick = 0; tick < 79; tick++) refill = BridgeMatch.refill(0, refill.arrows(), refill.elapsed(), 80);
+		require(refill.equals(new BridgeMatch.Refill(0, 79)) && LiveBridge.arrowStatus(0, 79, 80).equals("Arrow 0:01"),
+				"CBridge2 arrow refill must count down the configured 80 empty ticks");
+		refill = BridgeMatch.refill(0, refill.arrows(), refill.elapsed(), 80);
+		require(refill.equals(new BridgeMatch.Refill(1, 0)) && LiveBridge.arrowStatus(1, 0, 80).equals("Arrows 1")
+				&& BridgeMatch.refill(0, 0, 0, 0).equals(new BridgeMatch.Refill(0, 0)),
+				"Arrow refill must restore one arrow and remain disabled when the delay is zero");
 		JsonObject definition = JsonParser.parseString("""
 			{"format":"minecraft_sim_environment","version":1,"minecraft":"26.3",
 			 "bounds":{"min":[-3,0,-3],"size":[7,4,7]},"blocks":[],

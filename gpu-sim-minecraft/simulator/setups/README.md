@@ -216,6 +216,7 @@ Opponent IDs such as `fighter` are names you choose; stages select a named mixtu
 | `type` | `controller` | Behavior / required fields |
 | --- | --- | --- |
 | `scripted` | `stationary_target` | Idle target; no `options` |
+| `scripted` | `bridge_fixed_lane` | Bridge runner following its initial north/south heading; options below |
 | `scripted` | `basic_melee` | Approaches, aims and attacks; optional settings below |
 | `scripted` | `random_walk` | Roams without attacking; `change_interval` (20 ticks), `wall_margin` (1.25 blocks), optional `sneak` (false); needs yaw and all eight world-ray observations |
 | `scripted` | `stationary_melee` | Aims and retaliates without moving; accepts attack/distance/shield/weapon options, not locomotion options |
@@ -227,6 +228,18 @@ Opponent IDs such as `fighter` are names you choose; stages select a named mixtu
 Policy opponents accept `deterministic` (default `false`; `true` uses argmax).
 Frozen snapshots refresh every N global updates; ongoing episodes keep their assigned version.
 Custom scripted `package.module:factory` controllers execute trusted Python code.
+
+`bridge_fixed_lane` accepts `jump`, `sprint`, `sneak`, `place_blocks`, and
+`attack_nearby` booleans, all defaulting to false. Placement requires an explicit
+`block_slot` with blocks in both kits. The optional `attack_nearby` requires
+placement and an explicit, different `sword_slot` containing swords in both
+kits, plus unclipped scalar opponent-alive, relative-x/z, target-distance,
+target-yaw/pitch-error and own-weapon-slot observations. It stops moving and
+aims at a living opponent within four blocks, ahead and within 1.5 blocks of
+its lane, then swings at most once per 13 ticks when within three blocks and
+aimed. It returns to placement when the opponent leaves that area. This is a
+fixed-heading script, not position-aware navigation: it does not recover its
+center after knockback or navigate obstacles.
 
 | `basic_melee.options` | Default | Meaning |
 | --- | --- | --- |

@@ -18,6 +18,7 @@ final class BridgeArena {
 	}
 
 	private final ReplayTrace.Environment environment;
+	private final byte[] originalCells;
 	private final List<AABB> zones = new ArrayList<>();
 	private final Map<Integer, Integer> overlay = new HashMap<>();
 	private final Mining[] mining = {new Mining(), new Mining()};
@@ -31,6 +32,7 @@ final class BridgeArena {
 			throw new IllegalArgumentException("Invalid Bridge building rules");
 		}
 		this.environment = environment;
+		originalCells = environment.cells.clone();
 		double blockRange = number(building.get("block_range"));
 		double entityRange = number(building.get("entity_range"));
 		hardness = (float) number(building.get("hardness"));
@@ -75,6 +77,12 @@ final class BridgeArena {
 	}
 
 	Map<Integer, Integer> overlay() { return Map.copyOf(overlay); }
+	void editBase(int index, boolean solid) {
+		if (index < 0 || index >= environment.cells.length) throw new IllegalArgumentException("Bridge edit outside arena");
+		overlay.remove(index);
+		environment.cells[index] = (byte) (solid ? 1 : 0);
+	}
+	void restoreBase() { System.arraycopy(originalCells, 0, environment.cells, 0, originalCells.length); }
 	void clear() {
 		overlay.clear();
 		for (int actor = 0; actor < mining.length; actor++) {

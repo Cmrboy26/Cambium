@@ -13,9 +13,10 @@ stationary_melee retains aim/attacks/equipment without locomotion options.
 random_walk accepts change_interval (20 ticks), wall_margin (1.25 blocks) and
 sneak (False), using yaw/world rays and independent checkpointed RNG streams
 per actor.
-bridge_fixed_lane accepts jump, sneak, and place_blocks booleans (False by default)
-and an explicit block_slot for placement. It follows the initial north/south
-spawn heading without position-aware navigation.
+bridge_fixed_lane accepts jump, sprint, sneak, place_blocks and attack_nearby
+booleans (False by default), with explicit block_slot and sword_slot for the
+corresponding behaviors. It follows the initial north/south spawn heading
+without position-aware navigation.
 tactical_melee accepts basic_melee options plus style: evasive, aggressive or
 patient. These vary retreat/pressure/charge-based movement, not just timing.
 Checkpoint files are trusted standalone PPO archives, loaded with weights_only.
@@ -222,13 +223,16 @@ class StationaryTargetController(_BatchedController):
 
 class BridgeFixedLaneController(StationaryTargetController):
     def __init__(self, contract, count, seed=1, options=None):
-        options = _options({} if options is None else options, ("jump", "sneak", "place_blocks", "block_slot"))
+        options = _options({} if options is None else options,
+                   ("jump", "sprint", "sneak", "place_blocks", "block_slot", "attack_nearby", "sword_slot"))
         super().__init__(contract, count, seed)
         self.options = options
         self._description.update(controller="bridge_fixed_lane", options=options)
         self.jump = _boolean(options, "jump")
+        self.sprint = _boolean(options, "sprint")
         self.sneak = _boolean(options, "sneak")
         self.place_blocks = _boolean(options, "place_blocks")
+        self.attack_nearby = _boolean(options, "attack_nearby")
         self.block_slot = None
         if self.place_blocks:
             self.block_slot = _integer(options.get("block_slot"), "block_slot", 0, 8)
@@ -242,6 +246,26 @@ class BridgeFixedLaneController(StationaryTargetController):
                 raise ValueError("bridge_fixed_lane block placement requires a positive pitch choice")
         elif "block_slot" in options:
             raise ValueError("block_slot requires place_blocks")
+        self.sword_slot = None
+        if self.attack_nearby:
+            if not self.place_blocks:
+                raise ValueError("attack_nearby requires place_blocks")
+            self.sword_slot = _integer(options.get("sword_slot"), "sword_slot", 0, 8)
+            if self.sword_slot == self.block_slot:
+                raise ValueError("sword_slot and block_slot must differ")
+            for name in ("opponent.alive", "relative.x", "relative.z", "target.distance_fraction",
+                         "target.yaw_error", "target.pitch_error", "self.weapon_slot"):
+                self._require_feature(name)
+                descriptor = self._features[name][1]
+                if descriptor.get("encoding", "scalar") != "scalar" or "clip" in descriptor:
+                    raise ValueError(f"bridge_fixed_lane attack_nearby requires an unclipped scalar {name}")
+            self._require_choice("weapon", self.sword_slot)
+            self._require_choice("attack", True)
+            if not any(choice < 0 for choice in self._heads["pitch"][1]):
+                raise ValueError("bridge_fixed_lane attack_nearby requires a negative pitch choice")
+            self._attack_cooldowns = np.zeros(self.count, dtype=np.int64)
+        elif "sword_slot" in options:
+            raise ValueError("sword_slot requires attack_nearby")
         self._require_feature("self.yaw_fraction")
         yaw_descriptor = self._features["self.yaw_fraction"][1]
         if "clip" in yaw_descriptor and (yaw_descriptor["clip"][0] > -1 or yaw_descriptor["clip"][1] < 1):
@@ -258,7 +282,7 @@ class BridgeFixedLaneController(StationaryTargetController):
         for name in ("attack", "jump", "sprint", "sneak", "shield", "use_item"):
             if name in self._heads:
                 self._require_choice(name, False)
-        for name in ("jump", "sneak"):
+        for name in ("jump", "sprint", "sneak"):
             if getattr(self, name):
                 self._require_choice(name, True)
         self._directions = np.full(self.count, -1, dtype=np.int64)
@@ -278,7 +302,7 @@ class BridgeFixedLaneController(StationaryTargetController):
         column, choices = self._heads["yaw"]
         actions[:, column] = np.abs(error[:, None] - np.asarray(choices)).argmin(axis=1)
         self._set(actions, "movement", np.where(np.abs(error) <= 1, "forward", "neutral"))
-        for name in ("jump", "sneak"):
+        for name in ("jump", "sprint", "sneak"):
             if getattr(self, name):
                 self._set(actions, name, np.ones(len(observations), dtype=bool))
         if self.place_blocks:
@@ -287,20 +311,54 @@ class BridgeFixedLaneController(StationaryTargetController):
             actions[:, column] = np.abs((90 - pitch)[:, None] - np.asarray(choices)).argmin(axis=1)
             self._set(actions, "weapon", np.full(len(observations), self.block_slot))
             self._set(actions, "use_item", np.ones(len(observations), dtype=bool))
+        if self.attack_nearby:
+            distance = self._feature(observations, "target.distance_fraction") * 10
+            forward = self._feature(observations, "relative.z") * np.where(directions == 0, 1, -1)
+            nearby = ((self._feature(observations, "opponent.alive") >= 0.5) & (forward > 0)
+                      & (np.abs(self._feature(observations, "relative.x")) <= 0.15) & (distance <= 4))
+            yaw_error = self._feature(observations, "target.yaw_error") * 180
+            pitch_error = self._feature(observations, "target.pitch_error") * 90
+            for name, aim_error in (("yaw", yaw_error), ("pitch", pitch_error)):
+                column, choices = self._heads[name]
+                actions[nearby, column] = np.abs(aim_error[nearby, None] - np.asarray(choices)).argmin(axis=1)
+            movement_column, movement_choices = self._heads["movement"]
+            actions[nearby, movement_column] = movement_choices.index("neutral")
+            for name in ("jump", "sprint", "use_item"):
+                if name in self._heads:
+                    column, choices = self._heads[name]
+                    actions[nearby, column] = choices.index(False)
+            self._set(actions, "weapon", np.where(nearby, self.sword_slot, self.block_slot))
+            cooldowns = self._attack_cooldowns[indices]
+            attack = (nearby & (distance <= 3) & (np.abs(yaw_error) <= 5) & (np.abs(pitch_error) <= 5)
+                      & (self._feature(observations, "self.weapon_slot") == self.sword_slot) & (cooldowns == 0))
+            self._set(actions, "attack", attack)
+            self._attack_cooldowns[indices] = np.where(attack, 12, np.maximum(cooldowns - 1, 0))
         return actions
 
     def reset(self, mask):
-        self._directions[self._mask(mask)] = -1
+        mask = self._mask(mask)
+        self._directions[mask] = -1
+        if self.attack_nearby:
+            self._attack_cooldowns[mask] = 0
 
     def state_dict(self):
-        return {**super().state_dict(), "directions": self._directions.tolist()}
+        state = {**super().state_dict(), "directions": self._directions.tolist()}
+        if self.attack_nearby:
+            state["attack_cooldowns"] = self._attack_cooldowns.tolist()
+        return state
 
     def load_state_dict(self, state):
-        self._state(state, ("directions",))
+        self._state(state, ("directions", "attack_cooldowns") if self.attack_nearby else ("directions",))
         directions = state["directions"]
         if (not isinstance(directions, list) or len(directions) != self.count
                 or any(type(direction) is not int or direction not in (-1, 0, 1) for direction in directions)):
             raise ValueError("Invalid per-actor bridge_fixed_lane directions")
+        if self.attack_nearby:
+            cooldowns = state["attack_cooldowns"]
+            if (not isinstance(cooldowns, list) or len(cooldowns) != self.count
+                    or any(type(cooldown) is not int or not 0 <= cooldown <= 12 for cooldown in cooldowns)):
+                raise ValueError("Invalid per-actor bridge_fixed_lane attack cooldowns")
+            self._attack_cooldowns[:] = cooldowns
         self._directions[:] = directions
 
 

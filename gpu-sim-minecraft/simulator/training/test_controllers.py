@@ -93,6 +93,77 @@ def decoded(contract, actions, name):
 
 
 class ScriptedChecks(unittest.TestCase):
+    def test_bridge_fixed_lane_attacks_and_resumes_building(self):
+        contract = policy(observations=[{"feature": name} for name in (
+            "self.yaw_fraction", "self.pitch_fraction", "opponent.alive", "relative.x", "relative.z",
+            "target.distance_fraction", "target.yaw_error", "target.pitch_error", "self.weapon_slot")], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "yaw", "values": [-20, -2, 0, 2, 20]},
+            {"name": "pitch", "values": [-10, 0, 10]},
+            {"name": "jump", "values": [False, True]}, {"name": "sprint", "values": [False, True]},
+            {"name": "attack", "values": [False, True]}, {"name": "weapon", "values": [0, 3]},
+            {"name": "use_item", "values": [False, True]},
+        ])
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane", "options": {
+            "jump": True, "sprint": True, "place_blocks": True, "block_slot": 3,
+            "attack_nearby": True, "sword_slot": 0}}
+        controller = create_controller(definition, contract, 2)
+        features = {"self.yaw_fraction": [0, 1], "opponent.alive": [1, 1], "relative.z": [0.2, -0.2],
+                    "target.distance_fraction": [0.2, 0.2], "self.weapon_slot": [3, 3]}
+        actions = controller.act(observations(contract, 2, **features))
+        for name, expected in (("movement", "neutral"), ("weapon", 0), ("jump", False),
+                               ("sprint", False), ("use_item", False), ("attack", False)):
+            self.assertEqual(decoded(contract, actions, name).tolist(), [expected, expected])
+        features["self.weapon_slot"] = [0, 0]
+        actions = controller.act(observations(contract, 2, **features))
+        self.assertEqual(decoded(contract, actions, "attack").tolist(), [True, True])
+        saved = controller.state_dict()
+        self.assertFalse(decoded(contract, controller.act(observations(contract, 2, **features)), "attack").any())
+        restored = create_controller(definition, contract, 2)
+        restored.load_state_dict(saved)
+        np.testing.assert_array_equal(controller.act(observations(contract, 2, **features)),
+                                      restored.act(observations(contract, 2, **features)))
+        features["relative.z"] = [-0.2, 0.2]
+        actions = controller.act(observations(contract, 2, **features))
+        for name, expected in (("movement", "forward"), ("weapon", 3), ("jump", True),
+                               ("sprint", True), ("use_item", True), ("attack", False)):
+            self.assertEqual(decoded(contract, actions, name).tolist(), [expected, expected])
+        with self.assertRaises(ValueError):
+            create_controller({**definition, "options": {**definition["options"], "sword_slot": 3}}, contract, 1)
+        for missing in ("opponent.alive", "relative.x", "relative.z", "target.distance_fraction",
+                        "target.yaw_error", "target.pitch_error", "self.weapon_slot"):
+            incomplete = policy(observations=[item for item in contract["observations"] if item["feature"] != missing],
+                                actions=contract["actions"])
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                create_controller(definition, incomplete, 1)
+        features.update({"relative.z": [0.2, -0.2], "relative.x": [0.2, 0], "opponent.alive": [1, 0]})
+        actions = controller.act(observations(contract, 2, **features))
+        self.assertEqual(decoded(contract, actions, "use_item").tolist(), [True, True])
+        controller.reset(np.array([True, False]))
+        self.assertEqual(controller.state_dict()["attack_cooldowns"][0], 0)
+
+    def test_bridge_fixed_lane_sprint_option(self):
+        contract = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "yaw", "values": [-2, 0, 2]},
+            {"name": "sprint", "values": [True, False]},
+        ])
+        initial = observations(contract, 2, **{"self.yaw_fraction": [0, 1]})
+        for enabled in (False, True):
+            controller = create_controller({"type": "scripted", "controller": "bridge_fixed_lane",
+                                            "options": {"sprint": enabled}}, contract, 2)
+            self.assertEqual(decoded(contract, controller.act(initial), "sprint").tolist(), [enabled, enabled])
+        with self.assertRaises(ValueError):
+            create_controller({"type": "scripted", "controller": "bridge_fixed_lane",
+                               "options": {"sprint": "true"}}, contract, 1)
+        missing = policy(observations=[{"feature": "self.yaw_fraction"}], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "yaw", "values": [-2, 0, 2]},
+        ])
+        with self.assertRaises(ValueError):
+            create_controller({"type": "scripted", "controller": "bridge_fixed_lane",
+                               "options": {"sprint": True}}, missing, 1)
+
     def test_bridge_fixed_lane_places_blocks_while_jumping(self):
         contract = policy(observations=[{"feature": "self.yaw_fraction"}, {"feature": "self.pitch_fraction"}], actions=[
             {"name": "movement", "values": ["neutral", "forward"]},
@@ -237,6 +308,74 @@ class ScriptedChecks(unittest.TestCase):
             ])
             with self.subTest(head=head["name"]), self.assertRaises(ValueError):
                 create_controller(definition, unsupported, 1)
+
+    @unittest.skipUnless(os.environ.get("MCSIM_TEST_CPU_LIBRARY"), "MCSIM_TEST_CPU_LIBRARY not set")
+    def test_bridge_fixed_lane_native_attacks_both_seats(self):
+        contract = policy(observations=[{"feature": name} for name in (
+            "self.yaw_fraction", "self.pitch_fraction", "self.weapon_slot", "opponent.alive",
+            "opponent.health_fraction", "relative.x", "relative.z", "target.distance_fraction",
+            "target.yaw_error", "target.pitch_error")], actions=[
+            {"name": "movement", "values": ["neutral", "forward"]},
+            {"name": "jump", "values": [False, True]}, {"name": "sprint", "values": [False, True]},
+            {"name": "attack", "values": [False, True]},
+            {"name": "yaw", "values": [-20, -10, -5, -2, 0, 2, 5, 10, 20]},
+            {"name": "pitch", "values": [-10, -5, -2, 0, 2, 5, 10]},
+            {"name": "weapon", "values": [0, 3]}, {"name": "use_item", "values": [False, True]},
+        ])
+        scene = json.loads((ROOT / "simulator/tests/reset_environment.json").read_text(encoding="utf-8"))
+        scene["bounds"] = {"min": [-5, -4, -12], "size": [11, 10, 24]}
+        scene["blocks"] = [{"from": [-3, 0, -11], "to": [3, 0, 11], "block": "minecraft:stone"}]
+        for player, position, yaw in zip(scene["players"], ([0, 1, -2.5], [0, 1, 2.5]), (0, 180), strict=True):
+            player.update(position=position, yaw=yaw, pitch=90)
+            player["loadout"] = {"weapons": ["minecraft:diamond_sword", "minecraft:air", "minecraft:air", "minecraft:air"],
+                                 "selected": 0, "offhand": "minecraft:air", "arrows": 0}
+        kit = {"slots": ["sword", "empty", "empty", "blocks"],
+               "blocks": 64, "golden_apples": 0}
+        bridge = {"mode": {"name": "bridge", "version": 1},
+                  "goals": [{"min": [-2, 1, -11], "max": [2, 3, -10]},
+                            {"min": [-2, 1, 10], "max": [2, 3, 11]}],
+                  "void_y": -3, "match": {"goals_to_win": 3, "max_ticks": 1200, "cage_ticks": 0,
+                                           "persist_blocks_on_goal": True, "arrow_refill_ticks": 0},
+                  "task_rewards": {"score": 1, "win": 5, "loss": -5}, "kits": [kit, deepcopy(kit)],
+                  "building": {"zones": [{"min": [-3, 0, -9], "max": [4, 5, 10]}],
+                               "block_range": 4.5, "entity_range": 3.0, "hardness": 0.8,
+                               "mining_speed": 1.0, "correct_tool": True}}
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane", "options": {
+            "jump": True, "sprint": True, "place_blocks": True, "block_slot": 3,
+            "attack_nearby": True, "sword_slot": 0}}
+        attack_column = contract["action_names"].index("attack")
+        use_column = contract["action_names"].index("use_item")
+        health_column = next(index for index, item in enumerate(contract["observations"])
+                     if item["feature"] == "opponent.health_fraction")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "combat.json"
+            for seat in (0, 1):
+                with self.subTest(seat=seat):
+                    scene["players"][seat]["position"][0] = 0
+                    scene["players"][1 - seat]["position"][0] = 0.3
+                    path.write_text(json.dumps(scene), encoding="utf-8")
+                    controller = create_controller(definition, contract, 1)
+                    target = StationaryTargetController(contract, 1)
+                    with Environment(1, "cpu", path, os.environ["MCSIM_TEST_CPU_LIBRARY"],
+                                     max_ticks=1200, seed=42, contract=contract, bridge=bridge) as environment:
+                        current = environment.observe()
+                        hits = 0
+                        placing = 0
+                        for _ in range(80):
+                            actions = np.empty((1, 2, len(contract["actions"])), dtype=np.int64)
+                            actions[:, seat] = controller.act(current[:, seat])
+                            actions[:, 1 - seat] = target.act(current[:, 1 - seat])
+                            hits += int(actions[0, seat, attack_column] == 1)
+                            placing += int(actions[0, seat, use_column] == 1)
+                            current, _, terminated, truncated = environment.step(actions)
+                            health = current[0, seat, health_column]
+                            if health < 1:
+                                break
+                            self.assertFalse(terminated[0] or truncated[0])
+                        self.assertGreater(hits, 0)
+                        self.assertGreater(placing, 0)
+                        self.assertLess(health, 1)
+                        self.assertLess(abs(environment.replay_frame()["actors"][seat]["position"][0]), 0.05)
 
     @unittest.skipUnless(os.environ.get("MCSIM_TEST_CPU_LIBRARY"), "MCSIM_TEST_CPU_LIBRARY not set")
     def test_bridge_fixed_lane_native_scores_both_seats(self):

@@ -1,0 +1,104 @@
+{
+  "format": "minecraft_sim_training_plan",
+  "version": 2,
+  "name": "HBridge1.1",
+  "seed": 42,
+  "policy": "../../policies/bridge/building-items.json",
+  "environment": "../../environments/colten/hbridge1-clear.json",
+  "learner": {"hidden_dim": 128, "lr": 0.0003, "epochs": 2, "minibatch_size": 4096},
+  "bridge_observation": {
+    "format": "minecraft_sim_bridge_observation", "version": 3,
+    "native_capabilities": {"bridge_host_batch_version": 2, "bridge_local_voxels_version": 1, "actor_task_state_version": 1},
+    "voxel_shape": [5, 9, 9], "voxel_dtype": "uint8", "voxel_categories": 5,
+    "match_features": ["own_score", "opponent_score", "match_remaining", "cage_remaining",
+      "own_blocks", "own_golden_apples", "own_arrows", "own_refill_progress", "refill_enabled", "own_selected_slot",
+      "own_eating_progress", "own_mining_progress", "objective_yaw_error", "objective_pitch_error", "objective_distance",
+      "own_use_cooldown", "own_mining_cooldown"],
+    "match_scales": ["goals_to_win", "goals_to_win", "max_ticks", "max(1,cage_ticks)", "64", "64", "64",
+      "max(1,arrow_refill_ticks)", "1", "8", "32_ticks", "1", "180_degrees", "90_degrees", "50_blocks_clipped",
+      "4_ticks", "5_ticks"],
+    "voxel_perspective": "actor_feet_yaw_v1", "sampling": "current_state",
+    "model": "bridge_voxel_actor_critic_v2"
+  },
+  "opponents": {
+    "target": {"type": "scripted", "controller": "stationary_target"},
+    "walking-builder": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true, "place_blocks": true, "block_slot": 3}},
+    "running-builder": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true, "sprint": true, "place_blocks": true, "block_slot": 3}},
+    "attacking-builder": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": true, "sprint": true, "place_blocks": true, "block_slot": 3, "attack_nearby": true, "sword_slot": 0}},
+    "past-self": {"type": "frozen_self_play", "every_updates": 20}
+  },
+  "mixtures": {
+    "target": [{"id": "target", "weight": 1}],
+    "walking-builder": [{"id": "walking-builder", "weight": 1}],
+    "running-builder": [{"id": "running-builder", "weight": 1}],
+    "attacking-builder": [{"id": "attacking-builder", "weight": 1}],
+    "builders": [{"id": "walking-builder", "weight": 1}, {"id": "running-builder", "weight": 1}],
+    "final": [{"id": "past-self", "weight": 1}, {"id": "running-builder", "weight": 1}, {"id": "attacking-builder", "weight": 1}]
+  },
+  "stages": [
+    {
+      "name": "clear-crossing", "opponents": "target",
+      "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
+      "evaluations": {"clear-crossing": {"every_updates": 20, "worlds": 64, "episodes": 64, "seed": 1729}},
+      "advance": {"all": [{"updates": 40},
+        {"evaluation": {"suite": "clear-crossing", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "clear-crossing", "on_completion": true}]
+    },
+    {
+      "name": "simple-crossing", "environment": "../../environments/colten/hbridge1.1-simple.json",
+      "opponents": "target", "controls": {"fixed": {"sneak": false, "weapon": 0, "use_item": false}},
+      "evaluations": {"simple-crossing": {"every_updates": 20, "worlds": 64, "episodes": 64, "seed": 2718}},
+      "advance": {"all": [{"updates": 80},
+        {"evaluation": {"suite": "simple-crossing", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "simple-crossing", "on_completion": true}]
+    },
+    {
+      "name": "walking-builder", "environment": "../../environments/colten/hbridge1-obstacles.json",
+      "opponents": "walking-builder", "controls": {"fixed": {}},
+      "task_override": {"rewards": {"doing_damage": 1, "win_speed": 0.1, "episode_timeout": -0.1}},
+      "evaluations": {
+        "walking-target": {"overrides": {"opponents": "target"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 3141},
+        "walking-builder": {"every_updates": 20, "worlds": 64, "episodes": 64, "seed": 1618}
+      },
+      "advance": {"all": [{"updates": 80},
+        {"evaluation": {"suite": "walking-target", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "walking-builder", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "walking-builder", "on_completion": true}]
+    },
+    {
+      "name": "mixed-builders", "environment": "../../environments/colten/hbridge1-obstacles.json",
+      "opponents": "builders", "controls": {"fixed": {}},
+      "task_override": {"rewards": {"doing_damage": 1, "win_speed": 0.1, "episode_timeout": -0.1}},
+      "evaluations": {
+        "builders-target": {"overrides": {"opponents": "target"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 3141},
+        "builders-walking": {"overrides": {"opponents": "walking-builder"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 1618},
+        "builders-running": {"overrides": {"opponents": "running-builder"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 5772}
+      },
+      "advance": {"all": [{"updates": 80},
+        {"evaluation": {"suite": "builders-target", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "builders-walking", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "builders-running", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "mixed-builders", "on_completion": true}]
+    },
+    {
+      "name": "default-self-play", "environment": "../../environments/colten/hbridge1-clear.json",
+      "opponents": "final", "controls": {"fixed": {}},
+      "task_override": {"rewards": {"doing_damage": 1, "win_speed": 0.1, "episode_timeout": -0.1}},
+      "evaluations": {
+        "default-target": {"overrides": {"opponents": "target"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 3141},
+        "default-runner": {"overrides": {"opponents": "running-builder"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 5772},
+        "default-attacker": {"overrides": {"opponents": "attacking-builder"}, "every_updates": 20, "worlds": 64, "episodes": 64, "seed": 7772},
+        "holdout-hard-target": {"overrides": {"opponents": "target", "environment": "../../environments/colten/hbridge1-obstacles.json"}, "every_updates": 100, "worlds": 64, "episodes": 64, "seed": 44722},
+        "holdout-hard-runner": {"overrides": {"opponents": "running-builder", "environment": "../../environments/colten/hbridge1-obstacles.json"}, "every_updates": 100, "worlds": 64, "episodes": 64, "seed": 49772}
+      },
+      "advance": {"all": [{"updates": 600},
+        {"evaluation": {"suite": "default-target", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "default-runner", "metric": "min_seat_win_rate", "at_least": 0.5}},
+        {"evaluation": {"suite": "default-attacker", "metric": "min_seat_win_rate", "at_least": 0.5}}]},
+      "snapshots": [{"name": "default-100", "at_updates": 100},
+                    {"name": "default-300", "at_updates": 300},
+                    {"name": "default-600", "at_updates": 600},
+                    {"name": "hbridge1-1-complete", "on_completion": true}]
+    }
+  ]
+}

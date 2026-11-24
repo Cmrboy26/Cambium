@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Locale;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -14,6 +15,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -42,6 +44,7 @@ final class LiveBridge implements LiveSession {
 	private final String deploymentSummary;
 	private BridgeMatch match;
 	private BridgeWorld world;
+	private Map<Integer, BlockState> editorChanges = Map.of();
 	private int[] requestedSeats;
 	private int humanSlot = -1;
 	private ParticipantState savedHuman;
@@ -75,6 +78,11 @@ final class LiveBridge implements LiveSession {
 	@Override public void reset() {
 		cancelForLifecycle();
 		match = policy.newMatch(session.origin);
+		if (world != null) {
+			world.verify();
+			editorChanges = world.edits();
+			world.restoreBase();
+		}
 		world = null;
 		lockedPositions = null;
 		humanMining = null;
@@ -88,7 +96,7 @@ final class LiveBridge implements LiveSession {
 	@Override public void afterEnvironmentBuilt() {
 		JsonObject bridge = session.trace.environment.definition.getAsJsonObject("experimental_bridge");
 		Map<Integer, Integer> initial = policy.initialTerrain(BridgeTerrainGenerator.initialPlayerState(1 + episodes++ * 1000033L));
-		world = new BridgeWorld(session, new BridgeArena(session.trace.environment, bridge.getAsJsonObject("building"), initial));
+		world = new BridgeWorld(session, new BridgeArena(session.trace.environment, bridge.getAsJsonObject("building"), initial), editorChanges);
 	}
 
 	@Override public void afterActorSpawned(int index) {
@@ -168,7 +176,10 @@ final class LiveBridge implements LiveSession {
 			int current = arrows(fighters[actor]);
 			BridgeMatch.Refill next = BridgeMatch.refill(arrowsBefore[actor], current, refill[actor], refillTicks);
 			refill[actor] = next.elapsed();
-			if (next.arrows() != current) fighters[actor].getInventory().setItem(9, new ItemStack(Items.ARROW, next.arrows()));
+			if (next.arrows() != current) {
+				fighters[actor].getInventory().setItem(9, new ItemStack(Items.ARROW, next.arrows()));
+				fighters[actor].inventoryMenu.broadcastChanges();
+			}
 			arrowsBefore[actor] = next.arrows();
 		}
 		BridgeMatch.Player[] players = new BridgeMatch.Player[2];
@@ -262,16 +273,30 @@ final class LiveBridge implements LiveSession {
 		if (world.mine(humanSlot, humanMining, player.onGround())) humanMining = null;
 	}
 	boolean humanPlace(ServerPlayer player, InteractionHand hand, BlockHitResult requested) {
-		if (locked() || hand != InteractionHand.MAIN_HAND || useDelay[humanSlot] > 0
-				|| !kits[humanSlot].slot(player.getInventory().getSelectedSlot()).equals("blocks")) return false;
+		if (hand != InteractionHand.MAIN_HAND || !kits[humanSlot].slot(player.getInventory().getSelectedSlot()).equals("blocks")) return false;
+		if (locked()) {
+			player.sendSystemMessage(Component.literal("Cannot place blocks while the match is paused or caged."), true);
+			return false;
+		}
+		double range = session.trace.environment.definition.getAsJsonObject("experimental_bridge")
+				.getAsJsonObject("building").get("block_range").getAsDouble();
+		if (!humanPlacementWithinReach(player.getEyePosition(), requested, range)) {
+			player.sendSystemMessage(Component.literal("Block is out of Bridge placement range."), true);
+			return false;
+		}
+		if (!world.place(humanSlot, requested.getBlockPos(), requested.getBlockPos().relative(requested.getDirection()),
+				player.getMainHandItem().getCount(), new AABB[]{fighters[0].getBoundingBox(), fighters[1].getBoundingBox()})) {
+			player.sendSystemMessage(Component.literal("Cannot place: outside build zone, occupied, or too close to a fighter."), true);
+			return false;
+		}
 		useDelay[humanSlot] = 4;
-		BlockHitResult target = targetBlock(player, fighters[1 - humanSlot]);
-		if (target == null || !target.getBlockPos().equals(requested.getBlockPos()) || target.getDirection() != requested.getDirection()) return false;
-		if (!world.place(humanSlot, target.getBlockPos(), target.getBlockPos().relative(target.getDirection()),
-				player.getMainHandItem().getCount(), new AABB[]{fighters[0].getBoundingBox(), fighters[1].getBoundingBox()})) return false;
 		player.getMainHandItem().shrink(1);
 		player.inventoryMenu.broadcastChanges();
 		return true;
+	}
+	static boolean humanPlacementWithinReach(Vec3 eye, BlockHitResult requested, double range) {
+		return eye != null && requested != null && Double.isFinite(range) && range > 0
+				&& eye.distanceToSqr(requested.getLocation()) < range * range;
 	}
 	boolean humanUseAllowed(ServerPlayer player, InteractionHand hand) {
 		if (locked() || hand != InteractionHand.MAIN_HAND) return false;
@@ -324,6 +349,9 @@ final class LiveBridge implements LiveSession {
 
 	private static int count(ServerPlayer player, int slot) { return slot < 0 ? 0 : player.getInventory().getItem(slot).getCount(); }
 	private static int arrows(ServerPlayer player) { return player.getInventory().getItem(9).is(Items.ARROW) ? player.getInventory().getItem(9).getCount() : 0; }
+	static String arrowStatus(int arrows, int elapsed, int delay) {
+		return arrows > 0 || delay == 0 ? "Arrows " + arrows : "Arrow " + DuelHud.time(delay - elapsed);
+	}
 	private void lock(ServerPlayer player, Vec3 position) {
 		player.stopUsingItem();
 		player.setDeltaMovement(Vec3.ZERO);
@@ -344,8 +372,8 @@ final class LiveBridge implements LiveSession {
 		var lines = new ArrayList<String>();
 		lines.add(status());
 		DuelHud.publishMatch(new DuelHud.Match("LIVE BRIDGE", state, "Arena", match.ticks(), maxTicks, 0, match.score(0), match.score(1), 0, latency),
-				DuelHud.fighter(fighters[0], humanSlot == 0 ? "A (you)" : "A", ""),
-				DuelHud.fighter(fighters[1], humanSlot == 1 ? "B (you)" : "B", ""), lines);
+				DuelHud.fighter(fighters[0], humanSlot == 0 ? "A (you)" : "A", arrowStatus(arrows(fighters[0]), refill[0], refillTicks)),
+				DuelHud.fighter(fighters[1], humanSlot == 1 ? "B (you)" : "B", arrowStatus(arrows(fighters[1]), refill[1], refillTicks)), lines);
 	}
 	@Override public void spawnHuman() { if (humanSlot >= 0) fighters[humanSlot] = LiveDuel.spawnHuman(session, humanSlot); }
 	@Override public boolean isHumanSlot(int index) { return index == humanSlot; }
@@ -390,5 +418,5 @@ final class LiveBridge implements LiveSession {
 				humanSlot < 0 ? "bots" : "you=" + (humanSlot + 1), latency);
 	}
 	@Override public String deploymentSummary() { return deploymentSummary; }
-	@Override public void close() { cancelForLifecycle(); policy.close(); restoreHuman(); }
+	@Override public void close() { cancelForLifecycle(); if (world != null) world.restoreBase(); policy.close(); restoreHuman(); }
 }

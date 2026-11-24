@@ -104,9 +104,11 @@ kits, and match rules; both checkpoints must use matching policy and Bridge
 observation layouts. Ordinary Arena and World modes use the scalar adapter.
 `/simduel join` and `/simduel join 2` take either seat; `/simduel leave` restores
 the participant and returns to bots. The usual pause, resume, reset, status and
-stop commands apply. Non-participants cannot hit the fighters or place or break
-blocks in the Bridge arena; joined participants can fight and build under the
-match rules. Bridge requires its checkpoint arena; existing-world mode
+stop commands apply. Non-participants can place and break blocks in the arena,
+but cannot hit the fighters. Their edits persist across match resets and are
+restored when the session stops; block entities and fluids are unsupported.
+Joined participants fight and build under the match rules. The HUD shows each
+fighter's arrows and refill countdown. Bridge requires its checkpoint arena; existing-world mode
 does not accept its protocol. Inference is asynchronous, and repeated stale or
 failed requests pause the match. Normal cleanup restores the snapshotted arena
 and participant state, but crashes and external world side effects are not a

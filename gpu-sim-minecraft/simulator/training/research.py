@@ -589,7 +589,7 @@ class ResidentFixedLane:
         self.neutral_movement = movement_choices.index("neutral")
         self.neutral = torch.as_tensor(controller._neutral, device=device)
         self.enabled = [(controller._heads[name][0], controller._heads[name][1].index(True))
-                        for name in ("jump", "sneak") if getattr(controller, name)]
+                        for name in ("jump", "sprint", "sneak") if getattr(controller, name)]
         self.placing = controller.place_blocks
         if self.placing:
             self.pitch_feature, pitch_descriptor = controller._features["self.pitch_fraction"]
@@ -600,9 +600,24 @@ class ResidentFixedLane:
             self.block_choice = weapon_choices.index(controller.block_slot)
             self.use_column, use_choices = controller._heads["use_item"]
             self.use_choice = use_choices.index(True)
+        self.attacking = controller.attack_nearby
+        if self.attacking:
+            names = ("opponent.alive", "relative.x", "relative.z", "target.distance_fraction",
+                     "target.yaw_error", "target.pitch_error", "self.weapon_slot")
+            self.combat_features = {name: (controller._features[name][0], controller._features[name][1]["scale"])
+                                    for name in names}
+            self.sword_slot = controller.sword_slot
+            self.sword_choice = weapon_choices.index(controller.sword_slot)
+            self.attack_column, attack_choices = controller._heads["attack"]
+            self.attack_choice = attack_choices.index(True)
+            self.combat_false = [(controller._heads[name][0], controller._heads[name][1].index(False))
+                                 for name in ("jump", "sprint", "use_item") if name in controller._heads]
+            self.attack_cooldowns = torch.zeros(controller.count, dtype=torch.long, device=device)
 
     def reset(self, mask):
         self.directions = torch.where(mask, -1, self.directions)
+        if self.attacking:
+            self.attack_cooldowns = torch.where(mask, 0, self.attack_cooldowns)
 
     def act(self, observations, selected):
         yaw = torch.remainder(observations[:, self.feature].to(torch.float64) / self.scale * 180 + 180, 360) - 180
@@ -622,6 +637,28 @@ class ResidentFixedLane:
             actions[:, self.pitch_column] = (90 - pitch.unsqueeze(1) - self.pitch_choices).abs().argmin(dim=1)
             actions[:, self.weapon_column] = self.block_choice
             actions[:, self.use_column] = self.use_choice
+        if self.attacking:
+            features = {name: observations[:, index].to(torch.float64) / scale
+                        for name, (index, scale) in self.combat_features.items()}
+            distance = features["target.distance_fraction"] * 10
+            forward = features["relative.z"] * torch.where(self.directions == 0, 1, -1)
+            nearby = ((features["opponent.alive"] >= 0.5) & (forward > 0)
+                      & (features["relative.x"].abs() <= 0.15) & (distance <= 4))
+            yaw_error = features["target.yaw_error"] * 180
+            pitch_error = features["target.pitch_error"] * 90
+            for column, choices, aim_error in ((self.yaw_column, self.yaw_choices, yaw_error),
+                                                (self.pitch_column, self.pitch_choices, pitch_error)):
+                aim = (aim_error.unsqueeze(1) - choices).abs().argmin(dim=1)
+                actions[:, column] = torch.where(nearby, aim, actions[:, column])
+            actions[:, self.movement_column] = torch.where(nearby, self.neutral_movement, actions[:, self.movement_column])
+            for column, choice in self.combat_false:
+                actions[:, column] = torch.where(nearby, choice, actions[:, column])
+            actions[:, self.weapon_column] = torch.where(nearby, self.sword_choice, self.block_choice)
+            attack = (nearby & (distance <= 3) & (yaw_error.abs() <= 5) & (pitch_error.abs() <= 5)
+                      & (features["self.weapon_slot"] == self.sword_slot) & (self.attack_cooldowns == 0))
+            actions[:, self.attack_column] = torch.where(attack, self.attack_choice, actions[:, self.attack_column])
+            next_cooldowns = torch.where(attack, 12, (self.attack_cooldowns - 1).clamp(min=0))
+            self.attack_cooldowns = torch.where(selected, next_cooldowns, self.attack_cooldowns)
         return actions, valid
 
 

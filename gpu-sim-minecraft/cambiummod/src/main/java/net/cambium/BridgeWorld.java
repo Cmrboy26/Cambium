@@ -1,5 +1,6 @@
 package net.cambium;
 
+import java.util.HashMap;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -12,22 +13,33 @@ import net.minecraft.world.phys.AABB;
 final class BridgeWorld {
 	private final SimulationReplay.Session session;
 	private final BridgeArena arena;
+	private final Map<Integer, BlockState> edits = new HashMap<>();
 	private final BlockState[] states = {
 			Blocks.AIR.defaultBlockState(),
 			BuiltInRegistries.BLOCK.getValue(Identifier.parse("minecraft:blue_wool")).defaultBlockState(),
 			BuiltInRegistries.BLOCK.getValue(Identifier.parse("minecraft:red_wool")).defaultBlockState()
 	};
 
-	BridgeWorld(SimulationReplay.Session session, BridgeArena arena) {
-		if (session == null || arena == null || session.originalBlocks == null || !session.buildArena) {
+	BridgeWorld(SimulationReplay.Session session, BridgeArena arena, Map<Integer, BlockState> previousEdits) {
+		if (session == null || arena == null || previousEdits == null || session.originalBlocks == null || !session.buildArena) {
 			throw new IllegalStateException("Bridge requires a snapshotted checkpoint arena");
 		}
 		this.session = session;
 		this.arena = arena;
 		for (var entry : arena.overlay().entrySet()) write(entry.getKey(), entry.getValue());
+		for (var entry : previousEdits.entrySet()) {
+			BlockPos position = session.environmentPosition(entry.getKey());
+			if (!session.level.hasChunkAt(position) || session.level.getBlockEntity(position) != null) {
+				throw new IllegalStateException("Bridge terrain cell is unavailable: " + position);
+			}
+			rememberEdit(entry.getKey(), entry.getValue(), position);
+			session.level.setBlock(position, entry.getValue(), Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+		}
 	}
 
 	Map<Integer, Integer> overlay() { return arena.overlay(); }
+	Map<Integer, BlockState> edits() { return Map.copyOf(edits); }
+	void restoreBase() { arena.restoreBase(); }
 	float miningProgress(int actor) { return arena.miningProgress(actor); }
 	int miningDelay(int actor) { return arena.miningDelay(actor); }
 	void cancelMining(int actor) { arena.cancelMining(actor); }
@@ -36,13 +48,23 @@ final class BridgeWorld {
 		Map<Integer, Integer> overlay = arena.overlay();
 		for (int index = 0; index < session.trace.environment.cells.length; index++) {
 			BlockPos position = session.environmentPosition(index);
-			BlockState expected = session.trace.environment.cells[index] == 1 ? Blocks.STONE.defaultBlockState()
-					: states[overlay.getOrDefault(index, 0)];
-			if (!session.level.hasChunkAt(position) || session.level.getBlockEntity(position) != null
-					|| !session.level.getBlockState(position).equals(expected)) {
-				throw new IllegalStateException("Bridge arena was unloaded or changed outside the match at " + position);
+			int owner = overlay.getOrDefault(index, 0);
+			BlockState expected = owner != 0 ? states[owner] : edits.getOrDefault(index,
+					session.trace.environment.cells[index] == 1 ? Blocks.STONE.defaultBlockState() : states[0]);
+			if (!session.level.hasChunkAt(position) || session.level.getBlockEntity(position) != null) {
+				throw new IllegalStateException("Bridge arena cell is unloaded or contains a block entity at " + position);
 			}
+			BlockState actual = session.level.getBlockState(position);
+			if (!actual.equals(expected)) rememberEdit(index, actual, position);
 		}
+	}
+
+	private void rememberEdit(int index, BlockState state, BlockPos position) {
+		if (state.hasBlockEntity() || !state.getFluidState().isEmpty()) {
+			throw new IllegalStateException("Bridge arena edits cannot contain block entities or fluids at " + position);
+		}
+		arena.editBase(index, !state.getCollisionShape(session.level, position).isEmpty());
+		edits.put(index, state);
 	}
 
 	boolean place(int actor, BlockPos target, BlockPos destination, int remaining, AABB[] worldPlayers) {

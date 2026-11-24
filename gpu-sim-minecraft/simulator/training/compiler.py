@@ -330,6 +330,10 @@ def _validate_bridge_opponents(policy, scenario, opponents):
                         controller.block_slot >= len(kit["slots"])
                         or kit["slots"][controller.block_slot] != "blocks" or kit["blocks"] < 1 for kit in kits)):
                     raise ValueError("bridge_fixed_lane block placement requires blocks in both configured kit slots")
+            if controller.attack_nearby and (len(kits) != 2 or any(
+                    controller.sword_slot >= len(kit["slots"]) or kit["slots"][controller.sword_slot] != "sword"
+                    for kit in kits)):
+                raise ValueError("bridge_fixed_lane attack_nearby requires swords in both configured kit slots")
             goals = scenario["bridge"]["goals"]
             for player, spawn in enumerate(players):
                 yaw = (spawn.get("yaw", 0) + 180) % 360 - 180

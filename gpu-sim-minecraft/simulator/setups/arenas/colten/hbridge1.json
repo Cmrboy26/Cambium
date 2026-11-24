@@ -1,0 +1,24 @@
+{
+  "format": "minecraft_sim_arena",
+  "version": 1,
+  "minecraft": "26.3",
+  "name": "hbridge1",
+  "requires": ["movement", "melee"],
+  "rules": {"simulate_food": false, "natural_regeneration": false},
+  "bounds": {"min": [-5, -11, -31], "size": [11, 22, 63]},
+  "blocks": [
+    {"from": [-3, 4, -30], "to": [3, 4, -24], "block": "minecraft:stone"},
+    {"from": [-3, 0, -30], "to": [-2, 0, -24], "block": "minecraft:stone"},
+    {"from": [2, 0, -30], "to": [3, 0, -24], "block": "minecraft:stone"},
+    {"from": [-1, 0, -30], "to": [1, 0, -29], "block": "minecraft:stone"},
+    {"from": [-1, 0, -25], "to": [1, 0, -24], "block": "minecraft:stone"},
+    {"from": [-5, 0, -23], "to": [5, 0, -21], "block": "minecraft:stone"},
+    {"from": [0, -8, -20], "to": [0, 0, 20], "block": "minecraft:stone"},
+    {"from": [-5, 0, 21], "to": [5, 0, 23], "block": "minecraft:stone"},
+    {"from": [-3, 0, 24], "to": [-2, 0, 30], "block": "minecraft:stone"},
+    {"from": [2, 0, 24], "to": [3, 0, 30], "block": "minecraft:stone"},
+    {"from": [-1, 0, 24], "to": [1, 0, 25], "block": "minecraft:stone"},
+    {"from": [-1, 0, 29], "to": [1, 0, 30], "block": "minecraft:stone"},
+    {"from": [-3, 4, 24], "to": [3, 4, 30], "block": "minecraft:stone"}
+  ]
+}

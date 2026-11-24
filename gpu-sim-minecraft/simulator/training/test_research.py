@@ -2198,6 +2198,45 @@ class ResidentPolicyChecks(unittest.TestCase):
 
 
 class ResidentOpponentChecks(unittest.TestCase):
+    def test_resident_attacking_builder_matches_host(self):
+        from simulator.training.controllers import create_controller
+        from simulator.training.research import ResidentFixedLane
+
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": name} for name in (
+                "self.yaw_fraction", "self.pitch_fraction", "opponent.alive", "relative.x", "relative.z",
+                "target.distance_fraction", "target.yaw_error", "target.pitch_error", "self.weapon_slot")],
+            "actions": [{"name": "movement", "values": ["forward", "neutral"]},
+                        {"name": "yaw", "values": [2, 0, -2, 20, -20]},
+                        {"name": "pitch", "values": [10, 0, -10]},
+                        {"name": "jump", "values": [True, False]}, {"name": "sprint", "values": [True, False]},
+                        {"name": "attack", "values": [True, False]}, {"name": "weapon", "values": [3, 0]},
+                        {"name": "use_item", "values": [True, False]}]})
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane", "options": {
+            "jump": True, "sprint": True, "place_blocks": True, "block_slot": 3,
+            "attack_nearby": True, "sword_slot": 0}}
+        controller = create_controller(definition, contract, 2)
+        resident = ResidentFixedLane(controller, "cpu")
+        values = np.asarray([[0, 1, 1, 0, 0.2, 0.2, 0, -1, 3],
+                             [1, 0, 1, 0, -0.2, 0.2, 0, 0, 0]], dtype=np.float32)
+        for tick in range(30):
+            if tick == 1:
+                values[0, 1], values[0, 6], values[0, 7], values[0, 8] = 0, 0, 0, 0
+            if tick == 18:
+                values[:, 4] *= -1
+            if tick == 22:
+                mask = np.array([True, False])
+                controller.reset(mask)
+                resident.reset(torch.from_numpy(mask))
+            selected = np.array([True, tick % 3 != 0])
+            indices = np.flatnonzero(selected)
+            host = controller.act(values[selected], indices)
+            actual, valid = resident.act(torch.from_numpy(values), torch.from_numpy(selected))
+            self.assertTrue(valid[selected].all())
+            np.testing.assert_array_equal(actual.numpy()[selected], host)
+            np.testing.assert_array_equal(resident.attack_cooldowns.numpy(), controller._attack_cooldowns)
+
     def test_resident_block_placing_runner_matches_host(self):
         from simulator.training.compiler import _validate_bridge_opponents
         from simulator.training.controllers import create_controller
@@ -2232,6 +2271,32 @@ class ResidentOpponentChecks(unittest.TestCase):
         _validate_bridge_opponents(contract, scenario, {"builder": definition})
         scenario["bridge"]["kits"][1]["slots"][3] = "empty"
         with self.assertRaisesRegex(ValueError, "blocks in both"):
+            _validate_bridge_opponents(contract, scenario, {"builder": definition})
+
+    def test_attacking_builder_requires_swords_in_both_kits(self):
+        from simulator.training.compiler import _validate_bridge_opponents
+
+        contract = validate_contract({
+            "format": "minecraft_sim_policy", "version": 1, "minecraft": "26.3", "ticks_per_action": 1,
+            "observations": [{"feature": name} for name in (
+                "self.yaw_fraction", "self.pitch_fraction", "opponent.alive", "relative.x", "relative.z",
+                "target.distance_fraction", "target.yaw_error", "target.pitch_error", "self.weapon_slot")],
+            "actions": [{"name": "movement", "values": ["neutral", "forward"]},
+                        {"name": "yaw", "values": [-2, 0, 2]}, {"name": "pitch", "values": [-10, 0, 10]},
+                        {"name": "attack", "values": [False, True]}, {"name": "weapon", "values": [0, 3]},
+                        {"name": "use_item", "values": [False, True]}]})
+        definition = {"type": "scripted", "controller": "bridge_fixed_lane", "options": {
+            "place_blocks": True, "block_slot": 3, "attack_nearby": True, "sword_slot": 0}}
+        kit = {"slots": ["sword", "empty", "empty", "blocks"], "blocks": 64}
+        scenario = {"bridge": {"building": {}, "kits": [deepcopy(kit), deepcopy(kit)],
+                               "goals": [{"min": [-1, 1, -4], "max": [1, 3, -3]},
+                                         {"min": [-1, 1, 3], "max": [1, 3, 4]}]},
+                    "arenas": [{"environment": {"players": [
+                        {"position": [0, 1, -2], "yaw": 0, "loadout": {"selected": 0}},
+                        {"position": [0, 1, 2], "yaw": 180, "loadout": {"selected": 0}}]}}]}
+        _validate_bridge_opponents(contract, scenario, {"builder": definition})
+        scenario["bridge"]["kits"][1]["slots"][0] = "empty"
+        with self.assertRaisesRegex(ValueError, "swords in both"):
             _validate_bridge_opponents(contract, scenario, {"builder": definition})
 
     def test_resident_evaluation_eligibility_uses_suite_scenario_and_opponents(self):
@@ -2547,11 +2612,12 @@ class ResidentOpponentChecks(unittest.TestCase):
             "actions": [{"name": "yaw", "values": [10, 0, -10, 20, -20, 2, -2]},
                         {"name": "movement", "values": ["forward", "neutral"]},
                         {"name": "jump", "values": [True, False]},
+                        {"name": "sprint", "values": [True, False]},
                         {"name": "sneak", "values": [True, False]}]})
         definitions = {
             "jump": {"type": "scripted", "controller": "bridge_fixed_lane", "options": {"jump": True}},
             "both": {"type": "scripted", "controller": "bridge_fixed_lane",
-                     "options": {"jump": True, "sneak": True}},
+                     "options": {"jump": True, "sprint": True, "sneak": True}},
         }
         pool = OpponentPool(definitions, contract, 4, "cpu", 17)
         pool.configure([{"id": name, "weight": 1} for name in definitions])

@@ -1,12 +1,10 @@
 package net.cambium.mixin;
 
 import net.cambium.BridgeInteractionBridge;
-import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
 import net.minecraft.network.protocol.game.ServerboundAttackPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
 import net.minecraft.network.protocol.game.ServerboundInteractPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
-import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
@@ -39,14 +37,6 @@ abstract class BridgePacketMixin {
 	private void cambium$inventory(ServerboundContainerClickPacket packet, CallbackInfo callback) {
 		if (cambium$serverThread() && BridgeInteractionBridge.participant(player)) {
 			player.containerMenu.sendAllDataToRemote();
-			callback.cancel();
-		}
-	}
-
-	@Inject(method = "handleSetCarriedItem", at = @At("HEAD"), cancellable = true)
-	private void cambium$slot(ServerboundSetCarriedItemPacket packet, CallbackInfo callback) {
-		if (cambium$serverThread() && BridgeInteractionBridge.locked(player)) {
-			player.connection.send(new ClientboundSetHeldSlotPacket(player.getInventory().getSelectedSlot()));
 			callback.cancel();
 		}
 	}

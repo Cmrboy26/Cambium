@@ -5,6 +5,7 @@ import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.phys.BlockHitResult;
 
 public final class BridgeInteractionBridge {
@@ -34,7 +35,7 @@ public final class BridgeInteractionBridge {
 			bridge.humanBreak(action, position);
 			return true;
 		}
-		return bridge.contains(position);
+		return false;
 	}
 	public static InteractionResult useBlock(ServerPlayer player, InteractionHand hand, BlockHitResult hit) {
 		LiveBridge bridge = active(player);
@@ -44,7 +45,12 @@ public final class BridgeInteractionBridge {
 			if (bridge.humanUseAllowed(player, hand)) return player.gameMode.useItem(player, player.level(), player.getItemInHand(hand), hand);
 			return InteractionResult.FAIL;
 		}
-		return bridge.contains(hit.getBlockPos()) || bridge.contains(hit.getBlockPos().relative(hit.getDirection())) ? InteractionResult.FAIL : null;
+		if (bridge.contains(hit.getBlockPos()) || bridge.contains(hit.getBlockPos().relative(hit.getDirection()))) {
+			var item = player.getItemInHand(hand).getItem();
+			if (item instanceof BlockItem block && block.getBlock().defaultBlockState().hasBlockEntity()) return InteractionResult.FAIL;
+			if (!player.getItemInHand(hand).isEmpty() && !(item instanceof BlockItem)) return InteractionResult.FAIL;
+		}
+		return null;
 	}
 	public static boolean useAllowed(ServerPlayer player, InteractionHand hand) {
 		LiveBridge bridge = active(player);

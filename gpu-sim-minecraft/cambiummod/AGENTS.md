@@ -116,6 +116,13 @@ Historical concrete loadouts with fewer slots remain supported.
 Arena validation and live restoration use the per-process terrain budget described
 in the [scenario contract](../docs/simulation_contract.md#design). Large arenas
 still need loaded chunks and can take substantial time to build and restore.
+Bridge observers can edit the active arena while the match runs or is paused;
+edits survive match resets but the pre-session world is restored on stop. Edits
+become protected base terrain in the bots' voxel observations, with nonempty
+collision shapes approximated as full solid blocks. Block entities and fluids
+remain unsupported. Human Bridge placement uses the clicked location and range;
+bot placement retains the simulator's use cooldown. The Bridge HUD shows each
+fighter's arrow count or refill countdown; zero refill ticks disables refills.
 
 Optional `/info.experiment` deployment metadata supplies experiment name,
 stage name/index, environment and arena names, `controllers=shared_learner`,
